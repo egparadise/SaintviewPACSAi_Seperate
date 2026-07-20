@@ -1,0 +1,21 @@
+# 시크릿 — API 키·운영 자격증명 (예시는 .env.example)
+backend/.env
+
+# 런타임 데이터
+backend/dev.db
+backend/storage/
+backend/cache/
+backend/backup/
+backend/**/__pycache__/
+backend/.pytest_cache/
+*.pyc
+
+# 프론트 산출물·의존성 (dist 는 릴리스 시 별도 첨부)
+frontend/node_modules/
+frontend/dist/
+frontend/certs/
+
+# 배포 런타임 아티팩트
+deploy/generated/
+deploy/orthanc-generated.json
+deploy/scp-policy.env

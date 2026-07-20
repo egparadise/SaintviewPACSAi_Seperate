@@ -1,0 +1,25 @@
+# Saintview PACS AI backend
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+alembic>=1.13
+pydantic>=2.6
+python-multipart>=0.0.9      # 파일 업로드
+PyJWT>=2.8                   # JWT 인증
+argon2-cffi>=23.1            # 비밀번호 해시 (보안 §8.2)
+python-dotenv>=1.0
+httpx>=0.27                  # Orthanc/외부 API 클라이언트
+psycopg2-binary>=2.9         # PostgreSQL (D-1)
+pgvector>=0.2                # 벡터 컬럼 (D-1)
+pydicom>=2.4                 # DICOM 파싱
+Pillow>=10.0                 # Local Server 렌더링(/api/local rendered — PNG 인코딩)
+pynetdicom>=2.0              # C-STORE (하네스)
+numpy>=1.26                  # 로컬 임베딩 폴백 (D-2)
+anthropic>=0.49              # Claude API (CLAUDE.md §4)
+pytest>=8.0
+reportlab>=4.0              # PDF 출력 (F-9/D-4)
+openpyxl>=3.1               # 사용량 통계 Excel(.xlsx) 내보내기 (/api/insights/stats.xlsx)
+
+# pytesseract>=0.3           # (선택) 번인 OCR 마스킹 — tesseract 바이너리 필요, 미설치 시 스트립 마스킹 폴백
+# faster-whisper>=1.0       # (선택) 음성판독 STT — Whisper 오픈소스 로컬 엔진 (설정>AI 정책 stt_engine=whisper_local)
+qrcode

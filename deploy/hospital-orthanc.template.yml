@@ -1,0 +1,34 @@
+# 병원별 Orthanc 컨테이너 템플릿 (레인 O)
+# POST /api/infra/hospitals/{hid}/provision 이 아래 자리표시자를 치환해
+# deploy/generated/hospital-h{hid}.yml 로 저장한 뒤
+# `docker compose -f <파일> -p saintview-h{hid} up -d` 로 기동한다.
+#
+# 치환 자리표시자(중괄호 2겹, HID/DICOM_PORT/WEB_PORT/VOLUME_DIR/ORTHANC_PASSWORD):
+#   HID              병원 id
+#   DICOM_PORT       호스트 DICOM(C-STORE) 포트 — 자동 할당(4300+hid)
+#   WEB_PORT         호스트 HTTP/DICOMweb 포트 — 자동 할당(8100+hid)
+#   VOLUME_DIR       병원별 스토리지(호스트 바인드 경로)
+#   ORTHANC_PASSWORD Orthanc 계정 비밀번호(env SAINTVIEW_ORTHANC_PASSWORD)
+services:
+  orthanc-h{{HID}}:
+    image: orthancteam/orthanc:24.10.1
+    container_name: saintview-orthanc-h{{HID}}
+    environment:
+      ORTHANC__NAME: "SaintviewOrthanc-H{{HID}}"
+      ORTHANC__DICOM_AET: "SAINTVIEW_H{{HID}}"
+      ORTHANC__DICOM_PORT: "4242"
+      ORTHANC__HTTP_PORT: "8042"
+      ORTHANC__REGISTERED_USERS: '{"saintview": "{{ORTHANC_PASSWORD}}"}'
+      # 병원별 컨테이너는 백엔드(httpx Basic 인증)만 접근 — 인증 기본 활성
+      ORTHANC__AUTHENTICATION_ENABLED: "true"
+      ORTHANC__DICOM_WEB__ENABLE: "true"
+      ORTHANC__DICOM_WEB__ROOT: "/dicom-web/"
+      ORTHANC__OVERWRITE_INSTANCES: "true"
+      # 문자셋 태그 없는 한국 DICOM을 EUC-KR(ISO_IR 149)로 해석 — 미설정 시 Latin1 로 한글 깨짐
+      ORTHANC__DEFAULT_ENCODING: "Korean"
+    ports:
+      - "{{WEB_PORT}}:8042"   # HTTP / DICOMweb
+      - "{{DICOM_PORT}}:4242" # DICOM C-STORE
+    volumes:
+      - "{{VOLUME_DIR}}:/var/lib/orthanc/db"
+    restart: unless-stopped

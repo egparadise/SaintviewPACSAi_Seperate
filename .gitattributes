@@ -1,0 +1,2 @@
+# cmd 파서는 LF 배치에서 오동작 — *.bat 는 항상 CRLF
+*.bat text eol=crlf

@@ -1,0 +1,163 @@
+/* Saintview PACS AI — 디자인 토큰 (UI_DESIGN 명세 §1.1) */
+:root {
+  /* 배경 3계층 */
+  --bg-canvas: #0b0c0e;
+  --bg-panel: #1c1f23;
+  --bg-elevated: #2a2e34;
+  --bg-hover: #353a41;
+
+  /* 텍스트 */
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0a6;
+  --text-disabled: #5f6368;
+
+  /* 액센트 */
+  --accent: #1e6fd9;
+  --accent-subtle: #173a63;
+
+  /* 상태 (워크리스트 STUDY STAT) */
+  --stat-received: #9aa0a6;
+  --stat-draft: #38bdf8;
+  --stat-reading: #fbbf24;
+  --stat-final: #22c55e;
+  --stat-emergency: #ef4444;
+
+  /* 주석/AI 의미론 */
+  --anno-measure: #ef4444;
+  --anno-roi: #22d3ee;
+  --anno-keyimage: #22c55e;
+  --ai: #a78bfa; /* AI 생성물 전용 — 다른 용도 사용 금지 (CLAUDE.md) */
+
+  --border: #383d44;
+  --radius: 4px;
+  --font:
+    "Pretendard", "Noto Sans KR", -apple-system, "Segoe UI", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+/* 고밀도 그리드 (§1.2) */
+.grid-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.grid-table th {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-align: left;
+  padding: 5px 8px;
+  position: sticky;
+  top: 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.grid-table td {
+  padding: 4px 8px;
+  height: 28px;
+  border-bottom: 1px solid #24282d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.grid-table tbody tr {
+  cursor: pointer;
+}
+.grid-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+.grid-table tbody tr.selected {
+  background: var(--accent-subtle);
+}
+.grid-table tbody tr.emergency {
+  box-shadow: inset 3px 0 0 var(--stat-emergency);
+}
+
+/* ── INFINITT(Infi) 스타일 그리드 — 시안 헤더, 청색 얼룩·선택, 촘촘한 행 ── */
+.grid-table.grid-infi { font-size: 12px; }
+.grid-table.grid-infi th {
+  background: linear-gradient(#243447, #1b2735);
+  color: #7dd3fc;
+  border-bottom: 1px solid #33506e;
+  padding: 4px 8px;
+}
+.grid-table.grid-infi td {
+  height: 24px;
+  padding: 2px 8px;
+  border-bottom: 1px solid #1a2432;
+}
+.grid-table.grid-infi tbody tr:nth-child(even) { background: rgba(56, 108, 173, 0.06); }
+.grid-table.grid-infi tbody tr:hover { background: rgba(56, 189, 248, 0.12); }
+.grid-table.grid-infi tbody tr.selected {
+  background: #2b4a6b;
+  box-shadow: inset 2px 0 0 #38bdf8;
+}
+.grid-table.grid-infi tbody tr.emergency { box-shadow: inset 3px 0 0 var(--stat-emergency); }
+
+/* 상태 배지 */
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+.badge.received { background: #3a3f46; color: var(--stat-received); }
+.badge.draft_ready { background: #0c3347; color: var(--stat-draft); }
+.badge.reading { background: #45350a; color: var(--stat-reading); }
+.badge.finalized { background: #0e3a1f; color: var(--stat-final); }
+.badge.critical { background: #4a1414; color: var(--stat-emergency); }
+.badge.ai { background: #2d2545; color: var(--ai); }
+
+/* 공통 컨트롤 */
+button {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  font-family: inherit;
+}
+button:hover { background: var(--bg-hover); }
+button.primary { background: var(--accent); border-color: var(--accent); }
+button.primary:hover { filter: brightness(1.15); }
+button:disabled { color: var(--text-disabled); cursor: default; }
+
+input, select {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+}
+input:focus, select:focus { outline: 1px solid var(--accent); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #3a3f46; border-radius: 5px; }
+::-webkit-scrollbar-track { background: var(--bg-panel); }
+
+/* SEARCH 실행 피드백 — 워크리스트 그리드 깜빡임 (A/B는 연속 실행 시 애니메이션 재시작 트릭용 동일 정의) */
+@keyframes wlSearchFlashA { from { opacity: 0.25; } to { opacity: 1; } }
+@keyframes wlSearchFlashB { from { opacity: 0.25; } to { opacity: 1; } }
