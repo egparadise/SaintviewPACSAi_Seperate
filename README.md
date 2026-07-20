@@ -24,8 +24,32 @@ start_viewer_suite.bat                  :: 원클릭 — docker + API(8010) + �
 ```
 
 - 접속: https://localhost:5180 (자체서명 인증서 — 최초 1회 [고급]→[계속])
-- 기본 계정: `admin / admin1234` (운영 전 반드시 변경)
 - DB 스키마는 백엔드 첫 기동 시 자동 생성(`init_db`), 또는 `cd backend && alembic upgrade head`
+
+### ⚠ 최초 1회 — 샘플 병원·계정 시드 (Client 로그인에 필수)
+
+5180 은 **Client 뷰어 로그인**(병원 ID + 개별 ID + PW)이며 **병원 소속 계정만** 허용된다
+(시스템 관리자 `admin` 은 Client 로그인 거부). 새 DB 에는 병원이 없으므로 시드를 먼저 실행:
+
+```bat
+cd backend
+set SAINTVIEW_DATABASE_URL=postgresql+psycopg2://saintview:saintview_dev@localhost:5434/saintview
+py -3.11 seed_sample.py
+```
+
+| 용도 | 병원 ID | 개별 ID | PW |
+|---|---|---|---|
+| Client 뷰어(판독의) | `SAMPLE01` | `sample_dr` | `sample1234` |
+| Client 뷰어(병원 관리자) | `SAMPLE01` | `sample_admin` | `sample1234` |
+| Client 뷰어(방사선사) | `SAMPLE01` | `sample_rt` | `sample1234` |
+
+운영 배포에서는 시드 대신 관리자 콘솔에서 실제 병원·계정을 등록한다:
+`frontend/.env` 의 `VITE_PORT_ADMIN`(기본 5181) 포트로 두 번째 인스턴스를 띄우면
+관리자 포털(`admin / admin1234` — 운영 전 반드시 변경)로 부팅된다.
+
+```bat
+cd frontend && npm run dev -- --host 0.0.0.0 --port 5181 --strictPort
+```
 
 ## 검사 넣어보기 (연동 테스트)
 
