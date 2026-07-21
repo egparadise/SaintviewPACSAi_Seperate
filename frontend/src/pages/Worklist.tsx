@@ -850,19 +850,26 @@ function ServerButtons({ mode, onMode }: {
 }
 
 /* ── 워크리스트 페이지 탭 바 (UBPACS-Z — 저장된 검색 정의를 페이지로, 최대 10) ── */
-function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, serverMode, onServerMode, extraTab }: {
+function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, serverMode, onServerMode, extraTab, viewerName }: {
   tabs: WorklistTab[]; activeId: string;
   onPick: (t: WorklistTab) => void; onAdd: () => void; onRemove: (id: string) => void;
   actions?: React.ReactNode;  // Local Server 왼쪽에 노출할 액션 버튼 그룹
   serverMode: "local" | "web" | null;              // 데이터 소스 모드 (레인 F — Worklist 소유)
   onServerMode: (m: "local" | "web") => void;
   extraTab?: React.ReactNode; // WORKLIST 탭들 옆 추가 탭 (관리자 EXAM CONTROL — 레인 F)
+  viewerName?: string;        // 선택 뷰어 이름(SaintView/I-View/T-View) — 탭 스트립 좌측에 표기
 }) {
   return (
     <div style={{
       display: "flex", gap: 2, padding: "4px 8px 0", alignItems: "flex-end",
       background: "var(--bg-canvas)", borderBottom: "1px solid var(--border)",
     }}>
+      {viewerName && (
+        <b title="선택된 뷰어(설정>환경) — 워크리스트·뷰어 스킨" style={{
+          fontSize: 13, letterSpacing: 0.6, color: "var(--accent)", padding: "4px 12px 6px 2px",
+          whiteSpace: "nowrap", alignSelf: "center",
+        }}>{viewerName}</b>
+      )}
       {tabs.map((t) => (
         <div key={t.id} onClick={() => onPick(t)} title={folderSummary(t.filter)}
              style={{
@@ -3235,6 +3242,7 @@ export function Worklist() {
       {/* UBPACS-Z: 워크리스트 페이지 탭 — 저장된 검색 정의 전환.
           우측(Local Server 왼쪽)에 액션 버튼 그룹 노출(요청) — Infi 모드는 아래 아이콘 툴바가 동일 기능이라 생략 */}
       <WorklistTabsBar tabs={tabs} activeId={examCtl ? "" : activeTabId}
+                       viewerName={svMode ? "SaintView" : infiMode ? "I-View" : "T-View"}
                        onPick={(t) => { setExamCtl(false); pickTab(t); }}
                        onAdd={() => { setExamCtl(false); void addTab(); }}
                        onRemove={(id) => void removeTab(id)}
