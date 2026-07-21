@@ -2662,7 +2662,7 @@ export function Worklist() {
     // Exam 탭 라벨(Viewer2D 형식과 동일 — 다른 모니터 창의 탭 표시에 사용)
     const d0 = cfg.detail;
     const tabLabel = `${d0.modality} ${d0.body_part || d0.patient_name} ${d0.study_date} #${d0.id}`;
-    return viewerMonitorPlan().then(({ slots, tabMonMap, tabBinding }) => {
+    return viewerMonitorPlan().then(async ({ slots, tabMonMap, tabBinding }) => {
       // 닫힌 창은 추적 맵에서 정리. 살아있는 창이 하나도 없으면 라운드로빈을 1번 모니터부터 재시작.
       for (const [nm, w] of [...openedViewerWindows]) {
         if (w.closed) openedViewerWindows.delete(nm);
@@ -2675,6 +2675,24 @@ export function Worklist() {
       // 최저번호 모니터=표준 "sv_viewer"(판독창 참조·재사용), 나머지=sv_viewer_slot{index} (모니터 정체성 기준 고정)
       const nameFor = (monitorIndex: number) =>
         monitorIndex === slots[0]?.index ? "sv_viewer" : `sv_viewer_slot${monitorIndex}`;
+
+      // ── 워크리스트 탭 → 모니터 배치 예외 (최우선) ──
+      // 검사를 연 순간의 활성 워크리스트 탭에 지정 모니터가 있으면, 뷰어 모니터 선택·멀티 여부와
+      // 무관하게 그 모니터에 직접 연다. (다중선택 일괄 오픈은 forceRoundRobin 으로 제외)
+      const activeTab = activeTabIdRef.current;
+      const ovMon = cfg.forceRoundRobin ? undefined
+        : tabMonMap.find((r) => r.tab && r.tab === activeTab)?.monitor;
+      if (ovMon != null) {
+        const feat = await screenFeatures([ovMon], "width=1500,height=920");   // 지정 모니터 실좌표(감지 가능 시)
+        const name = nameFor(ovMon);
+        postViewerAddTab(d0.id, d0.study_uid, tabLabel);   // 다른 열린 뷰어 창은 탭만 추가(리로드 없음)
+        const w = window.open(urlFor(ovMon), name, feat);
+        applyWindowBounds(w, feat);
+        if (w) { openedViewerWindows.set(name, w); w.focus(); }
+        else showToast("팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요", "error");
+        return;
+      }
+
       const multi = slots.length > 1 && slots[0].index >= 0;
       if (!multi) {
         // 단일/미감지: 재사용 창 "sv_viewer" 1개. 다중→단일 전환 시 이전 보조 창은 고아이므로 닫는다.
@@ -2688,17 +2706,10 @@ export function Worklist() {
         w?.focus();
         return;
       }
-      // 대상 모니터 결정 — 기본은 번호순 라운드로빈. 예외: 활성 워크리스트 탭→모니터 매핑이 있고
-      // 그 모니터가 선택 슬롯이면 거기로 오픈(카운터 미소모 → 일반 검사의 1,2,3 순서 보존).
-      // 다중선택 일괄 오픈(forceRoundRobin)은 예외를 무시하고 순수 1,2,3 순환.
+      // 대상 모니터 결정 — 번호순 라운드로빈(탭→모니터 예외는 위에서 이미 처리·return).
       if (openedViewerWindows.size === 0) viewerRoundRobin = 0;   // 전부 닫힘 → 1번부터
-      const activeTab = activeTabIdRef.current;
-      const overrideMon = cfg.forceRoundRobin ? undefined : tabMonMap.find((r) => r.tab && r.tab === activeTab)?.monitor;
-      let target = overrideMon != null ? slots.find((s) => s.index === overrideMon) : undefined;
-      if (!target) {
-        target = slots[viewerRoundRobin % slots.length];
-        viewerRoundRobin += 1;
-      }
+      const target = slots[viewerRoundRobin % slots.length];
+      viewerRoundRobin += 1;
       const targetName = nameFor(target.index);
       // (1) 이미 열린 다른 뷰어 창들 → 탭만 추가(리로드 없음). 대상 창은 아래 URL 로 직접 로드됨.
       postViewerAddTab(d0.id, d0.study_uid, tabLabel);
