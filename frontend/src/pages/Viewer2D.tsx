@@ -452,13 +452,14 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
   );
 }
 
-export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, withOpen, skin = "ty" }: {
+export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, withOpen, navFilter, skin = "ty" }: {
   detail: StudyDetail;
   onClose: () => void;
   addDetail?: StudyDetail | null;    // ② Add View: 기존(detail) 유지 + 이 검사를 분할 추가
   stackDetail?: StudyDetail | null;  // ③ Stack View: 기존 유지 + 이 검사를 같은 페인에 중첩
   keySops?: string[] | null;         // ⑤ Key Image View: 이 SOP 목록만 표시 (F-16)
   withOpen?: { mode: "add" | "stack"; ids: number[] } | null;  // Study With Open (p.13)
+  navFilter?: Record<string, string>;  // ◀▶ 탐색 목록 필터(모니터 배정 탭) — 없으면 전체 목록
   skin?: "ty" | "saint";             // SAINT VIEW 스킨 — 상단 가로 메뉴 툴바 + 세로 팔레트 숨김 (엔진·기능 동일)
 }) {
   const [prefs, setPrefs] = useState<ViewerPrefs>(DEFAULT_PREFS);
@@ -519,26 +520,45 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [settingsOpen, setSettingsOpen] = useState(false);  // 뷰어 내 Setting
   // ◀▶ 환자 이동 — 시간대별 한 단계(워크리스트 정렬: 최신이 위/앞).
   // 방향은 Setting>정책(nav_left)을 따른다: past=◀가 과거(아래 행) / recent=◀가 최신(위 행)
-  const [wlIds, setWlIds] = useState<number[]>([]);
+  const [wlIds, setWlIds] = useState<number[]>([]);       // ◀▶ 탐색: 배정 탭(navFilter) 필터 목록
+  const [wlIdsAll, setWlIdsAll] = useState<number[]>([]);  // 폴백: 전체(무필터) 목록
   const [navLeft, setNavLeft] = useState<"past" | "recent">("past");
   useEffect(() => {
-    api.worklist({ limit: "500" }).then((r) => setWlIds(r.items.map((it) => it.id))).catch(() => {});
+    const hasFilter = !!(navFilter && Object.keys(navFilter).length);
+    // navFilter(모니터 배정 탭)가 있으면 그 필터 목록으로, 없으면 전체 목록으로 ◀▶ 탐색.
+    api.worklist({ ...(navFilter ?? {}), limit: "500" }).then((r) => {
+      const ids = r.items.map((it) => it.id);
+      setWlIds(ids);
+      if (!hasFilter) setWlIdsAll(ids);   // 필터 없으면 동일
+    }).catch(() => {});
+    // 필터가 있으면 전체 목록도 확보 — 현재 검사가 필터 밖일 때 ◀▶가 죽지 않도록 폴백
+    if (hasFilter) api.worklist({ limit: "500" }).then((r) => setWlIdsAll(r.items.map((it) => it.id))).catch(() => {});
     api.getSetting("worklist.prefs").then((r) => {
       const nl = (r.value as { nav_left?: "past" | "recent" }).nav_left;
       if (nl) setNavLeft(nl);
     }).catch(() => {});
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(navFilter ?? {})]);
   /** 현재 활성 페인에 보이는 검사 id — ◀▶ 이동의 기준점 */
   const currentNavId = () => {
     const curUid = panes[activePane]?.studyUid || detail.study_uid;
     return openTabsRef.current.find((t) => t.uid === curUid)?.id ?? detail.id;
   };
-  /** visual: -1=◀, 1=▶ → 정책에 따른 목록 스텝(목록은 최신이 idx 0) */
+  /** visual: -1=◀, 1=▶ → 정책에 따른 목록 스텝. 요청 2번: 이미 열린 검사(모든 모니터 공유 탭)는
+   *  건너뛰고 워크리스트 시간순으로 '아직 열리지 않은' 다음 검사를 반환.
+   *  현재 검사가 배정 탭 필터 밖(라운드로빈으로 다른 모달리티가 이 모니터에 열린 경우)이면 전체 목록으로 폴백. */
   const navTarget = (visual: 1 | -1): number | undefined => {
-    const idx = wlIds.indexOf(currentNavId());
+    const cur = currentNavId();
+    const list = wlIds.includes(cur) ? wlIds : wlIdsAll;
+    const idx = list.indexOf(cur);
     if (idx < 0) return undefined;
     const leftStep = navLeft === "past" ? 1 : -1;  // 과거 = 목록 아래(idx 증가)
-    return wlIds[idx + (visual === -1 ? leftStep : -leftStep)];
+    const step = visual === -1 ? leftStep : -leftStep;
+    const opened = new Set(loadPersistedTabs().map((t) => t.id));   // 모든 모니터에 걸쳐 열린 검사
+    for (let j = idx + step; j >= 0 && j < list.length; j += step) {
+      if (!opened.has(list[j])) return list[j];   // 아직 열리지 않은 다음 검사
+    }
+    return undefined;   // 방향으로 남은 미열림 검사 없음
   };
   const navPatient = async (visual: 1 | -1) => {
     const target = navTarget(visual);

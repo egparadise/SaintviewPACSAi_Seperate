@@ -95,20 +95,30 @@ export function loadHangingPrefs() {
   }).catch(() => {});
 }
 
-/** 뷰어 모니터 배치 계획 — 선택 모니터별 슬롯(번호 오름차순), 최대 열 영상 수(max_open)로 캡.
- *  Window Management API(Chrome) 가용 시. 매 호출마다 최신 설정 재조회. 단일/미감지는 1원소. */
-async function viewerMonitorPlan(): Promise<{ index: number; features: string }[]> {
+/** 뷰어 모니터 배치 계획 — 선택 모니터별 슬롯(번호 오름차순, max_open 캡) + 모달리티→모니터 예외 +
+ *  모니터별 ◀▶ 탐색 탭(tab_binding). Window Management API(Chrome) 가용 시. 매 호출 최신 설정 재조회. */
+async function viewerMonitorPlan(): Promise<{
+  slots: { index: number; features: string }[];
+  modalityMap: { modality: string; monitor: number }[];
+  tabBinding: Record<number, string>;
+}> {
   let maxOpen = 0;
+  let modalityMap: { modality: string; monitor: number }[] = [];
+  let tabBinding: Record<number, string> = {};
   try {
     const r = await api.getSetting("viewer.prefs");
-    const mon = (r.value as { monitor?: { screens?: number[]; max_open?: number } }).monitor;
+    const mon = (r.value as { monitor?: {
+      screens?: number[]; max_open?: number;
+      modality_map?: { modality: string; monitor: number }[]; tab_binding?: Record<number, string>;
+    } }).monitor;
     monitorScreens = mon?.screens ?? monitorScreens;
     maxOpen = Number(mon?.max_open) || 0;   // 0/미설정 = 선택 모니터 전부
+    if (Array.isArray(mon?.modality_map)) modalityMap = mon!.modality_map!;
+    if (mon?.tab_binding) tabBinding = mon.tab_binding;
   } catch { /* 캐시 유지 */ }
-  const list = await screenFeaturesList(monitorScreens);
-  // 실 모니터 리스트(index>=0)일 때만 max_open 으로 슬롯 수 제한
-  if (maxOpen > 0 && list[0]?.index >= 0 && list.length > maxOpen) return list.slice(0, maxOpen);
-  return list;
+  let slots = await screenFeaturesList(monitorScreens);
+  if (maxOpen > 0 && slots[0]?.index >= 0 && slots.length > maxOpen) slots = slots.slice(0, maxOpen);
+  return { slots, modalityMap, tabBinding };
 }
 // 다중 모니터 라운드로빈 카운터(모듈 레벨 — Worklist 세션 동안 유지). 검사를 열 때마다 다음 슬롯.
 let viewerRoundRobin = 0;
@@ -2637,40 +2647,49 @@ export function Worklist() {
     const base = VIEWER_BASE
       ? `${VIEWER_BASE.replace(/\/$/, "")}/`
       : `${window.location.origin}${window.location.pathname}`;
-    const url = `${base}?${p}`;
     // Exam 탭 라벨(Viewer2D 형식과 동일 — 다른 모니터 창의 탭 표시에 사용)
     const d0 = cfg.detail;
     const tabLabel = `${d0.modality} ${d0.body_part || d0.patient_name} ${d0.study_date} #${d0.id}`;
-    void viewerMonitorPlan().then((slots) => {
+    return viewerMonitorPlan().then(({ slots, modalityMap, tabBinding }) => {
       // 닫힌 창은 추적 맵에서 정리. 살아있는 창이 하나도 없으면 라운드로빈을 1번 모니터부터 재시작.
       for (const [nm, w] of [...openedViewerWindows]) {
         if (w.closed) openedViewerWindows.delete(nm);
       }
+      // 모니터별 ◀▶ 탐색 탭(navtab)을 URL 에 실어 뷰어가 그 탭 필터 목록으로 이동하게 한다.
+      const urlFor = (monitorIndex: number) => {
+        const tab = tabBinding[monitorIndex];
+        return tab ? `${base}?${p}&navtab=${encodeURIComponent(tab)}` : `${base}?${p}`;
+      };
+      // 최저번호 모니터=표준 "sv_viewer"(판독창 참조·재사용), 나머지=sv_viewer_slot{index} (모니터 정체성 기준 고정)
+      const nameFor = (monitorIndex: number) =>
+        monitorIndex === slots[0]?.index ? "sv_viewer" : `sv_viewer_slot${monitorIndex}`;
       const multi = slots.length > 1 && slots[0].index >= 0;
       if (!multi) {
-        // 단일/미감지: 기존과 동일 — 재사용 창 "sv_viewer" 1개(매번 그 창에 새 검사 로드).
-        // 다중→단일 전환 시 이전 보조 창(sv_viewer_slot*)은 고아이므로 닫는다.
+        // 단일/미감지: 재사용 창 "sv_viewer" 1개. 다중→단일 전환 시 이전 보조 창은 고아이므로 닫는다.
         for (const [nm, ow] of [...openedViewerWindows]) {
           if (nm !== "sv_viewer") { try { ow.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
         }
         const feat = slots[0]?.features ?? "width=1500,height=920";
-        const w = window.open(url, "sv_viewer", feat);
+        const w = window.open(urlFor(slots[0]?.index ?? -1), "sv_viewer", feat);
         applyWindowBounds(w, feat);
         if (w) openedViewerWindows.set("sv_viewer", w);
         w?.focus();
         return;
       }
-      // 다중 모니터 라운드로빈: 검사를 열 때마다 다음 모니터(번호순)만 로드/리프레시,
-      // 나머지 열린 뷰어 창은 리로드 없이 Exam 탭만 추가(broadcast) — "깜빡임 없이 탭만 추가".
+      // 대상 모니터 결정 — 기본은 번호순 라운드로빈. 예외: 모달리티→모니터 매핑이 있고 그 모니터가
+      // 선택 슬롯이면 거기로 오픈(라운드로빈 카운터는 소모하지 않아 일반 검사의 1,2,3 순서 보존).
       if (openedViewerWindows.size === 0) viewerRoundRobin = 0;   // 전부 닫힘 → 1번부터
-      const ti = viewerRoundRobin % slots.length;
-      viewerRoundRobin += 1;
-      const target = slots[ti];
-      const targetName = ti === 0 ? "sv_viewer" : `sv_viewer_slot${target.index}`;
+      const overrideMon = modalityMap.find((r) => r.modality && r.modality === (d0.modality || "").toUpperCase())?.monitor;
+      let target = overrideMon != null ? slots.find((s) => s.index === overrideMon) : undefined;
+      if (!target) {
+        target = slots[viewerRoundRobin % slots.length];
+        viewerRoundRobin += 1;
+      }
+      const targetName = nameFor(target.index);
       // (1) 이미 열린 다른 뷰어 창들 → 탭만 추가(리로드 없음). 대상 창은 아래 URL 로 직접 로드됨.
       postViewerAddTab(d0.id, d0.study_uid, tabLabel);
       // (2) 대상 모니터 창만 열기/네비게이트(=그 뷰어만 전체 리프레시) + 해당 모니터에 배치.
-      const w = window.open(url, targetName, target.features);
+      const w = window.open(urlFor(target.index), targetName, target.features);
       applyWindowBounds(w, target.features);
       if (w) { openedViewerWindows.set(targetName, w); w.focus(); }
       else {
@@ -2680,7 +2699,7 @@ export function Worklist() {
         );
       }
       // 현재 선택 슬롯 집합에 없는 이전 보조 창(모니터 설정 축소 등)은 닫아 고아 방지
-      const validNames = new Set(slots.map((s, i) => (i === 0 ? "sv_viewer" : `sv_viewer_slot${s.index}`)));
+      const validNames = new Set(slots.map((s) => nameFor(s.index)));
       for (const [nm, ow] of [...openedViewerWindows]) {
         if (!validNames.has(nm)) { try { ow.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
       }
@@ -2704,6 +2723,21 @@ export function Worklist() {
       case "refresh": setRefreshKey((k) => k + 1); break;
       case "batch": setBatchOpen(true); break;
       case "viewdraft":
+        // 다중 선택(Shift/Ctrl) + View 버튼 → 선택 검사를 워크리스트 순서대로 한꺼번에 오픈.
+        // 각 openV2 는 라운드로빈으로 다음 모니터에 분산(await 로 순차 → 1,2,3 순서 보장).
+        // row(더블클릭)로 온 경우는 단일 오픈(아래) — 다중 오픈은 View 버튼/Enter(row 없음)에서만.
+        if (!row && selectedIds.size > 1) {
+          const chosen = items.filter((it) => selectedIds.has(it.id));
+          let first = true;
+          for (const it of chosen) {
+            try {
+              const d = await api.study(it.id);
+              if (first) { selectAndSync(d); first = false; }
+              await openV2({ detail: d });
+            } catch { /* 개별 실패는 건너뛰고 나머지 오픈 */ }
+          }
+          break;
+        }
         // View&Draft = 자체 뷰어(기본) — 더블클릭 동작은 환경설정에서 변경 가능
         // Study With Open(p.13): 체크 시 Related Study List 검사를 ADD/STACK 모드로 함께 오픈
         if (target) {
@@ -2718,6 +2752,20 @@ export function Worklist() {
         }
         break;
       case "viewer2d": case "ub_view":
+        // 다중 선택(Shift/Ctrl) + View → 선택 검사를 워크리스트 순서대로 한꺼번에(라운드로빈 분산)
+        if (!row && selectedIds.size > 1) {
+          localStorage.setItem("sv_infi_exams", "[]");
+          const chosen = items.filter((it) => selectedIds.has(it.id));
+          let first = true;
+          for (const it of chosen) {
+            try {
+              const d = await api.study(it.id);
+              if (first) { selectAndSync(d); first = false; }
+              await openV2({ detail: d });
+            } catch { /* 개별 실패는 건너뛰고 나머지 오픈 */ }
+          }
+          break;
+        }
         // ① View: 기존 영상을 닫고 선택 검사를 그 자리에 표시 — In Viewer 누적 목록 초기화(교체 시맨틱)
         if (target) {
           const d = await api.study(target.id);
@@ -2878,7 +2926,7 @@ export function Worklist() {
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, onSelect, openStudy, onChanged, dblAction, withOpen, withOpenMode, openV2, localMode]);
+  }, [selected, onSelect, openStudy, onChanged, dblAction, withOpen, withOpenMode, openV2, localMode, items, selectedIds]);
 
   const openCompare = useCallback(() => {
     if (!selected) return;

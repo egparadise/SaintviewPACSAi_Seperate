@@ -327,13 +327,14 @@ function roiStats(data: ImageData, x0: number, y0: number, x1: number, y1: numbe
 
 const PALETTE = IN_PALETTE;
 
-export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, withOpen }: {
+export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, withOpen, navFilter }: {
   detail: StudyDetail;
   onClose: () => void;
   addDetail?: StudyDetail | null;    // ② Add View: 기존 유지 + 이 검사를 분할 추가
   stackDetail?: StudyDetail | null;  // ③ Stack View: 기존 유지 + 이 검사를 같은 페인에 중첩
   keySops?: string[] | null;         // ⑤ Key Image View: 이 SOP 목록만 표시 (F-16)
   withOpen?: { mode: "add" | "stack"; ids: number[] } | null;  // Study With Open
+  navFilter?: Record<string, string>;  // ◀▶ 탐색 목록 필터(모니터 배정 탭) — 없으면 전체 목록
 }) {
   const [series, setSeries] = useState<SeriesNode[]>([]);
   // 과거검사(Related Exam) 시리즈 — Sync With Other Exams 용 (클릭 시 로드)
@@ -1990,16 +1991,27 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     say(`Combine all — ${src.length}개 시리즈 ${merged.instances.length}장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)`);
   };
 
-  // Prev/Next(§3.1) — 워크리스트에서 현재 검사의 위/아래 검사를 이 창에서 열기
+  // Prev/Next(§3.1) — 이 모니터 배정 탭(navFilter) 목록에서 현재 검사의 위/아래로,
+  // 이미 열린 검사(이 창 exams + 공유 sv_infi_exams)는 건너뛰고 다음 미열림으로 (요청 2번).
   const nav = async (dir: number) => {
     try {
-      const r = await api.worklist({});
-      const idx = r.items.findIndex((it) => it.id === curD.id);
-      const nxt = idx >= 0 ? r.items[idx + dir] : undefined;
+      let r = await api.worklist({ ...(navFilter ?? {}), limit: "500" });
+      let idx = r.items.findIndex((it) => it.id === curD.id);
+      // 현재 검사가 배정 탭 필터 밖이면(라운드로빈으로 다른 모달리티가 이 모니터에) 전체 목록으로 폴백
+      if (idx < 0 && navFilter && Object.keys(navFilter).length) {
+        r = await api.worklist({ limit: "500" });
+        idx = r.items.findIndex((it) => it.id === curD.id);
+      }
+      if (idx < 0) { say("워크리스트에서 현재 검사를 찾지 못했습니다"); return; }
+      const opened = new Set<number>(examsRef.current.map((e) => e.d.id));
+      try { (JSON.parse(localStorage.getItem("sv_infi_exams") ?? "[]") as number[]).forEach((id) => opened.add(id)); } catch { /* 무시 */ }
+      let nxt: (typeof r.items)[number] | undefined;
+      for (let j = idx + dir; j >= 0 && j < r.items.length; j += dir) {
+        if (!opened.has(r.items[j].id)) { nxt = r.items[j]; break; }
+      }
       // 페이지 리로드 대신 제자리 전환 — ViewerWindow 가 sv-nav-study 를 받아 studyId 만 교체
-      // (같은 환자 검사는 Exam 탭으로 우측 누적, 다른 환자는 혼합 방지 규칙에 따라 교체)
       if (nxt) window.dispatchEvent(new CustomEvent("sv-nav-study", { detail: { id: nxt.id } }));
-      else say(dir < 0 ? "워크리스트에 위 검사가 없습니다 (첫 검사)" : "워크리스트에 아래 검사가 없습니다 (마지막 검사)");
+      else say(dir < 0 ? "위쪽에 아직 열지 않은 검사가 없습니다" : "아래쪽에 아직 열지 않은 검사가 없습니다");
     } catch { say("워크리스트 조회 실패"); }
   };
   // Worklist 버튼(§3.1) — 워크리스트 창을 최전면으로 (다른 모니터에 있어도)

@@ -221,6 +221,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [monitorSel, setMonitorSel] = useState<number[]>([]);   // 뷰어 모니터(다중=라운드로빈)
   const [maxOpen, setMaxOpen] = useState(0);                     // 최대 열 영상 수(라운드로빈 슬롯, 0=선택 전부)
   const [closeScope, setCloseScope] = useState<"all" | "current">("all");  // All Close 범위(전체/현재 모니터)
+  // 모니터별 ◀▶ 탐색 목록 = 배정된 워크리스트 탭의 필터 (monitorIndex → tabId, ""=전체)
+  const [tabBinding, setTabBinding] = useState<Record<number, string>>({});
+  // 모달리티 → 모니터 배치 예외(라운드로빈 대신 지정 모니터로 오픈). {modality, monitor}
+  const [modalityMap, setModalityMap] = useState<{ modality: string; monitor: number }[]>([]);
+  const [availTabs, setAvailTabs] = useState<WorklistTab[]>([]);   // 배정 드롭다운용 워크리스트 탭 목록
+  useEffect(() => { loadTabs().then(setAvailTabs).catch(() => {}); }, []);
   const [wlMon, setWlMon] = useState<number | null>(null);      // 워크리스트 창
   const [rptMon, setRptMon] = useState<number | null>(null);    // 판독(Reading) 창
   const [monitorMsg, setMonitorMsg] = useState("");
@@ -357,12 +363,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (wp?.length) setWlPresets(wp);
       const cm = (v as { close_mode?: "ask" | "save_current" | "save_all" | "discard" }).close_mode;
       if (cm) setCloseMode(cm);
-      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current" } }).monitor;
+      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current"; tab_binding?: Record<number, string>; modality_map?: { modality: string; monitor: number }[] } }).monitor;
       if (mon?.screens) setMonitorSel(mon.screens);
       if (mon?.worklist !== undefined) setWlMon(mon.worklist);
       if (mon?.report !== undefined) setRptMon(mon.report);
       if (mon?.max_open != null) setMaxOpen(Number(mon.max_open) || 0);
       if (mon?.close_scope === "all" || mon?.close_scope === "current") setCloseScope(mon.close_scope);
+      if (mon?.tab_binding) setTabBinding(mon.tab_binding);
+      if (Array.isArray(mon?.modality_map)) setModalityMap(mon.modality_map);
       const tc = v as { ty_tool_cols?: number };
       if (tc.ty_tool_cols) setTyToolCols(tc.ty_tool_cols);
       const sc = (v as { shortcuts?: { rdrag?: "wl" | "zoom" | "pan"; shift_rclick?: "zoomout" | "none" } }).shortcuts;
@@ -483,7 +491,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         .filter(([, cfg]) => (cfg as { s: unknown; i: unknown }).s || (cfg as { s: unknown; i: unknown }).i)),
       paletteSide, thumbSide, thumbSize, thumbMode, reportDock,
       toolbar: tbConfig, wl_presets: wlPresets, close_mode: closeMode,
-      monitor: { screens: monitorSel, worklist: wlMon, report: rptMon, max_open: maxOpen, close_scope: closeScope },
+      monitor: { screens: monitorSel, worklist: wlMon, report: rptMon, max_open: maxOpen, close_scope: closeScope,
+                 tab_binding: tabBinding, modality_map: modalityMap },
       shortcuts: { rdrag: scRdrag, shift_rclick: scShiftR, keys: scKeys },
       drop_menu: dropMenu,
     }, "user");
@@ -1857,6 +1866,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           <th style={{ width: 96 }} title="다중 선택=스팬">뷰어 ☑</th>
                           <th style={{ width: 96 }} title="다시 클릭=해제">워크리스트 ◉</th>
                           <th style={{ width: 96 }} title="다시 클릭=해제">판독 ◉</th>
+                          <th style={{ width: 150 }} title="이 모니터의 뷰어에서 ◀▶(다음/이전 환자)가 훑는 워크리스트 탭(필터)">◀▶ 탐색 탭</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1880,6 +1890,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                               <input type="radio" name="rptmon" checked={rptMon === i}
                                      onClick={() => setRptMon((p) => (p === i ? null : i))}
                                      onChange={() => {}} />
+                            </td>
+                            <td style={{ textAlign: "center" }}>
+                              <select value={tabBinding[i] ?? ""} style={{ maxWidth: 142 }}
+                                      onChange={(e) => setTabBinding((p) => ({ ...p, [i]: e.target.value }))}>
+                                <option value="">전체 (필터 없음)</option>
+                                {availTabs.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+                              </select>
                             </td>
                           </tr>
                         ))}
@@ -1906,6 +1923,29 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
                       뷰어의 <b>All Close ✕</b> 클릭 시
                     </span>
+                  </div>
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>
+                      모달리티 → 모니터 배치 예외 (라운드로빈 대신 지정 모니터로 오픈)
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6 }}>
+                      기본은 번호순 순환(1,2,3…)이지만, 여기에 지정한 모달리티 검사는 항상 지정 모니터에 열립니다 (예: CR → 3번).
+                    </div>
+                    {modalityMap.map((rule, ri) => (
+                      <div key={ri} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                        <input value={rule.modality} placeholder="모달리티 (예: CR)"
+                               onChange={(e) => setModalityMap((p) => p.map((r, k) => k === ri ? { ...r, modality: e.target.value.toUpperCase() } : r))}
+                               style={{ width: 120 }} />
+                        <span>→ 모니터</span>
+                        <input type="number" min={1} max={monitors.length || 8} value={rule.monitor + 1}
+                               onChange={(e) => setModalityMap((p) => p.map((r, k) => k === ri ? { ...r, monitor: Math.max(0, (Number(e.target.value) || 1) - 1) } : r))}
+                               style={{ width: 56 }} />
+                        <button onClick={() => setModalityMap((p) => p.filter((_, k) => k !== ri))}
+                                style={{ fontSize: 11 }}>삭제</button>
+                      </div>
+                    ))}
+                    <button onClick={() => setModalityMap((p) => [...p, { modality: "", monitor: 0 }])}
+                            style={{ fontSize: 11.5 }}>+ 예외 추가</button>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <button disabled={wlMon == null}

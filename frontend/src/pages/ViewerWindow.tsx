@@ -3,6 +3,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { api, ensureToken, type StudyDetail } from "../api";
 import { DEFAULT_CLIENT_VIEWER } from "../lib/viewerConfig";
+import { folderToFilters, loadTabs } from "./WorklistTree";
 
 const Viewer2D = lazy(() => import("./Viewer2D").then((m) => ({ default: m.Viewer2D })));
 const ViewerInfi = lazy(() => import("./ViewerInfi").then((m) => ({ default: m.ViewerInfi })));
@@ -17,6 +18,17 @@ export function ViewerWindow() {
   const keySops = (params.get("keysops") ?? "").split(",").filter(Boolean);
   const woMode = params.get("wo_mode");
   const woIds = (params.get("wo_ids") ?? "").split(",").map(Number).filter(Boolean);
+
+  // 모니터별 ◀▶ 탐색 탭(navtab) — 이 창이 배정된 워크리스트 탭의 필터로 다음/이전 환자 탐색.
+  const navTab = params.get("navtab") ?? "";
+  const [navFilter, setNavFilter] = useState<Record<string, string> | undefined>(undefined);
+  useEffect(() => {
+    if (!navTab) { setNavFilter(undefined); return; }
+    loadTabs().then((tabs) => {
+      const t = tabs.find((x) => x.id === navTab);
+      setNavFilter(t ? folderToFilters(t.filter) : undefined);
+    }).catch(() => {});
+  }, [navTab]);
 
   const [detail, setDetail] = useState<StudyDetail | null>(null);
   // ◀👤▶ 환자 이동 — 페이지 리로드 없이 제자리 검사 전환 (뷰어가 sv-nav-study 이벤트로 요청)
@@ -84,6 +96,7 @@ export function ViewerWindow() {
     stackDetail,
     keySops: keySops.length ? keySops : undefined,
     withOpen: woMode === "add" || woMode === "stack" ? { mode: woMode as "add" | "stack", ids: woIds } : undefined,
+    navFilter,   // ◀▶ 탐색 목록 필터(모니터 배정 탭). 없으면 전체 목록.
     onClose: () => window.close(),
   };
   return (
