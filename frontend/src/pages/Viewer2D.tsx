@@ -293,7 +293,7 @@ interface ViewerPrefs {
   thumbSide: "left" | "bottom" | "right" | "top";  // Thumbnail 위치 (Setting·드래그 도킹)
   thumbSize: number;        // px
   thumbMode: "series" | "all";
-  hanging2d: Record<string, string>;  // modality → layout key
+  hanging2d: Record<string, string | { s: string; i: string }>;  // modality → Series 분할(문자열) 또는 {s:Series, i:Image}
   reportDock: boolean;
   paletteW: number;         // 팔레트 폭 (스플리터 조절, 계정 로밍)
   dockW: number;            // 판독 도크 폭
@@ -306,7 +306,7 @@ interface ViewerPrefs {
 }
 const DEFAULT_PREFS: ViewerPrefs = {
   paletteSide: "left", thumbSide: "left", thumbSize: 128,
-  thumbMode: "series", hanging2d: {}, reportDock: true,
+  thumbMode: "series", hanging2d: {}, reportDock: false,  // 판독 도크 기본 숨김(Setting>뷰어공통에서 표시)
   paletteW: 200, dockW: 340, toolbar: {}, wl_presets: WL_PRESETS,
   close_mode: "ask",
 };
@@ -480,6 +480,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [layout, setLayout] = useState<keyof typeof LAYOUTS>("1x1");
   // Image Layout — 페인 내부 이미지 분할(연속 이미지 N×M 타일, UBPACS)
   const [imgLay, setImgLay] = useState({ r: 1, c: 1 });   // 콤보 표시용 — 실제 적용은 페인별 il
+  // 2D 행잉(모달리티→Image 분할) 기본 il — 검사 열 때 페인에 적용(prefs 로드에서 해석)
+  const hang2dImgRef = useRef<{ r: number; c: number } | null>(null);
   // 페인 최대화(더블클릭 토글) + 페인 경계 스플리터 분율 (In Viewer 이식)
   const [maximized, setMaximized] = useState<string | null>(null);
   const vpRef = useRef<HTMLDivElement>(null);
@@ -939,7 +941,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /* 설정 로드 + 행잉 적용(모달리티→분할) + HP 규칙 자동 매칭 */
   useEffect(() => {
     api.getSetting("viewer.prefs").then((r) => {
-      const v = r.value as Partial<ViewerPrefs> & { hanging2d?: Record<string, string> };
+      const v = r.value as Partial<ViewerPrefs> & { hanging2d?: Record<string, string | { s: string; i: string }> };
       const merged = { ...DEFAULT_PREFS, ...v };
       if (!merged.wl_presets?.length) merged.wl_presets = WL_PRESETS;
       // 구 기본값 업그레이드(23차: 팔레트·썸네일 확대) — 직접 조절한 값은 유지
@@ -948,8 +950,19 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (merged.paletteW === 100 || merged.paletteW === 138) merged.paletteW = 200;
       if (merged.dockW === 250) merged.dockW = 340;  // 판독 도크 에디터화(26차)에 맞춰 확대
       setPrefs(merged);
-      const hp = merged.hanging2d?.[detail.modality];
-      if (hp && LAYOUTS[hp]) setLayout(hp as keyof typeof LAYOUTS);
+      // 2D 행잉 — 모달리티별 Series 분할(setLayout) + Image 분할(페인 il). 구 형식(문자열=Series만) 호환.
+      // MG(mammo)는 전용 2×2 4-view 행잉이 우선(결정적) — 2D 행잉 설정 무시(경합·타일 분할 방지).
+      const hv = detail.modality === "MG" ? undefined : merged.hanging2d?.[detail.modality];
+      const sKey = typeof hv === "string" ? hv : hv?.s;
+      const iKey = typeof hv === "string" ? undefined : hv?.i;
+      if (sKey && LAYOUTS[sKey]) setLayout(sKey as keyof typeof LAYOUTS);
+      const ig = iKey && LAYOUTS[iKey] ? { r: LAYOUTS[iKey].rows, c: LAYOUTS[iKey].cols } : null;
+      hang2dImgRef.current = ig && (ig.r > 1 || ig.c > 1) ? ig : null;   // 페인 생성(시리즈 로드)에서 사용
+      if (ig) {
+        setImgLay(ig);
+        // 이미 생성된 페인에도 즉시 적용(prefs 로드가 시리즈 로드보다 늦은 경우)
+        setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, pp]) => [k, { ...pp, il: ig }])));
+      }
       // TY 팔레트·오버레이 개인화 키 소비 (viewer.prefs 통짜 — 계정 로밍)
       const t = r.value as {
         ty_tool_size?: number; ty_tool_labels?: boolean; ty_icon_3d?: boolean; ty_quick_row?: boolean;
@@ -1032,7 +1045,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             const s = mammoSeries ? (mammoSeries[i] ?? null) : imgSeries[i];
             next[pid] = s
               ? applyPState({ ...initPane(detail.study_uid), series: s,
-                  index: Math.floor(s.instances.length / 2), wl: ai?.q ?? "" })
+                  index: Math.floor(s.instances.length / 2), wl: ai?.q ?? "",
+                  il: hang2dImgRef.current ?? undefined })   // 모달리티 기본 Image 분할
               : initPane(detail.study_uid);
           });
           return next;
@@ -2269,8 +2283,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       case "comb": combineSeries(); break;
       case "calib": startCalibrate(); break;   // 기준선 그리기 → mm 입력 → pixel_spacing 재설정
       case "capture": {
-        const url = renderedUrl(p);
-        if (url) { const el = document.createElement("a"); el.href = url; el.download = `saintview_${Date.now()}.png`; el.click(); }
+        // 현재 모니터의 영상 영역(모든 페인)을 화면 그대로 캡처 — 주석·측정·툴·문자 오버레이 포함.
+        const container = vpRef.current;
+        if (container) {
+          setStatus("캡처 중…");
+          void import("../lib/capturePane").then(({ capturePaneToPng }) =>
+            capturePaneToPng(container).then(() => setStatus("캡처 저장됨 (PNG)")).catch(() => {
+              // 폴백: 화면 캡처 실패 시 서버 렌더 PNG(주석 미포함)
+              const url = renderedUrl(p);
+              if (url) { const el = document.createElement("a"); el.href = url; el.download = `saintview_${Date.now()}.png`; el.click(); }
+              setStatus("화면 캡처 실패 — 서버 렌더 이미지로 저장");
+            }));
+        }
         break;
       }
       case "cine": {

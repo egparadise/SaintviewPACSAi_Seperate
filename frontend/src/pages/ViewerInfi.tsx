@@ -1236,11 +1236,21 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         say("Calibrate — 실제 길이를 아는 기준선을 그으세요 (완료 후 mm 입력)");
         break;
       case "capture": {
-        const inst = p.series?.instances[p.index];
-        if (p.series && inst) {
-          const a = document.createElement("a");
-          a.href = instUrl(p.studyUid || detail.study_uid, p.series, inst, p.wl);
-          a.download = "capture.png"; a.click();
+        // 현재 모니터의 영상 영역(모든 페인)을 화면 그대로 캡처 — 주석·측정·툴·문자 오버레이 포함.
+        const container = vpRef.current;
+        if (container) {
+          say("캡처 중…");
+          void import("../lib/capturePane").then(({ capturePaneToPng }) =>
+            capturePaneToPng(container).then(() => say("캡처 저장됨 (PNG)")).catch(() => {
+              // 폴백: 화면 캡처 실패 시 서버 렌더 이미지(주석 미포함)
+              const inst = p.series?.instances[p.index];
+              if (p.series && inst) {
+                const a = document.createElement("a");
+                a.href = instUrl(p.studyUid || detail.study_uid, p.series, inst, p.wl);
+                a.download = "capture.png"; a.click();
+              }
+              say("화면 캡처 실패 — 서버 렌더 이미지로 저장");
+            }));
         }
         break;
       }

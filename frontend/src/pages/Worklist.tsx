@@ -122,6 +122,8 @@ async function viewerMonitorPlan(): Promise<{
 }
 // 다중 모니터 라운드로빈 카운터(모듈 레벨 — Worklist 세션 동안 유지). 검사를 열 때마다 다음 슬롯.
 let viewerRoundRobin = 0;
+// 다중 선택 일괄 오픈 시작 시 호출 — 선택 목록의 위(첫)부터 모니터 1,2,3 순서로 배치되도록 리셋.
+function resetViewerRoundRobin() { viewerRoundRobin = 0; }
 // 마지막 openV2 로 연 뷰어 창들(이름→핸들). 라운드로빈 대상 판정·고아 창 정리·닫힘 감지에 사용.
 // 최저번호 모니터(슬롯 0)는 표준 이름 "sv_viewer"(ReportWindow ◀▶·관련검사 오픈이 참조), 나머지는
 // "sv_viewer_slot{index}".
@@ -2727,6 +2729,7 @@ export function Worklist() {
         // 각 openV2 는 라운드로빈으로 다음 모니터에 분산(await 로 순차 → 1,2,3 순서 보장).
         // row(더블클릭)로 온 경우는 단일 오픈(아래) — 다중 오픈은 View 버튼/Enter(row 없음)에서만.
         if (!row && selectedIds.size > 1) {
+          resetViewerRoundRobin();   // 선택 목록 위→아래 순서대로 모니터 1,2,3 부터 열리게
           const chosen = items.filter((it) => selectedIds.has(it.id));
           let first = true;
           for (const it of chosen) {
@@ -2754,6 +2757,7 @@ export function Worklist() {
       case "viewer2d": case "ub_view":
         // 다중 선택(Shift/Ctrl) + View → 선택 검사를 워크리스트 순서대로 한꺼번에(라운드로빈 분산)
         if (!row && selectedIds.size > 1) {
+          resetViewerRoundRobin();   // 선택 목록 위→아래 순서대로 모니터 1,2,3 부터 열리게
           localStorage.setItem("sv_infi_exams", "[]");
           const chosen = items.filter((it) => selectedIds.has(it.id));
           let first = true;

@@ -188,9 +188,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [thumbSide, setThumbSide] = useState<"left" | "bottom" | "right" | "top">("left");
   const [thumbSize, setThumbSize] = useState(128);
   const [thumbMode, setThumbMode] = useState<"series" | "all">("series");
-  const [h2dCT, setH2dCT] = useState("1x1");
-  const [h2dMR, setH2dMR] = useState("1x2");
-  const [reportDock, setReportDock] = useState(true);
+  // 2D 행잉 — 모달리티별 {Series 분할, Image 분할}. 구 형식(문자열=Series만)은 로드 시 정규화.
+  const [h2dMap, setH2dMap] = useState<Record<string, { s: string; i: string }>>({});
+  const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
   const [hospital, setHospital] = useState("");
   const [department, setDepartment] = useState("");
   const [footer, setFooter] = useState("");
@@ -294,7 +294,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     }).catch(() => {});
     api.getSetting("viewer.prefs").then((r) => {
       const v = r.value as {
-        hanging?: Record<string, string>; hanging2d?: Record<string, string>;
+        hanging?: Record<string, string>; hanging2d?: Record<string, string | { s: string; i: string }>;
         paletteSide?: "left" | "top" | "right" | "bottom"; thumbSide?: "left" | "bottom" | "right" | "top";
         thumbSize?: number; thumbMode?: "series" | "all"; reportDock?: boolean;
       };
@@ -354,8 +354,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (v.thumbSide) setThumbSide(v.thumbSide);
       if (v.thumbSize) setThumbSize(v.thumbSize);
       if (v.thumbMode) setThumbMode(v.thumbMode);
-      if (v.hanging2d?.CT) setH2dCT(v.hanging2d.CT);
-      if (v.hanging2d?.MR) setH2dMR(v.hanging2d.MR);
+      if (v.hanging2d) {
+        const norm: Record<string, { s: string; i: string }> = {};
+        for (const [m, val] of Object.entries(v.hanging2d)) {
+          if (typeof val === "string") norm[m] = { s: val, i: "1x1" };   // 구 형식(Series만)
+          else if (val && typeof val === "object") norm[m] = { s: (val as { s?: string }).s ?? "1x1", i: (val as { i?: string }).i ?? "1x1" };
+        }
+        setH2dMap(norm);
+      }
       if (v.reportDock !== undefined) setReportDock(v.reportDock);
       const tb = (v as { toolbar?: Record<string, boolean> }).toolbar;
       if (tb) setTbConfig(tb);
@@ -461,7 +467,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     await api.putSetting("viewer.prefs", {
       ...curV,
       hanging: { CT: hangingCT, MR: hangingMR },
-      hanging2d: { CT: h2dCT, MR: h2dMR },
+      hanging2d: h2dMap,
       client_viewer: clientViewer,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
       infi_toolbar: infTb,
@@ -1641,14 +1647,24 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     닫기 다이얼로그에서 "기본으로" 체크 시 이 설정이 자동 변경됩니다. Exam 탭은 ✕/전체닫기 전까지 유지.
                   </div>
                 </Group>
-                <Group title="2D 행잉 (모달리티 → 분할)">
-                  {([["CT", h2dCT, setH2dCT], ["MR", h2dMR, setH2dMR]] as const).map(([m, v, set]) => (
-                    <Row key={m} label={m}>
-                      <select value={v} onChange={(e) => set(e.target.value)}>
-                        <option value="1x1">1 X 1</option><option value="1x2">1 X 2</option><option value="2x2">2 X 2</option>
-                      </select>
-                    </Row>
-                  ))}
+                <Group title="2D 행잉 (모달리티 → Series / Image 분할)">
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                    검사를 열 때 모달리티별 기본 분할 — <b>Series</b>(뷰포트 개수) + <b>Image</b>(페인 내 이미지 타일). 그리드에서 선택.
+                  </div>
+                  {["CR", "DR", "MG", "US", "CT", "MR", "XA", "NM", "PT"].map((m) => {
+                    const cur = h2dMap[m] ?? { s: "1x1", i: "1x1" };
+                    const parseG = (s: string) => { const [r, c] = s.split("x").map(Number); return { r: r || 1, c: c || 1 }; };
+                    const gStr = (g: { r: number; c: number }) => `${g.r}x${g.c}`;
+                    return (
+                      <div key={m} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                        <b style={{ width: 42, fontSize: 12 }}>{m}</b>
+                        <GridPicker label="Series" max={10} value={parseG(cur.s)}
+                                    onPick={(g) => setH2dMap((p) => ({ ...p, [m]: { ...cur, s: gStr(g) } }))} />
+                        <GridPicker label="Image" max={10} value={parseG(cur.i)}
+                                    onPick={(g) => setH2dMap((p) => ({ ...p, [m]: { ...cur, i: gStr(g) } }))} />
+                      </div>
+                    );
+                  })}
                 </Group>
                 <Group title="Tools bar 구성 (UBPACS p.18~21 — 계정 로밍)">
                   {TOOLBAR_DEFS.map((sec) => (
