@@ -216,8 +216,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [thumbSize, setThumbSize] = useState(128);
   const [thumbMode, setThumbMode] = useState<"series" | "all">("series");
   // 2D 행잉 — 모달리티별 {Series 분할, Image 분할}. 구 형식(문자열=Series만)은 로드 시 정규화.
-  // h2dMap=구 공통값(하위호환 폴백, 편집기 없음), h2dByViewer=뷰어별(sv/infi/ty) — 2D 행잉은 뷰어별로만 편집.
+  // h2dMap=공통(F-18 자리), h2dByViewer=뷰어별(sv/infi/ty). h2dCommonOn=공통 우선 적용 체크(기본 on).
   const [h2dMap, setH2dMap] = useState<Record<string, { s: string; i: string }>>({});
+  const [h2dCommonOn, setH2dCommonOn] = useState(true);
   const [h2dByViewer, setH2dByViewer] = useState<Record<string, Record<string, { s: string; i: string }>>>({});
   const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
   const [hospital, setHospital] = useState("");
@@ -391,7 +392,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         }
         setH2dMap(norm);
       }
-      const vv = v as { hanging2d_by_viewer?: Record<string, Record<string, { s: string; i: string }>> };
+      const vv = v as { hanging2d_common_on?: boolean; hanging2d_by_viewer?: Record<string, Record<string, { s: string; i: string }>> };
+      if (vv.hanging2d_common_on !== undefined) setH2dCommonOn(!!vv.hanging2d_common_on);
       if (vv.hanging2d_by_viewer) setH2dByViewer(vv.hanging2d_by_viewer);
       if (v.reportDock !== undefined) setReportDock(v.reportDock);
       const tb = (v as { toolbar?: Record<string, boolean> }).toolbar;
@@ -498,6 +500,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     await api.putSetting("viewer.prefs", {
       ...curV,
       hanging2d: h2dMap,
+      hanging2d_common_on: h2dCommonOn,
       hanging2d_by_viewer: h2dByViewer,
       client_viewer: clientViewer,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
@@ -1431,7 +1434,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               </div>
               <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                  이 뷰어 전용 2D 행잉 — 검사를 열 때 모달리티별 기본 분할(Series=뷰포트 개수, Image=페인 내 타일). 그리드에서 선택.
+                  이 뷰어 전용 2D 행잉. 뷰어 공통의 <b>'공통 우선 적용'</b>이 켜져 있으면 공통 설정이 우선합니다.
                 </div>
                 <Hanging2dEditor map={h2dByViewer.infi ?? {}} onChange={(m, next) =>
                   setH2dByViewer((p) => ({ ...p, infi: { ...(p.infi ?? {}), [m]: next } }))} />
@@ -1589,6 +1592,20 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               </Group>
               </>
             )}
+            {page === "viewer" && (
+              <Group title="2D 행잉 (모달리티 → Series / Image 분할) — 공통">
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
+                  <input type="checkbox" checked={h2dCommonOn} onChange={(e) => setH2dCommonOn(e.target.checked)} />
+                  이 공통 설정을 모든 뷰어에 우선 적용
+                </label>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                  체크 시 SaintView/I-View/T-View 각 뷰어의 개별 2D 행잉보다 <b>이 공통 설정이 우선</b>합니다.
+                  해제하면 각 뷰어(뷰어 공통 &gt; SaintView/I-View/T-View)의 개별 설정을 사용합니다.<br />
+                  검사를 열 때 모달리티별 기본 분할 — <b>Series</b>(뷰포트 개수) + <b>Image</b>(페인 내 이미지 타일). 그리드에서 선택.
+                </div>
+                <Hanging2dEditor map={h2dMap} onChange={(m, next) => setH2dMap((p) => ({ ...p, [m]: next }))} />
+              </Group>
+            )}
             {(page === "viewerTy" || page === "viewerSv") && (
               <>
                 {page === "viewerSv" && (
@@ -1606,7 +1623,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   return (
                     <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
                       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                        이 뷰어 전용 2D 행잉 — 검사를 열 때 모달리티별 기본 분할(Series=뷰포트 개수, Image=페인 내 타일). 그리드에서 선택.
+                        이 뷰어 전용 2D 행잉. 뷰어 공통의 <b>'공통 우선 적용'</b>이 켜져 있으면 공통 설정이 우선합니다.
                       </div>
                       <Hanging2dEditor map={vmap} onChange={(m, next) =>
                         setH2dByViewer((p) => ({ ...p, [vk]: { ...(p[vk] ?? {}), [m]: next } }))} />

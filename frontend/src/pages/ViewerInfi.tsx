@@ -511,8 +511,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         hanging2d_common_on?: boolean;
         hanging2d_by_viewer?: Record<string, Record<string, string | { s: string; i: string }>>;
       };
-      // In-View 기본 레이아웃 = infi_default_layout. 이 뷰어(infi) 전용 2D 행잉을 병합(없으면 구 공통값 폴백).
-      // RxC 문자열 → {r,c} 변환.
+      // In-View 기본 레이아웃 = infi_default_layout. 뷰어 공통 2D 행잉(공통/뷰어별 infi)을 병합:
+      // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 우선. RxC 문자열 → {r,c} 변환.
       const defMap: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }> =
         { ...(prefsV.infi_default_layout ?? {}) };
       {
@@ -521,8 +521,9 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           !val ? null : typeof val === "string" ? { s: toRC(val), i: null } : { s: toRC(val.s), i: toRC(val.i) };
         const commonH = prefsV.hanging2d ?? {};
         const perVH = prefsV.hanging2d_by_viewer?.infi ?? {};
+        const commonOn = prefsV.hanging2d_common_on ?? true;
         for (const mm of new Set([...Object.keys(commonH), ...Object.keys(perVH)])) {
-          const h = toE(perVH[mm]) ?? toE(commonH[mm]);   // 뷰어별 우선, 없으면 구 공통값
+          const h = commonOn ? (toE(commonH[mm]) ?? toE(perVH[mm])) : (toE(perVH[mm]) ?? toE(commonH[mm]));
           if (h && (h.s || h.i)) defMap[mm] = { s: h.s ?? defMap[mm]?.s ?? null, i: h.i ?? defMap[mm]?.i ?? null };
         }
       }
