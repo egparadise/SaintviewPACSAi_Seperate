@@ -941,7 +941,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /* 설정 로드 + 행잉 적용(모달리티→분할) + HP 규칙 자동 매칭 */
   useEffect(() => {
     api.getSetting("viewer.prefs").then((r) => {
-      const v = r.value as Partial<ViewerPrefs> & { hanging2d?: Record<string, string | { s: string; i: string }> };
+      const v = r.value as Partial<ViewerPrefs> & {
+        hanging2d?: Record<string, string | { s: string; i: string }>;
+        hanging2d_common_on?: boolean;
+        hanging2d_by_viewer?: Record<string, Record<string, string | { s: string; i: string }>>;
+      };
       const merged = { ...DEFAULT_PREFS, ...v };
       if (!merged.wl_presets?.length) merged.wl_presets = WL_PRESETS;
       // 구 기본값 업그레이드(23차: 팔레트·썸네일 확대) — 직접 조절한 값은 유지
@@ -951,8 +955,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (merged.dockW === 250) merged.dockW = 340;  // 판독 도크 에디터화(26차)에 맞춰 확대
       setPrefs(merged);
       // 2D 행잉 — 모달리티별 Series 분할(setLayout) + Image 분할(페인 il). 구 형식(문자열=Series만) 호환.
+      // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 뷰어별보다 우선. 아니면 뷰어별(sv/ty) 우선.
       // MG(mammo)는 전용 2×2 4-view 행잉이 우선(결정적) — 2D 행잉 설정 무시(경합·타일 분할 방지).
-      const hv = detail.modality === "MG" ? undefined : merged.hanging2d?.[detail.modality];
+      const vk = skin === "saint" ? "sv" : "ty";
+      const commonMap = merged.hanging2d ?? {};
+      const perVMap = v.hanging2d_by_viewer?.[vk] ?? {};
+      const commonOn = v.hanging2d_common_on ?? true;
+      const pickHang = (m: string) => commonOn ? (commonMap[m] ?? perVMap[m]) : (perVMap[m] ?? commonMap[m]);
+      const hv = detail.modality === "MG" ? undefined : pickHang(detail.modality);
       const sKey = typeof hv === "string" ? hv : hv?.s;
       const iKey = typeof hv === "string" ? undefined : hv?.i;
       if (sKey && LAYOUTS[sKey]) setLayout(sKey as keyof typeof LAYOUTS);

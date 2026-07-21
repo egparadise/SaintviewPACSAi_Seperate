@@ -124,6 +124,30 @@ function UsageTop({ usage, labelOf, onReset }: {
 /** SCP/SCU 장비 노드 (dicom.nodes — AE Title/IP/Port, 추가·삭제·확장 가능) */
 interface DicomNode { name: string; role: "scu" | "scp" | "both"; ae_title: string; ip: string; port: number }
 
+/** 2D 행잉 편집기 — 모달리티별 Series/Image 분할(공통·뷰어별 공용). */
+const HANG2D_MODS = ["CR", "DR", "MG", "US", "CT", "MR", "XA", "NM", "PT"];
+function Hanging2dEditor({ map, onChange }: {
+  map: Record<string, { s: string; i: string }>;
+  onChange: (m: string, next: { s: string; i: string }) => void;
+}) {
+  const parseG = (s: string) => { const [r, c] = s.split("x").map(Number); return { r: r || 1, c: c || 1 }; };
+  const gStr = (g: { r: number; c: number }) => `${g.r}x${g.c}`;
+  return (
+    <>
+      {HANG2D_MODS.map((m) => {
+        const cur = map[m] ?? { s: "1x1", i: "1x1" };
+        return (
+          <div key={m} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+            <b style={{ width: 42, fontSize: 12 }}>{m}</b>
+            <GridPicker label="Series" max={10} value={parseG(cur.s)} onPick={(g) => onChange(m, { ...cur, s: gStr(g) })} />
+            <GridPicker label="Image" max={10} value={parseG(cur.i)} onPick={(g) => onChange(m, { ...cur, i: gStr(g) })} />
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 export function SettingsModal({ role, onClose, scope = "viewer" }: {
   role: string; onClose: () => void; scope?: SettingsScope;
 }) {
@@ -189,7 +213,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [thumbSize, setThumbSize] = useState(128);
   const [thumbMode, setThumbMode] = useState<"series" | "all">("series");
   // 2D 행잉 — 모달리티별 {Series 분할, Image 분할}. 구 형식(문자열=Series만)은 로드 시 정규화.
+  // h2dMap=공통(뷰어 공통), h2dByViewer=뷰어별(sv/infi/ty). h2dCommonOn=공통 우선 적용 체크.
   const [h2dMap, setH2dMap] = useState<Record<string, { s: string; i: string }>>({});
+  const [h2dCommonOn, setH2dCommonOn] = useState(true);   // 공통을 모든 뷰어에 우선 적용(기본 on — 기존 동작 보존)
+  const [h2dByViewer, setH2dByViewer] = useState<Record<string, Record<string, { s: string; i: string }>>>({});
   const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
   const [hospital, setHospital] = useState("");
   const [department, setDepartment] = useState("");
@@ -363,6 +390,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         }
         setH2dMap(norm);
       }
+      const vv = v as { hanging2d_common_on?: boolean; hanging2d_by_viewer?: Record<string, Record<string, { s: string; i: string }>> };
+      if (vv.hanging2d_common_on !== undefined) setH2dCommonOn(!!vv.hanging2d_common_on);
+      if (vv.hanging2d_by_viewer) setH2dByViewer(vv.hanging2d_by_viewer);
       if (v.reportDock !== undefined) setReportDock(v.reportDock);
       const tb = (v as { toolbar?: Record<string, boolean> }).toolbar;
       if (tb) setTbConfig(tb);
@@ -469,6 +499,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       ...curV,
       hanging: { CT: hangingCT, MR: hangingMR },
       hanging2d: h2dMap,
+      hanging2d_common_on: h2dCommonOn,
+      hanging2d_by_viewer: h2dByViewer,
       client_viewer: clientViewer,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
       infi_toolbar: infTb,
@@ -1361,6 +1393,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
                 <b>In Viewer 전용</b> — 표시·아이콘·사용 패턴 설정은 뷰어별로 적용되고, 판독·측정 등 기능은 두 뷰어 동일합니다.
               </div>
+              <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                  이 뷰어 전용 2D 행잉. 뷰어 공통의 <b>'공통 우선 적용'</b>이 켜져 있으면 공통 설정이 우선합니다.
+                </div>
+                <Hanging2dEditor map={h2dByViewer.infi ?? {}} onChange={(m, next) =>
+                  setH2dByViewer((p) => ({ ...p, infi: { ...(p.infi ?? {}), [m]: next } }))} />
+              </Group>
               <Group title="In Viewer 표시 (계정별 저장)">
                 <Row label="툴 배열 (열)">
                   <select value={infToolCols} onChange={(e) => setInfToolCols(Number(e.target.value))}>
@@ -1537,6 +1576,19 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
                   <b>T-View 전용</b> — 표시·아이콘·사용 패턴 설정은 뷰어별로 적용되고, 판독·측정 등 기능은 세 뷰어 동일합니다.
                 </div>
+                {(() => {
+                  const vk = page === "viewerSv" ? "sv" : "ty";
+                  const vmap = h2dByViewer[vk] ?? {};
+                  return (
+                    <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                        이 뷰어 전용 2D 행잉. 뷰어 공통의 <b>'공통 우선 적용'</b>이 켜져 있으면 공통 설정이 우선합니다.
+                      </div>
+                      <Hanging2dEditor map={vmap} onChange={(m, next) =>
+                        setH2dByViewer((p) => ({ ...p, [vk]: { ...(p[vk] ?? {}), [m]: next } }))} />
+                    </Group>
+                  );
+                })()}
                 <Group title="툴 아이콘·팔레트 (TY Viewer)">
                   <Row label="툴 배열 (열)">
                     <select value={tyToolCols} onChange={(e) => setTyToolCols(Number(e.target.value))}>
@@ -1648,24 +1700,17 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     닫기 다이얼로그에서 "기본으로" 체크 시 이 설정이 자동 변경됩니다. Exam 탭은 ✕/전체닫기 전까지 유지.
                   </div>
                 </Group>
-                <Group title="2D 행잉 (모달리티 → Series / Image 분할)">
+                <Group title="2D 행잉 (모달리티 → Series / Image 분할) — 공통">
+                  <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
+                    <input type="checkbox" checked={h2dCommonOn} onChange={(e) => setH2dCommonOn(e.target.checked)} />
+                    이 공통 설정을 모든 뷰어에 우선 적용
+                  </label>
                   <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                    체크 시 SaintView/I-View/T-View 각 뷰어의 개별 2D 행잉보다 <b>이 공통 설정이 우선</b>합니다.
+                    해제하면 각 뷰어(뷰어 공통 &gt; SaintView/I-View/T-View)의 개별 설정을 사용합니다.<br />
                     검사를 열 때 모달리티별 기본 분할 — <b>Series</b>(뷰포트 개수) + <b>Image</b>(페인 내 이미지 타일). 그리드에서 선택.
                   </div>
-                  {["CR", "DR", "MG", "US", "CT", "MR", "XA", "NM", "PT"].map((m) => {
-                    const cur = h2dMap[m] ?? { s: "1x1", i: "1x1" };
-                    const parseG = (s: string) => { const [r, c] = s.split("x").map(Number); return { r: r || 1, c: c || 1 }; };
-                    const gStr = (g: { r: number; c: number }) => `${g.r}x${g.c}`;
-                    return (
-                      <div key={m} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                        <b style={{ width: 42, fontSize: 12 }}>{m}</b>
-                        <GridPicker label="Series" max={10} value={parseG(cur.s)}
-                                    onPick={(g) => setH2dMap((p) => ({ ...p, [m]: { ...cur, s: gStr(g) } }))} />
-                        <GridPicker label="Image" max={10} value={parseG(cur.i)}
-                                    onPick={(g) => setH2dMap((p) => ({ ...p, [m]: { ...cur, i: gStr(g) } }))} />
-                      </div>
-                    );
-                  })}
+                  <Hanging2dEditor map={h2dMap} onChange={(m, next) => setH2dMap((p) => ({ ...p, [m]: next }))} />
                 </Group>
                 <Group title="Tools bar 구성 (UBPACS p.18~21 — 계정 로밍)">
                   {TOOLBAR_DEFS.map((sec) => (

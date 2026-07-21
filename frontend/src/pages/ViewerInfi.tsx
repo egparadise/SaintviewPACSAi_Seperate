@@ -505,10 +505,28 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         api.getSetting("viewer.prefs").catch(() => ({ value: {} })),
         api.getSetting("viewer.hp").catch(() => ({ value: {} })),
       ]);
-      const prefsV = prefsRes.value as
-        { infi_default_layout?: Record<string, { s?: { r: number; c: number } | null;
-                                                 i?: { r: number; c: number } | null }> };
-      const defMap = prefsV.infi_default_layout ?? {};
+      const prefsV = prefsRes.value as {
+        infi_default_layout?: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }>;
+        hanging2d?: Record<string, string | { s: string; i: string }>;
+        hanging2d_common_on?: boolean;
+        hanging2d_by_viewer?: Record<string, Record<string, string | { s: string; i: string }>>;
+      };
+      // In-View 기본 레이아웃 = infi_default_layout. 뷰어 공통 2D 행잉(공통/뷰어별 infi)을 병합:
+      // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 우선. RxC 문자열 → {r,c} 변환.
+      const defMap: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }> =
+        { ...(prefsV.infi_default_layout ?? {}) };
+      {
+        const toRC = (s?: string) => { if (!s) return null; const [rr, cc] = s.split("x").map(Number); return { r: rr || 1, c: cc || 1 }; };
+        const toE = (val?: string | { s: string; i: string }) =>
+          !val ? null : typeof val === "string" ? { s: toRC(val), i: null } : { s: toRC(val.s), i: toRC(val.i) };
+        const commonH = prefsV.hanging2d ?? {};
+        const perVH = prefsV.hanging2d_by_viewer?.infi ?? {};
+        const commonOn = prefsV.hanging2d_common_on ?? true;
+        for (const mm of new Set([...Object.keys(commonH), ...Object.keys(perVH)])) {
+          const h = commonOn ? (toE(commonH[mm]) ?? toE(perVH[mm])) : (toE(perVH[mm]) ?? toE(commonH[mm]));
+          if (h && (h.s || h.i)) defMap[mm] = { s: h.s ?? defMap[mm]?.s ?? null, i: h.i ?? defMap[mm]?.i ?? null };
+        }
+      }
       // IN-2 ①: 규칙 기반 행잉 프로토콜(viewer.hp) — 모달리티×부위×Projection 첫 일치 자동 적용
       //          (TY hpRules/applyHp 등가 — 단독 검사에서 Modality 기본 레이아웃보다 우선)
       const hpv = hpRes.value as
