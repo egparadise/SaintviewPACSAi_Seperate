@@ -1,7 +1,10 @@
 // 설정 — INFINITT Setting options 패턴(좌측 트리 + 우측 페이지, 화면분석 §5)
 import { useEffect, useRef, useState } from "react";
 import { VIEWER_BASE, api, sttStatus, type AiQuality, type OrthancStatus, type PhraseRow, type SttStatus } from "../api";
-import { COLUMN_DEFS, DEFAULT_COLUMNS, DEFAULT_FIND_FIELDS, FIND_FIELDS, PhraseEditModal } from "./Worklist";
+import {
+  COLUMN_DEFS, DEFAULT_COLUMNS, DEFAULT_FIND_FIELDS, FIND_FIELDS, PhraseEditModal,
+  INFI_COLUMNS, SV_COLUMNS, SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
+} from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
 import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, TOOLBAR_DEFS, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
 import { IN_LAYOUTS, IN_PALETTE } from "../lib/infiConfig";
@@ -166,6 +169,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [columns, setColumns] = useState<string[]>(DEFAULT_COLUMNS);
   // 뷰어별 워크리스트 컬럼 오버라이드 — null/undefined = 공통(columns) 사용
   const [wlBy, setWlBy] = useState<{ sv?: string[] | null; ty?: string[] | null; infi?: string[] | null }>({});
+  // 뷰어별 패널 표시/숨김 오버라이드 (sv·infi) — 없으면 기본 전부 표시. ty 는 공통 wlPanels 사용
+  const [wlPanelsBy, setWlPanelsBy] = useState<{ sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null }>({});
   const [findFields, setFindFields] = useState<string[]>(DEFAULT_FIND_FIELDS);
   const [dblAction, setDblAction] = useState<"viewer2d" | "ohif">("viewer2d");
   const [hangingCT, setHangingCT] = useState("default");
@@ -306,6 +311,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     api.getSetting("worklist.prefs").then((r) => {
       const bv = (r.value as { by_viewer?: { sv?: string[] | null; ty?: string[] | null; infi?: string[] | null } }).by_viewer;
       if (bv) setWlBy(bv);
+      const pbv = (r.value as { panels_by_viewer?: { sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null } }).panels_by_viewer;
+      if (pbv) setWlPanelsBy(pbv);
       const v = r.value as {
         auto_refresh_sec?: number; default_status?: string; columns?: string[];
         find_fields?: string[]; dbl_action?: "viewer2d" | "ohif";
@@ -492,7 +499,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     const cur = (await api.getSetting("worklist.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("worklist.prefs",
       { ...cur, auto_refresh_sec: refreshSec, default_status: defaultStatus, columns,
-        by_viewer: wlBy,
+        by_viewer: wlBy, panels_by_viewer: wlPanelsBy,
         find_fields: findFields, dbl_action: dblAction, panels: wlPanels, nav_left: polNavLeft }, "user");
     const curV = (await api.getSetting("viewer.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("viewer.prefs", {
@@ -1122,28 +1129,64 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             )}
 
             {(["wlSaint", "wlTy", "wlIn"] as const).includes(page as never) && (() => {
-              const vk = page === "wlSaint" ? "sv" : page === "wlTy" ? "ty" : "infi";
+              const vk: ViewerKey = page === "wlSaint" ? "sv" : page === "wlTy" ? "ty" : "infi";
               const vLabel = page === "wlSaint" ? "SaintView" : page === "wlTy" ? "T-View" : "I-View";
-              const ov = wlBy[vk as "sv" | "ty" | "infi"];
+              const ov = wlBy[vk];
+              // 오버라이드 시작 시드값 — sv/infi 는 각 스킨 기본 컬럼, ty 는 공통 컬럼
+              const colDefault = vk === "sv" ? SV_COLUMNS : vk === "infi" ? INFI_COLUMNS : columns;
               return (
-                <Group title={vLabel + " 워크리스트 — 뷰어별 그리드 컬럼 (계정별 저장)"}>
-                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, marginBottom: 8 }}>
-                    <input type="checkbox" checked={!ov}
-                           onChange={(e) => setWlBy((p) => ({ ...p, [vk]: e.target.checked ? null : [...columns] }))} />
-                    공통 워크리스트 설정 사용 (기본) — 해제하면 이 뷰어 전용 컬럼 구성을 편집합니다
-                  </label>
-                  {ov && (
-                    <FilterSettingList
-                      all={Object.keys(COLUMN_DEFS)}
-                      selected={ov}
-                      labelOf={(k) => COLUMN_DEFS[k].label}
-                      onChange={(cols) => setWlBy((p) => ({ ...p, [vk]: cols }))}
-                    />
-                  )}
-                  <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                    {vLabel} 모드로 워크리스트를 열면 이 구성이 공통 설정 대신 적용됩니다. OK(저장) 시 반영.
-                  </div>
-                </Group>
+                <>
+                  <Group title={vLabel + " 워크리스트 — 뷰어별 그리드 컬럼 (계정별 저장)"}>
+                    <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, marginBottom: 8 }}>
+                      <input type="checkbox" checked={!ov}
+                             onChange={(e) => setWlBy((p) => ({ ...p, [vk]: e.target.checked ? null : [...colDefault] }))} />
+                      공통 워크리스트 설정 사용 (기본) — 해제하면 이 뷰어 전용 컬럼 구성을 편집합니다
+                    </label>
+                    {ov && (
+                      <FilterSettingList
+                        all={Object.keys(COLUMN_DEFS)}
+                        selected={ov}
+                        labelOf={(k) => COLUMN_DEFS[k].label}
+                        onChange={(cols) => setWlBy((p) => ({ ...p, [vk]: cols }))}
+                      />
+                    )}
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      {vLabel} 모드로 워크리스트를 열면 이 구성이 공통 설정 대신 적용됩니다. OK(저장) 시 반영.
+                    </div>
+                  </Group>
+                  <Group title={vLabel + " 워크리스트 — 구성요소 표시/숨김 (화면 드래그·✕ 와 동기)"}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+                      {vk === "ty"
+                        ? ([
+                            ["orders", "오더/예약 (Order)"], ["prior", "과거검사 (Related-1)"],
+                            ["compare", "비교세트 (Related-2)"], ["thumb", "썸네일 (Thumbnail)"],
+                            ["std", "상용구 (Reference)"], ["comment", "Comment / MEMO"],
+                            ["report", "리포트 (Report)"],
+                          ] as const).map(([pk, label]) => (
+                            <label key={pk} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}>
+                              <input type="checkbox" checked={!!wlPanels[pk]}
+                                     onChange={(e) => setWlPanels((p) => ({ ...p, [pk]: e.target.checked }))} />
+                              {label}
+                            </label>
+                          ))
+                        : SVINFI_PANELS.map((pk) => {
+                            const cur = wlPanelsBy[vk as "sv" | "infi"] ?? {};
+                            return (
+                              <label key={pk} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}>
+                                <input type="checkbox" checked={cur[pk] !== false}
+                                       onChange={(e) => setWlPanelsBy((p) => ({
+                                         ...p, [vk]: { ...(p[vk as "sv" | "infi"] ?? {}), [pk]: e.target.checked },
+                                       }))} />
+                                {SVINFI_PANEL_LABEL[pk]}
+                              </label>
+                            );
+                          })}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      해제 = 워크리스트에서 숨김. 화면에서 스플리터를 최소까지 드래그하거나 ✕(패널 그립)로 숨긴 상태가 여기와 양방향으로 동기됩니다.
+                    </div>
+                  </Group>
+                </>
               );
             })()}
             {page === "worklist" && (
@@ -1986,32 +2029,45 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       뷰어의 <b>All Close ✕</b> 클릭 시
                     </span>
                   </div>
-                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                  {(() => {
+                    // 상호 배타: 모니터별 '◀▶ 탐색 탭'(tab_binding)이 하나라도 설정되면 이 기능은 비활성.
+                    // 탐색 탭을 모두 '전체(필터 없음)'로 두어야 워크리스트 탭→모니터 배치를 설정할 수 있다.
+                    const navTabOn = Object.values(tabBinding).some((v) => !!v);
+                    return (
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, opacity: navTabOn ? 0.5 : 1 }}>
                     <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>
                       워크리스트 탭 → 모니터 배치 (라운드로빈 대신 지정 모니터로 오픈)
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6 }}>
-                      기본은 번호순 순환(1,2,3…)이지만, 여기에 지정한 <b>워크리스트 탭</b>에서 연 검사는 항상 지정 모니터에 열립니다 (예: WORKLIST 2 → 3번).
-                    </div>
+                    {navTabOn ? (
+                      <div style={{ fontSize: 11.5, color: "var(--stat-emergency,#f87171)", marginBottom: 6 }}>
+                        ⚠ 위 표의 <b>◀▶ 탐색 탭</b>이 설정되어 있어 이 기능은 비활성화됩니다. 탐색 탭을 모두 <b>'전체 (필터 없음)'</b>로 두면 설정할 수 있습니다.
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6 }}>
+                        기본은 번호순 순환(1,2,3…)이지만, 여기에 지정한 <b>워크리스트 탭</b>에서 연 검사는 항상 지정 모니터에 열립니다 (예: WORKLIST 2 → 3번).
+                      </div>
+                    )}
                     {tabMonMap.map((rule, ri) => (
                       <div key={ri} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
-                        <select value={rule.tab}
+                        <select value={rule.tab} disabled={navTabOn}
                                 onChange={(e) => setTabMonMap((p) => p.map((r, k) => k === ri ? { ...r, tab: e.target.value } : r))}
                                 style={{ maxWidth: 160 }}>
                           <option value="">— 탭 선택 —</option>
                           {availTabs.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
                         </select>
                         <span>→ 모니터</span>
-                        <input type="number" min={1} max={monitors.length || 8} value={rule.monitor + 1}
+                        <input type="number" min={1} max={monitors.length || 8} value={rule.monitor + 1} disabled={navTabOn}
                                onChange={(e) => setTabMonMap((p) => p.map((r, k) => k === ri ? { ...r, monitor: Math.max(0, (Number(e.target.value) || 1) - 1) } : r))}
                                style={{ width: 56 }} />
-                        <button onClick={() => setTabMonMap((p) => p.filter((_, k) => k !== ri))}
+                        <button disabled={navTabOn} onClick={() => setTabMonMap((p) => p.filter((_, k) => k !== ri))}
                                 style={{ fontSize: 11 }}>삭제</button>
                       </div>
                     ))}
-                    <button onClick={() => setTabMonMap((p) => [...p, { tab: "", monitor: 0 }])}
+                    <button disabled={navTabOn} onClick={() => setTabMonMap((p) => [...p, { tab: "", monitor: 0 }])}
                             style={{ fontSize: 11.5 }}>+ 예외 추가</button>
                   </div>
+                    );
+                  })()}
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <button disabled={wlMon == null}
                             title="워크리스트를 선택한 모니터의 새 창으로 열기 (기존 탭은 닫아도 됨)"

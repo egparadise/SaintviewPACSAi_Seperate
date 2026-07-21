@@ -242,6 +242,38 @@ export const SV_COLUMNS = [
   "modality", "study_time", "referring_physician", "body_part", "source_aet",
 ];
 
+// 뷰어 스킨 키 — client_viewer 값과 1:1 (sv=SaintView / infi=I-View / ty=T-View)
+export type ViewerKey = "sv" | "infi" | "ty";
+// 뷰어별 컬럼 기본값(오버라이드 없을 때). ty 는 런타임에 공통 columns 로 대체된다.
+export const VIEWER_COL_DEFAULT: Record<ViewerKey, string[]> = {
+  sv: SV_COLUMNS, infi: INFI_COLUMNS, ty: DEFAULT_COLUMNS,
+};
+// SaintView/I-View 고정 배치의 숨김 가능한 구역(검색레일·검사그리드는 항상 표시).
+//  preview=좌하단 미리보기 · related=과거검사 · report=리포트
+export const SVINFI_PANELS = ["preview", "related", "report"] as const;
+export const SVINFI_PANEL_LABEL: Record<string, string> = {
+  preview: "미리보기 (Preview)", related: "과거검사 (Related)", report: "리포트 (Report)",
+};
+const DEFAULT_SVINFI_PANELS: Record<string, boolean> = { preview: true, related: true, report: true };
+// T-View(현행) 하단 패널 기본 표시 상태 (UBPACS p.8 7구성)
+const DEFAULT_TY_PANELS: Record<string, boolean> = {
+  orders: true, prior: true, compare: true, thumb: true, std: true, comment: true, report: true,
+};
+
+// 숨긴 구역 자리의 얇은 재열기 바 — 클릭하면 마지막 크기로 다시 표시(화면에서 복구, Setting 체크박스와 동기)
+function ReopenBar({ label, onExpand }: { label: string; onExpand: () => void }) {
+  return (
+    <div onClick={onExpand} title={`${label} 다시 표시`}
+         style={{ height: 18, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center",
+                  gap: 6, padding: "0 8px", margin: "2px 0", fontSize: 11, color: "var(--text-secondary)",
+                  background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 4,
+                  userSelect: "none" }}>
+      <span style={{ fontWeight: 700 }}>▸</span>{label}
+      <span style={{ marginLeft: "auto", opacity: 0.7 }}>펼치기</span>
+    </div>
+  );
+}
+
 /* ── 유효 권한 게이트 (레인 W) — 액션별 필요 권한 키 (병원 매트릭스 perm/me) ──
  * 서버가 이미 403 을 강제하므로 이 UI 게이트는 UX(사전 비활성+안내) 목적이다.
  * 매핑이 없는 액션 = 조회성(검색·조회·뷰어 열기) → 항상 허용.
@@ -2095,11 +2127,15 @@ function ContextMenu({ x, y, row, onAction, onClose, ohifOn = false, allowed }: 
 
 interface LayoutSizes { railW: number; dH: number; eH: number; thumbW: number; stdW: number; commentW: number }
 const DEFAULT_SIZES: LayoutSizes = { railW: 152, dH: 140, eH: 300, thumbW: 230, stdW: 210, commentW: 250 };
+// SaintView/I-View 고정 배치 구역 높이(px) — 좌하단 Preview·과거검사·리포트
+interface InfiSizes { prevH: number; priorH: number; repH: number }
+const DEFAULT_INFI_SIZES: InfiSizes = { prevH: 220, priorH: 96, repH: 260 };
 
 /* ── 패널 드래그 래퍼 — 좌측 그립을 끌어 같은 행 안에서 자리 교환 ── */
-function DraggablePanel({ zone, k, onDrop, style, children }: {
+function DraggablePanel({ zone, k, onDrop, onHide, style, children }: {
   zone: "d" | "e"; k: string;
   onDrop: (zone: "d" | "e", src: string, dst: string) => void;
+  onHide?: () => void;   // 있으면 그립 하단에 ✕(숨기기) 버튼 — 화면에서 숨김(Setting 체크박스와 동기)
   style?: React.CSSProperties; children: React.ReactNode;
 }) {
   return (
@@ -2109,13 +2145,22 @@ function DraggablePanel({ zone, k, onDrop, style, children }: {
            const src = e.dataTransfer.getData(`text/sv-panel-${zone}`);
            if (src) onDrop(zone, src, k);
          }}>
-      <div draggable title="패널 이동 — 드래그해서 자리 교환"
-           onDragStart={(e) => e.dataTransfer.setData(`text/sv-panel-${zone}`, k)}
-           style={{ width: 10, flexShrink: 0, cursor: "grab", display: "flex", alignItems: "center",
-                    justifyContent: "center", color: "var(--text-secondary)", fontSize: 9,
+      <div style={{ width: 12, flexShrink: 0, display: "flex", flexDirection: "column",
                     background: "var(--bg-elevated)", borderRadius: "4px 0 0 4px",
                     border: "1px solid var(--border)", borderRight: "none" }}>
-        ⋮
+        <div draggable title="패널 이동 — 드래그해서 자리 교환"
+             onDragStart={(e) => e.dataTransfer.setData(`text/sv-panel-${zone}`, k)}
+             style={{ flex: 1, cursor: "grab", display: "flex", alignItems: "center",
+                      justifyContent: "center", color: "var(--text-secondary)", fontSize: 9 }}>
+          ⋮
+        </div>
+        {onHide && (
+          <div title="이 패널 숨기기 (Setting>워크리스트에서 다시 표시)" onClick={onHide}
+               style={{ flexShrink: 0, cursor: "pointer", textAlign: "center", fontSize: 9, lineHeight: "14px",
+                        color: "var(--text-secondary)", borderTop: "1px solid var(--border)" }}>
+            ✕
+          </div>
+        )}
       </div>
       <div style={{ display: "flex", flex: 1, minWidth: 0, minHeight: 0 }}>{children}</div>
     </div>
@@ -2391,14 +2436,63 @@ export function Worklist() {
   const [selNodeId, setSelNodeId] = useState<string | null>(null);
   const insertRef = useRef<((t: string) => void) | null>(null);
   const phraseShortcutRef = useRef<Record<string, string>>({});  // Alt+키 → 상용구 본문
-  // 레이아웃 크기 — 스플리터 드래그로 조절, 로그인 계정에 저장(로밍)
+  // 레이아웃 크기 — 스플리터 드래그로 조절, 로그인 계정에 뷰어별 저장(로밍)
   const [sizes, setSizes] = useState<LayoutSizes>(DEFAULT_SIZES);
   const sizesRef = useRef(sizes);
   useEffect(() => { sizesRef.current = sizes; }, [sizes]);
-  const persistSizes = useCallback(() => {
-    api.getSetting("worklist.prefs").then((r) =>
-      api.putSetting("worklist.prefs", { ...r.value, layout_sizes: sizesRef.current }, "user")).catch(() => {});
+  // SaintView/I-View 고정 배치 구역 높이 — 여기서 선언(뷰어별 persist 에서 sizes 와 함께 저장)
+  const [infiSz, setInfiSz] = useState<InfiSizes>(DEFAULT_INFI_SIZES);
+  const infiSzRef = useRef(infiSz);
+  useEffect(() => { infiSzRef.current = infiSz; }, [infiSz]);
+  // 원본 worklist.prefs + 현재 활성 뷰어 스킨 키 — 뷰어별 해석·병합 저장 라우팅
+  const wlPrefsRef = useRef<Record<string, unknown>>({});
+  const vkRef = useRef<ViewerKey>("ty");
+  // 뷰어별 크기 저장 — ty=legacy layout_sizes / sv·infi=sizes_by_viewer[vk]{railW,prevH,priorH,repH}
+  const persistViewerSizes = useCallback(() => {
+    const vk = vkRef.current;
+    api.getSetting("worklist.prefs").then((r) => {
+      const v = { ...(r.value as Record<string, unknown>) };
+      if (vk === "ty") {
+        v.layout_sizes = sizesRef.current;
+      } else {
+        const prev = (v.sizes_by_viewer as Record<string, unknown>) ?? {};
+        v.sizes_by_viewer = { ...prev, [vk]: { railW: sizesRef.current.railW, ...infiSzRef.current } };
+      }
+      wlPrefsRef.current = v;
+      return api.putSetting("worklist.prefs", v, "user");
+    }).catch(() => {});
   }, []);
+  // 뷰어별 패널 표시/숨김 저장 — ty=legacy panels / sv·infi=panels_by_viewer[vk]
+  const persistViewerPanels = useCallback((next: Record<string, boolean>) => {
+    const vk = vkRef.current;
+    api.getSetting("worklist.prefs").then((r) => {
+      const v = { ...(r.value as Record<string, unknown>) };
+      if (vk === "ty") {
+        v.panels = next;
+      } else {
+        const prev = (v.panels_by_viewer as Record<string, unknown>) ?? {};
+        v.panels_by_viewer = { ...prev, [vk]: next };
+      }
+      wlPrefsRef.current = v;
+      return api.putSetting("worklist.prefs", v, "user");
+    }).catch(() => {});
+  }, []);
+  // 하위호환 별칭 — 기존 railW·dH·eH 스플리터 호출부 유지(모두 뷰어별 저장으로 라우팅)
+  const persistSizes = persistViewerSizes;
+  // 패널 표시/숨김 토글 + 즉시 뷰어별 저장 (화면↔Setting 양방향 동기)
+  const setPanelShown = useCallback((k: string, on: boolean) => {
+    setPanelsOn((p) => { const n = { ...p, [k]: on }; persistViewerPanels(n); return n; });
+  }, [persistViewerPanels]);
+  // SaintView/I-View 구역 높이 라이브 드래그 — ref 를 즉시 갱신해 onEnd(collapse 판정)이 최신값을 보게 한다
+  const setInfiLive = useCallback((patch: Partial<InfiSizes>) => {
+    infiSzRef.current = { ...infiSzRef.current, ...patch };
+    setInfiSz(infiSzRef.current);
+  }, []);
+  // 스플리터 놓을 때: 최소 높이(min)까지 줄였으면 해당 구역 숨김, 아니면 크기 저장 (0까지 드래그=숨김)
+  const endInfiRegion = useCallback((region: string, sizeKey: keyof InfiSizes, min: number) => {
+    if (infiSzRef.current[sizeKey] <= min + 2) setPanelShown(region, false);
+    else persistViewerSizes();
+  }, [setPanelShown, persistViewerSizes]);
   // E행 패널 사이 스플리터: 좌측 패널 폭 조절(좌측이 가변 report면 우측을 역방향 조절)
   const resizeE = useCallback((left: string, right: string, dx: number) => {
     const keyOf = (k: string): keyof LayoutSizes | null =>
@@ -2432,27 +2526,26 @@ export function Worklist() {
       const v = r.value as {
         auto_refresh_sec?: number; default_status?: string; columns?: string[];
         find_fields?: string[]; dbl_action?: "viewer2d" | "ohif";
+        by_viewer?: { sv?: string[] | null; ty?: string[] | null; infi?: string[] | null };
+        panel_order?: { d?: string[]; e?: string[] };
       };
+      // 원본 prefs 보관 — 뷰어별 해석/병합 저장의 기준값(panels_by_viewer/sizes_by_viewer 포함)
+      wlPrefsRef.current = (r.value ?? {}) as Record<string, unknown>;
       if (v.auto_refresh_sec !== undefined) setRefreshSec(v.auto_refresh_sec);
       if (v.default_status) setFilters((f) => ({ ...f, status: v.default_status! }));
+      // 공통 컬럼(read_state 도입 전 저장분엔 판독 컬럼을 맨 앞에 가산 보정) + 뷰어별 오버라이드
       if (v.columns?.length) {
-        // 저장된 사용자 컬럼 설정(read_state 도입 전 저장분)에 신규 판독 컬럼이 없으면
-        // 맨 앞에 가산 보정한다 — 사용자 설정 무시가 아니라 추가만
         const cols = v.columns.filter((c) => COLUMN_DEFS[c]);
         if (!cols.includes("read_state")) cols.unshift("read_state");
         wlColsBaseRef.current = cols;
-        wlByViewerRef.current = (v as { by_viewer?: { sv?: string[] | null; ty?: string[] | null; infi?: string[] | null } }).by_viewer ?? {};
-        setWlBvTick((t) => t + 1);
-        setColumns(cols);
       }
+      wlByViewerRef.current = v.by_viewer ?? {};
       if (v.find_fields?.length) setFindFields(v.find_fields.filter((c) => FIND_FIELDS[c]));
       if (v.dbl_action) setDblAction(v.dbl_action);
-      const po = (v as { panel_order?: { d?: string[]; e?: string[] } }).panel_order;
+      const po = v.panel_order;
       if (po?.d?.length === 3 && po?.e?.length === 4) setPanelOrder({ d: po.d, e: po.e });
-      const pn = (v as { panels?: Record<string, boolean> }).panels;
-      if (pn) setPanelsOn((prev) => ({ ...prev, ...pn }));
-      const ls = (v as { layout_sizes?: Partial<LayoutSizes> }).layout_sizes;
-      if (ls) setSizes((prev) => ({ ...prev, ...ls }));
+      // 패널/크기는 뷰어별 해석 효과가 vk 확정 후 적용 — 여기서 tick 만 올려 트리거
+      setWlBvTick((t) => t + 1);
     }).catch(() => {});
     loadTabs().then(setTabs).catch(() => {});
     loadTree().then(setTreeNodes).catch(() => {});
@@ -2679,8 +2772,10 @@ export function Worklist() {
       // ── 워크리스트 탭 → 모니터 배치 예외 (최우선) ──
       // 검사를 연 순간의 활성 워크리스트 탭에 지정 모니터가 있으면, 뷰어 모니터 선택·멀티 여부와
       // 무관하게 그 모니터에 직접 연다. (다중선택 일괄 오픈은 forceRoundRobin 으로 제외)
+      // 상호 배타: 모니터별 ◀▶ 탐색 탭(tab_binding)이 하나라도 설정돼 있으면 이 배치 예외는 무시(설정 UI도 비활성).
       const activeTab = activeTabIdRef.current;
-      const ovMon = cfg.forceRoundRobin ? undefined
+      const navTabOn = Object.values(tabBinding).some((v) => !!v);
+      const ovMon = (cfg.forceRoundRobin || navTabOn) ? undefined
         : tabMonMap.find((r) => r.tab && r.tab === activeTab)?.monitor;
       if (ovMon != null) {
         const feat = await screenFeatures([ovMon], "width=1500,height=920");   // 지정 모니터 실좌표(감지 가능 시)
@@ -3111,12 +3206,40 @@ export function Worklist() {
   const [infiMode, setInfiMode] = useState(false);
   // SAINT VIEW 모드 — client_viewer=sv 면 SAINT VIEW 워크리스트 스킨(상태 카운트 바 + SV 컬럼, infi 7구역 레이아웃 재사용)
   const [svMode, setSvMode] = useState(false);
-  // 뷰어별 컬럼 적용 — 현재 모드(sv/infi/ty)의 오버라이드가 있으면 공통 대신 사용
+  // 뷰어별 레이아웃 해석 — 활성 스킨(sv/infi/ty)에 맞춰 컬럼·패널·크기를 원본 prefs 에서 재구성.
+  //  ty  = legacy 키(columns/panels/layout_sizes)
+  //  sv·infi = 뷰어별 버킷(by_viewer / panels_by_viewer / sizes_by_viewer) + 없으면 뷰어 기본값
   useEffect(() => {
-    const key = svMode ? "sv" : infiMode ? "infi" : "ty";
-    const ov = wlByViewerRef.current[key as "sv" | "ty" | "infi"];
-    const next = (ov?.length ? ov.filter((c) => COLUMN_DEFS[c]) : wlColsBaseRef.current);
-    if (next?.length) setColumns(next.includes("read_state") ? next : ["read_state", ...next]);
+    const vk: ViewerKey = svMode ? "sv" : infiMode ? "infi" : "ty";
+    vkRef.current = vk;
+    const v = wlPrefsRef.current as {
+      panels?: Record<string, boolean>;
+      panels_by_viewer?: Partial<Record<ViewerKey, Record<string, boolean> | null>>;
+      layout_sizes?: Partial<LayoutSizes>;
+      sizes_by_viewer?: Partial<Record<ViewerKey, (Partial<LayoutSizes> & Partial<InfiSizes>) | null>>;
+      infi_sizes?: Partial<InfiSizes>;
+    };
+    // ── 컬럼 ──
+    const ov = wlByViewerRef.current[vk];
+    const base = vk === "ty" ? wlColsBaseRef.current : VIEWER_COL_DEFAULT[vk];
+    const cols = ov?.length ? ov.filter((c) => COLUMN_DEFS[c]) : base;
+    if (cols?.length) setColumns(cols.includes("read_state") ? cols : ["read_state", ...cols]);
+    // ── 패널 표시/숨김 ──
+    setPanelsOn(vk === "ty"
+      ? { ...DEFAULT_TY_PANELS, ...(v.panels ?? {}) }
+      : { ...DEFAULT_SVINFI_PANELS, ...(v.panels_by_viewer?.[vk] ?? {}) });
+    // ── 크기 ──
+    if (vk === "ty") {
+      setSizes({ ...DEFAULT_SIZES, ...(v.layout_sizes ?? {}) });
+    } else {
+      const bag = v.sizes_by_viewer?.[vk] ?? {};
+      setSizes({ ...DEFAULT_SIZES, railW: bag.railW ?? v.layout_sizes?.railW ?? DEFAULT_SIZES.railW });
+      setInfiSz({
+        prevH: bag.prevH ?? v.infi_sizes?.prevH ?? DEFAULT_INFI_SIZES.prevH,
+        priorH: bag.priorH ?? v.infi_sizes?.priorH ?? DEFAULT_INFI_SIZES.priorH,
+        repH: bag.repH ?? v.infi_sizes?.repH ?? DEFAULT_INFI_SIZES.repH,
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [svMode, infiMode, wlBvTick]);
   const [svPerf, setSvPerf] = useState(false);   // SAINT VIEW 상단 탭 — General/Performance 전환
@@ -3133,19 +3256,7 @@ export function Worklist() {
       ohifOnRef.current = on;
     }).catch(() => {});
   }, [refreshKey]);
-  // Infi 레이아웃 패널 크기(px) — 각 경계 스플리터로 드래그 조절 후 계정 저장
-  const [infiSz, setInfiSz] = useState({ prevH: 220, priorH: 96, repH: 260 });
-  useEffect(() => {
-    api.getSetting("worklist.prefs").then((r) => {
-      const s = (r.value as { infi_sizes?: typeof infiSz }).infi_sizes;
-      if (s) setInfiSz((p) => ({ ...p, ...s }));
-    }).catch(() => {});
-  }, []);
-  const persistInfiSz = useCallback(() => {
-    api.getSetting("worklist.prefs").then((r) =>
-      api.putSetting("worklist.prefs", { ...r.value, infi_sizes: infiSzRef.current }, "user")).catch(() => {});
-  }, []);
-  const infiSzRef = useRef(infiSz);
+  // (infiSz 상태·infiSzRef·persistInfiSz 는 상단 레이아웃 크기 블록으로 이동 — 뷰어별 저장)
 
   // In/SAINT VIEW 좌측 검색레일 스크롤 보장 — flex 체인 대신 실제 top 을 측정해 뷰포트 기준 maxHeight 를
   // 직접 지정한다(상단 바 구성이 바뀌어도 정확, 브라우저 환경차 무관). 렌더/리사이즈마다 재측정.
@@ -3154,16 +3265,17 @@ export function Worklist() {
     const el = railScrollRef.current;
     if (!el) return;
     const top = el.getBoundingClientRect().top;
-    // 아래 여백 = Preview(prevH) + h-스플리터(6) + 소폭 마진. 최소 80px 보장.
-    const h = Math.max(80, Math.round(window.innerHeight - top - infiSzRef.current.prevH - 14));
+    // 아래 여백 = Preview 표시 시 (prevH + 스플리터/마진), 숨김 시 재열기 바(약 22px). 최소 80px 보장.
+    // 상태를 직접 읽어(ref 지연 없이) 매 렌더 재측정 — preview 토글·드래그 즉시 반영.
+    const reserve = panelsOn.preview ? infiSz.prevH + 14 : 22;
+    const h = Math.max(80, Math.round(window.innerHeight - top - reserve));
     el.style.maxHeight = `${h}px`;
-  }, []);
+  }, [panelsOn.preview, infiSz.prevH]);
   useLayoutEffect(fitRail);   // 매 렌더 후 재측정(조건부 상단 바 출현/사라짐까지 반영)
   useEffect(() => {
     window.addEventListener("resize", fitRail);
     return () => window.removeEventListener("resize", fitRail);
   }, [fitRail]);
-  useEffect(() => { infiSzRef.current = infiSz; }, [infiSz]);
 
   // In 모드 ① 상단 아이콘 툴바 (INFINITT 원본 13종) — 기존 doAction + 특수 동작 매핑
   const infiTool = (act: string) => {
@@ -3426,13 +3538,19 @@ export function Worklist() {
                                   selectedId={selNodeId} onSelect={applyFolder} applyHint />
               } />
             </div>
-            <Splitter dir="h" onEnd={persistInfiSz}
-                      onDrag={(dy) => setInfiSz((s) => ({ ...s, prevH: clampSz(s.prevH - dy, 80, 600) }))} />
-            {/* ⑤ Preview — 선택 검사 미리보기 (원본 좌하단 흑배경) */}
-            <div style={{ height: infiSz.prevH, flexShrink: 0, background: "#000", border: "1px solid var(--border)",
-                          borderRadius: 4, overflow: "hidden", display: "flex" }}>
-              <ThumbnailPanel detail={selected} onOpen={() => void doAction("viewdraft")} />
-            </div>
+            {/* ⑤ Preview — 선택 검사 미리보기 (원본 좌하단 흑배경). 스플리터 최소까지 드래그=숨김 */}
+            {panelsOn.preview ? (
+              <>
+                <Splitter dir="h" onEnd={() => endInfiRegion("preview", "prevH", 60)}
+                          onDrag={(dy) => setInfiLive({ prevH: clampSz(infiSzRef.current.prevH - dy, 60, 600) })} />
+                <div style={{ height: infiSz.prevH, flexShrink: 0, background: "#000", border: "1px solid var(--border)",
+                              borderRadius: 4, overflow: "hidden", display: "flex" }}>
+                  <ThumbnailPanel detail={selected} onOpen={() => void doAction("viewdraft")} />
+                </div>
+              </>
+            ) : (
+              <ReopenBar label={SVINFI_PANEL_LABEL.preview} onExpand={() => setPanelShown("preview", true)} />
+            )}
           </div>
           {/* 좌|우 세로 스플리터 (railW) */}
           <Splitter dir="v" onEnd={persistSizes}
@@ -3441,24 +3559,36 @@ export function Worklist() {
           <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 60, display: "flex",
                           ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
-              <StudyGrid items={items} columns={svMode ? SV_COLUMNS : INFI_COLUMNS} variant="infi" selectedId={selected?.id ?? null} selectedIds={selectedIds}
+              <StudyGrid items={items} columns={columns} variant="infi" selectedId={selected?.id ?? null} selectedIds={selectedIds}
                          treeDisabled={localMode}
                          onSelect={onSelect}
                          onOpen={(r) => { if (localMode) setLocalViewerRow(r); else void doAction("viewdraft", r); }}
                          onContext={(e, r) => setCtx({ x: e.clientX, y: e.clientY, row: r })} />
             </div>
-            <Splitter dir="h" onEnd={persistInfiSz}
-                      onDrag={(dy) => setInfiSz((s) => ({ ...s, priorH: clampSz(s.priorH - dy, 48, 320) }))} />
-            <div style={{ height: infiSz.priorH, flexShrink: 0, display: "flex" }}>
-              <PriorStudiesGrid detail={selected}
-                                onAddCompare={(e) => setCompareSet((prev) =>
-                                  prev.some((c) => c.study_uid === e.study_uid) ? prev : [...prev, e])} />
-            </div>
-            <Splitter dir="h" onEnd={persistInfiSz}
-                      onDrag={(dy) => setInfiSz((s) => ({ ...s, repH: clampSz(s.repH - dy, 80, 640) }))} />
-            <div style={{ height: infiSz.repH, flexShrink: 0, display: "flex" }}>
-              <InfiReport detail={selected} />
-            </div>
+            {panelsOn.related ? (
+              <>
+                <Splitter dir="h" onEnd={() => endInfiRegion("related", "priorH", 40)}
+                          onDrag={(dy) => setInfiLive({ priorH: clampSz(infiSzRef.current.priorH - dy, 40, 320) })} />
+                <div style={{ height: infiSz.priorH, flexShrink: 0, display: "flex" }}>
+                  <PriorStudiesGrid detail={selected}
+                                    onAddCompare={(e) => setCompareSet((prev) =>
+                                      prev.some((c) => c.study_uid === e.study_uid) ? prev : [...prev, e])} />
+                </div>
+              </>
+            ) : (
+              <ReopenBar label={SVINFI_PANEL_LABEL.related} onExpand={() => setPanelShown("related", true)} />
+            )}
+            {panelsOn.report ? (
+              <>
+                <Splitter dir="h" onEnd={() => endInfiRegion("report", "repH", 56)}
+                          onDrag={(dy) => setInfiLive({ repH: clampSz(infiSzRef.current.repH - dy, 56, 640) })} />
+                <div style={{ height: infiSz.repH, flexShrink: 0, display: "flex" }}>
+                  <InfiReport detail={selected} />
+                </div>
+              </>
+            ) : (
+              <ReopenBar label={SVINFI_PANEL_LABEL.report} onExpand={() => setPanelShown("report", true)} />
+            )}
           </div>
         </div>
       )}
@@ -3497,7 +3627,7 @@ export function Worklist() {
       {!infiMode && !svMode && panelOrder.d.some((k) => panelsOn[k]) && (
         <div style={{ display: "flex", gap: 3, height: sizes.dH, padding: "3px 3px 0", flexShrink: 0 }}>
           {panelOrder.d.filter((k) => panelsOn[k]).map((k) => (
-            <DraggablePanel key={k} zone="d" k={k} onDrop={onPanelDrop} style={{ flex: 1 }}>
+            <DraggablePanel key={k} zone="d" k={k} onDrop={onPanelDrop} onHide={() => setPanelShown(k, false)} style={{ flex: 1 }}>
               {k === "orders" ? <OrdersPanel refreshKey={refreshKey} />
                 : k === "prior" ? (
                   <PriorStudiesGrid detail={selected}
@@ -3524,7 +3654,7 @@ export function Worklist() {
             const arr = panelOrder.e.filter((k) => panelsOn[k]);
             return arr.flatMap((k, i) => {
               const out = [(
-                <DraggablePanel key={k} zone="e" k={k} onDrop={onPanelDrop}
+                <DraggablePanel key={k} zone="e" k={k} onDrop={onPanelDrop} onHide={() => setPanelShown(k, false)}
                                 style={k === "thumb" ? { width: sizes.thumbW, flexShrink: 0 }
                                      : k === "std" ? { width: sizes.stdW, flexShrink: 0 }
                                      : k === "comment" ? { width: sizes.commentW, flexShrink: 0 }
