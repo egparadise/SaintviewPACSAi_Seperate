@@ -223,8 +223,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [closeScope, setCloseScope] = useState<"all" | "current">("all");  // All Close 범위(전체/현재 모니터)
   // 모니터별 ◀▶ 탐색 목록 = 배정된 워크리스트 탭의 필터 (monitorIndex → tabId, ""=전체)
   const [tabBinding, setTabBinding] = useState<Record<number, string>>({});
-  // 모달리티 → 모니터 배치 예외(라운드로빈 대신 지정 모니터로 오픈). {modality, monitor}
-  const [modalityMap, setModalityMap] = useState<{ modality: string; monitor: number }[]>([]);
+  // 워크리스트 탭 → 모니터 배치 예외(라운드로빈 대신 지정 모니터로 오픈). {tab: tabId, monitor}
+  // 활성 워크리스트 탭에서 연 검사는 지정 모니터에 열린다(예: WORKLIST 2 → 3번).
+  const [tabMonMap, setTabMonMap] = useState<{ tab: string; monitor: number }[]>([]);
   const [availTabs, setAvailTabs] = useState<WorklistTab[]>([]);   // 배정 드롭다운용 워크리스트 탭 목록
   useEffect(() => { loadTabs().then(setAvailTabs).catch(() => {}); }, []);
   const [wlMon, setWlMon] = useState<number | null>(null);      // 워크리스트 창
@@ -369,14 +370,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (wp?.length) setWlPresets(wp);
       const cm = (v as { close_mode?: "ask" | "save_current" | "save_all" | "discard" }).close_mode;
       if (cm) setCloseMode(cm);
-      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current"; tab_binding?: Record<number, string>; modality_map?: { modality: string; monitor: number }[] } }).monitor;
+      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current"; tab_binding?: Record<number, string>; tab_monitor_map?: { tab: string; monitor: number }[] } }).monitor;
       if (mon?.screens) setMonitorSel(mon.screens);
       if (mon?.worklist !== undefined) setWlMon(mon.worklist);
       if (mon?.report !== undefined) setRptMon(mon.report);
       if (mon?.max_open != null) setMaxOpen(Number(mon.max_open) || 0);
       if (mon?.close_scope === "all" || mon?.close_scope === "current") setCloseScope(mon.close_scope);
       if (mon?.tab_binding) setTabBinding(mon.tab_binding);
-      if (Array.isArray(mon?.modality_map)) setModalityMap(mon.modality_map);
+      if (Array.isArray(mon?.tab_monitor_map)) setTabMonMap(mon.tab_monitor_map);
       const tc = v as { ty_tool_cols?: number };
       if (tc.ty_tool_cols) setTyToolCols(tc.ty_tool_cols);
       const sc = (v as { shortcuts?: { rdrag?: "wl" | "zoom" | "pan"; shift_rclick?: "zoomout" | "none" } }).shortcuts;
@@ -498,7 +499,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       paletteSide, thumbSide, thumbSize, thumbMode, reportDock,
       toolbar: tbConfig, wl_presets: wlPresets, close_mode: closeMode,
       monitor: { screens: monitorSel, worklist: wlMon, report: rptMon, max_open: maxOpen, close_scope: closeScope,
-                 tab_binding: tabBinding, modality_map: modalityMap },
+                 tab_binding: tabBinding, tab_monitor_map: tabMonMap },
       shortcuts: { rdrag: scRdrag, shift_rclick: scShiftR, keys: scKeys },
       drop_menu: dropMenu,
     }, "user");
@@ -1942,25 +1943,28 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   </div>
                   <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
                     <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>
-                      모달리티 → 모니터 배치 예외 (라운드로빈 대신 지정 모니터로 오픈)
+                      워크리스트 탭 → 모니터 배치 (라운드로빈 대신 지정 모니터로 오픈)
                     </div>
                     <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6 }}>
-                      기본은 번호순 순환(1,2,3…)이지만, 여기에 지정한 모달리티 검사는 항상 지정 모니터에 열립니다 (예: CR → 3번).
+                      기본은 번호순 순환(1,2,3…)이지만, 여기에 지정한 <b>워크리스트 탭</b>에서 연 검사는 항상 지정 모니터에 열립니다 (예: WORKLIST 2 → 3번).
                     </div>
-                    {modalityMap.map((rule, ri) => (
+                    {tabMonMap.map((rule, ri) => (
                       <div key={ri} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
-                        <input value={rule.modality} placeholder="모달리티 (예: CR)"
-                               onChange={(e) => setModalityMap((p) => p.map((r, k) => k === ri ? { ...r, modality: e.target.value.toUpperCase() } : r))}
-                               style={{ width: 120 }} />
+                        <select value={rule.tab}
+                                onChange={(e) => setTabMonMap((p) => p.map((r, k) => k === ri ? { ...r, tab: e.target.value } : r))}
+                                style={{ maxWidth: 160 }}>
+                          <option value="">— 탭 선택 —</option>
+                          {availTabs.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+                        </select>
                         <span>→ 모니터</span>
                         <input type="number" min={1} max={monitors.length || 8} value={rule.monitor + 1}
-                               onChange={(e) => setModalityMap((p) => p.map((r, k) => k === ri ? { ...r, monitor: Math.max(0, (Number(e.target.value) || 1) - 1) } : r))}
+                               onChange={(e) => setTabMonMap((p) => p.map((r, k) => k === ri ? { ...r, monitor: Math.max(0, (Number(e.target.value) || 1) - 1) } : r))}
                                style={{ width: 56 }} />
-                        <button onClick={() => setModalityMap((p) => p.filter((_, k) => k !== ri))}
+                        <button onClick={() => setTabMonMap((p) => p.filter((_, k) => k !== ri))}
                                 style={{ fontSize: 11 }}>삭제</button>
                       </div>
                     ))}
-                    <button onClick={() => setModalityMap((p) => [...p, { modality: "", monitor: 0 }])}
+                    <button onClick={() => setTabMonMap((p) => [...p, { tab: "", monitor: 0 }])}
                             style={{ fontSize: 11.5 }}>+ 예외 추가</button>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

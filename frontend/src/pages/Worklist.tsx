@@ -95,30 +95,30 @@ export function loadHangingPrefs() {
   }).catch(() => {});
 }
 
-/** 뷰어 모니터 배치 계획 — 선택 모니터별 슬롯(번호 오름차순, max_open 캡) + 모달리티→모니터 예외 +
+/** 뷰어 모니터 배치 계획 — 선택 모니터별 슬롯(번호 오름차순, max_open 캡) + 워크리스트 탭→모니터 배치 예외 +
  *  모니터별 ◀▶ 탐색 탭(tab_binding). Window Management API(Chrome) 가용 시. 매 호출 최신 설정 재조회. */
 async function viewerMonitorPlan(): Promise<{
   slots: { index: number; features: string }[];
-  modalityMap: { modality: string; monitor: number }[];
+  tabMonMap: { tab: string; monitor: number }[];
   tabBinding: Record<number, string>;
 }> {
   let maxOpen = 0;
-  let modalityMap: { modality: string; monitor: number }[] = [];
+  let tabMonMap: { tab: string; monitor: number }[] = [];
   let tabBinding: Record<number, string> = {};
   try {
     const r = await api.getSetting("viewer.prefs");
     const mon = (r.value as { monitor?: {
       screens?: number[]; max_open?: number;
-      modality_map?: { modality: string; monitor: number }[]; tab_binding?: Record<number, string>;
+      tab_monitor_map?: { tab: string; monitor: number }[]; tab_binding?: Record<number, string>;
     } }).monitor;
     monitorScreens = mon?.screens ?? monitorScreens;
     maxOpen = Number(mon?.max_open) || 0;   // 0/미설정 = 선택 모니터 전부
-    if (Array.isArray(mon?.modality_map)) modalityMap = mon!.modality_map!;
+    if (Array.isArray(mon?.tab_monitor_map)) tabMonMap = mon!.tab_monitor_map!;
     if (mon?.tab_binding) tabBinding = mon.tab_binding;
   } catch { /* 캐시 유지 */ }
   let slots = await screenFeaturesList(monitorScreens);
   if (maxOpen > 0 && slots[0]?.index >= 0 && slots.length > maxOpen) slots = slots.slice(0, maxOpen);
-  return { slots, modalityMap, tabBinding };
+  return { slots, tabMonMap, tabBinding };
 }
 // 다중 모니터 라운드로빈 카운터(모듈 레벨 — Worklist 세션 동안 유지). 검사를 열 때마다 다음 슬롯.
 let viewerRoundRobin = 0;
@@ -2378,6 +2378,8 @@ export function Worklist() {
   // UBPACS-Z: 워크리스트 페이지 탭(최대 10) + 검색 폴더 트리 (서버 로밍)
   const [tabs, setTabs] = useState<WorklistTab[]>([DEFAULT_TAB]);
   const [activeTabId, setActiveTabId] = useState(DEFAULT_TAB.id);
+  const activeTabIdRef = useRef(activeTabId);   // openV2(라운드로빈 예외)에서 최신 활성 탭 참조
+  activeTabIdRef.current = activeTabId;
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
   const [selNodeId, setSelNodeId] = useState<string | null>(null);
   const insertRef = useRef<((t: string) => void) | null>(null);
@@ -2633,6 +2635,7 @@ export function Worklist() {
     detail: StudyDetail; addDetail?: StudyDetail; stackDetail?: StudyDetail; keySops?: string[];
     withOpen?: { mode: "add" | "stack"; ids: number[] };
     cmp?: boolean;  // ⇄ Compare 진입 — 뷰어 로드 후 Compare 모달 자동 오픈
+    forceRoundRobin?: boolean;  // 다중선택 일괄 오픈 — 탭→모니터 예외 무시, 순수 1,2,3 순환
   }) => {
     lastViewerRef.current = cfg.addDetail ?? cfg.stackDetail ?? cfg.detail;
     const p = new URLSearchParams({ viewer: "2d", study: String(cfg.detail.id) });
@@ -2652,7 +2655,7 @@ export function Worklist() {
     // Exam 탭 라벨(Viewer2D 형식과 동일 — 다른 모니터 창의 탭 표시에 사용)
     const d0 = cfg.detail;
     const tabLabel = `${d0.modality} ${d0.body_part || d0.patient_name} ${d0.study_date} #${d0.id}`;
-    return viewerMonitorPlan().then(({ slots, modalityMap, tabBinding }) => {
+    return viewerMonitorPlan().then(({ slots, tabMonMap, tabBinding }) => {
       // 닫힌 창은 추적 맵에서 정리. 살아있는 창이 하나도 없으면 라운드로빈을 1번 모니터부터 재시작.
       for (const [nm, w] of [...openedViewerWindows]) {
         if (w.closed) openedViewerWindows.delete(nm);
@@ -2678,10 +2681,12 @@ export function Worklist() {
         w?.focus();
         return;
       }
-      // 대상 모니터 결정 — 기본은 번호순 라운드로빈. 예외: 모달리티→모니터 매핑이 있고 그 모니터가
-      // 선택 슬롯이면 거기로 오픈(라운드로빈 카운터는 소모하지 않아 일반 검사의 1,2,3 순서 보존).
+      // 대상 모니터 결정 — 기본은 번호순 라운드로빈. 예외: 활성 워크리스트 탭→모니터 매핑이 있고
+      // 그 모니터가 선택 슬롯이면 거기로 오픈(카운터 미소모 → 일반 검사의 1,2,3 순서 보존).
+      // 다중선택 일괄 오픈(forceRoundRobin)은 예외를 무시하고 순수 1,2,3 순환.
       if (openedViewerWindows.size === 0) viewerRoundRobin = 0;   // 전부 닫힘 → 1번부터
-      const overrideMon = modalityMap.find((r) => r.modality && r.modality === (d0.modality || "").toUpperCase())?.monitor;
+      const activeTab = activeTabIdRef.current;
+      const overrideMon = cfg.forceRoundRobin ? undefined : tabMonMap.find((r) => r.tab && r.tab === activeTab)?.monitor;
       let target = overrideMon != null ? slots.find((s) => s.index === overrideMon) : undefined;
       if (!target) {
         target = slots[viewerRoundRobin % slots.length];
@@ -2736,7 +2741,7 @@ export function Worklist() {
             try {
               const d = await api.study(it.id);
               if (first) { selectAndSync(d); first = false; }
-              await openV2({ detail: d });
+              await openV2({ detail: d, forceRoundRobin: true });
             } catch { /* 개별 실패는 건너뛰고 나머지 오픈 */ }
           }
           break;
@@ -2765,7 +2770,7 @@ export function Worklist() {
             try {
               const d = await api.study(it.id);
               if (first) { selectAndSync(d); first = false; }
-              await openV2({ detail: d });
+              await openV2({ detail: d, forceRoundRobin: true });
             } catch { /* 개별 실패는 건너뛰고 나머지 오픈 */ }
           }
           break;
