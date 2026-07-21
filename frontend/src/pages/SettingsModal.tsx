@@ -173,8 +173,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [wlPanelsBy, setWlPanelsBy] = useState<{ sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null }>({});
   const [findFields, setFindFields] = useState<string[]>(DEFAULT_FIND_FIELDS);
   const [dblAction, setDblAction] = useState<"viewer2d" | "ohif">("viewer2d");
-  const [hangingCT, setHangingCT] = useState("default");
-  const [hangingMR, setHangingMR] = useState("default");
   // 선택 뷰어 — Client Viewer 레지스트리(TY Viewer=현행 Viewer2D, Infi Viewer=개발 중)
   const [clientViewer, setClientViewer] = useState(DEFAULT_CLIENT_VIEWER);
   // In Viewer 표시 — 멀티선택 색, 오버레이 글자 크기/표시 (계정 로밍, 뷰어 T+스크롤/T+Del 연동)
@@ -333,9 +331,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         paletteSide?: "left" | "top" | "right" | "bottom"; thumbSide?: "left" | "bottom" | "right" | "top";
         thumbSize?: number; thumbMode?: "series" | "all"; reportDock?: boolean;
       };
-      const h = v.hanging ?? {};
-      setHangingCT(h.CT ?? "default");
-      setHangingMR(h.MR ?? "default");
       const cv = (v as { client_viewer?: string }).client_viewer;
       if (cv && CLIENT_VIEWERS.some((x) => x.id === cv)) setClientViewer(cv);
       const mk = (v as { mode_key?: string }).mode_key;
@@ -504,7 +499,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     const curV = (await api.getSetting("viewer.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("viewer.prefs", {
       ...curV,
-      hanging: { CT: hangingCT, MR: hangingMR },
       hanging2d: h2dMap,
       hanging2d_common_on: h2dCommonOn,
       hanging2d_by_viewer: h2dByViewer,
@@ -1521,7 +1515,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 ))}
                 <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
                   검사를 열 때 해당 Modality 의 Series(페인)/Image(타일) 분할이 자동 적용됩니다.
-                  '자동' = 기존 규칙(CT/MR 다층 3x3). 행잉 프로토콜(F-18)과는 별개 설정입니다.
+                  '자동' = 기존 규칙(CT/MR 다층 3x3).
                 </div>
               </Group>
             )}
@@ -1595,18 +1589,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           }} />
               </Group>
               </>
-            )}
-            {page === "viewer" && (
-              <Group title="행잉 프로토콜 (F-18)">
-                {([["CT", hangingCT, setHangingCT], ["MR", hangingMR, setHangingMR]] as const).map(([m, v, set]) => (
-                  <Row key={m} label={`${m} 기본 행잉`}>
-                    <select value={v} onChange={(e) => set(e.target.value)}>
-                      <option value="default">기본 (스택)</option>
-                      <option value="mpr">MPR</option>
-                    </select>
-                  </Row>
-                ))}
-              </Group>
             )}
             {(page === "viewerTy" || page === "viewerSv") && (
               <>
