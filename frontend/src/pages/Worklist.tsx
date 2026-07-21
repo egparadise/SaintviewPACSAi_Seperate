@@ -2424,6 +2424,8 @@ export function Worklist() {
   const [panelsOn, setPanelsOn] = useState<Record<string, boolean>>({
     orders: true, prior: true, compare: true, thumb: true, std: true, comment: true, report: true,
   });
+  const panelsOnRef = useRef(panelsOn);   // 핸들러에서 최신 패널 상태 읽기(setState 업데이터 밖에서 저장)
+  useEffect(() => { panelsOnRef.current = panelsOn; }, [panelsOn]);
   // Study With Open (p.13): 더블클릭 시 Related Study를 함께 오픈 (ADD/STACK 모드)
   const [withOpen, setWithOpen] = useState(false);
   const [withOpenMode, setWithOpenMode] = useState<"add" | "stack">("add");
@@ -2479,20 +2481,71 @@ export function Worklist() {
   }, []);
   // 하위호환 별칭 — 기존 railW·dH·eH 스플리터 호출부 유지(모두 뷰어별 저장으로 라우팅)
   const persistSizes = persistViewerSizes;
-  // 패널 표시/숨김 토글 + 즉시 뷰어별 저장 (화면↔Setting 양방향 동기)
+  // 뷰어별 패널+크기 동시 저장 — 접힘(숨김+크기 복원)처럼 두 키를 한 번의 read-modify-write 로 써 경합 방지
+  const persistViewerLayout = useCallback((nextPanels: Record<string, boolean>) => {
+    const vk = vkRef.current;
+    api.getSetting("worklist.prefs").then((r) => {
+      const v = { ...(r.value as Record<string, unknown>) };
+      if (vk === "ty") {
+        v.panels = nextPanels; v.layout_sizes = sizesRef.current;
+      } else {
+        v.panels_by_viewer = { ...((v.panels_by_viewer as Record<string, unknown>) ?? {}), [vk]: nextPanels };
+        v.sizes_by_viewer = { ...((v.sizes_by_viewer as Record<string, unknown>) ?? {}),
+                              [vk]: { railW: sizesRef.current.railW, ...infiSzRef.current } };
+      }
+      wlPrefsRef.current = v;
+      return api.putSetting("worklist.prefs", v, "user");
+    }).catch(() => {});
+  }, []);
+  // 패널 표시/숨김 토글 + 즉시 뷰어별 저장 (화면↔Setting 양방향 동기). 부수효과는 updater 밖에서 실행.
   const setPanelShown = useCallback((k: string, on: boolean) => {
-    setPanelsOn((p) => { const n = { ...p, [k]: on }; persistViewerPanels(n); return n; });
+    const next = { ...panelsOnRef.current, [k]: on };
+    setPanelsOn(next);
+    persistViewerPanels(next);
   }, [persistViewerPanels]);
-  // SaintView/I-View 구역 높이 라이브 드래그 — ref 를 즉시 갱신해 onEnd(collapse 판정)이 최신값을 보게 한다
+  // SaintView/I-View 구역 높이 라이브 드래그 — ref 를 즉시 갱신해 후속 판정이 최신값을 보게 한다
   const setInfiLive = useCallback((patch: Partial<InfiSizes>) => {
     infiSzRef.current = { ...infiSzRef.current, ...patch };
     setInfiSz(infiSzRef.current);
   }, []);
-  // 스플리터 놓을 때: 최소 높이(min)까지 줄였으면 해당 구역 숨김, 아니면 크기 저장 (0까지 드래그=숨김)
-  const endInfiRegion = useCallback((region: string, sizeKey: keyof InfiSizes, min: number) => {
-    if (infiSzRef.current[sizeKey] <= min + 2) setPanelShown(region, false);
-    else persistViewerSizes();
-  }, [setPanelShown, persistViewerSizes]);
+  // 마지막으로 저장된 정상 높이 — 접힘 시 여기로 복원(오염된 min 값이 후속 저장에 새지 않게)
+  const lastGoodInfi = useCallback((vk: "sv" | "infi", sizeKey: keyof InfiSizes): number => {
+    const p = wlPrefsRef.current as { sizes_by_viewer?: Record<string, Partial<InfiSizes>>; infi_sizes?: Partial<InfiSizes> };
+    return p.sizes_by_viewer?.[vk]?.[sizeKey] ?? p.infi_sizes?.[sizeKey] ?? DEFAULT_INFI_SIZES[sizeKey];
+  }, []);
+  const collapseAccumRef = useRef<Record<string, number>>({});   // min 을 지나 더 끌어당긴 누적량
+  const gestureCollapsedRef = useRef(false);                      // 이 드래그에서 접혔는지(onEnd 중복 저장 방지)
+  // 구역 접기 — 높이는 마지막 정상값으로 되돌린 뒤 숨김, 패널+크기를 한 번에 저장(재열기 시 정상 크기 복원)
+  const hideInfiRegion = useCallback((region: string, sizeKey: keyof InfiSizes) => {
+    const vk = vkRef.current === "sv" ? "sv" : "infi";
+    setInfiLive({ [sizeKey]: lastGoodInfi(vk, sizeKey) } as Partial<InfiSizes>);
+    const next = { ...panelsOnRef.current, [region]: false };
+    setPanelsOn(next);
+    persistViewerLayout(next);
+  }, [setInfiLive, lastGoodInfi, persistViewerLayout]);
+  // 스플리터 드래그: min 아래로 계속(누적 44px) 끌면 접힘, 아니면 min 에서 멈춤(=min 이 정상 크기로 도달 가능)
+  const dragInfiRegion = useCallback((region: string, sizeKey: keyof InfiSizes, min: number, max: number, dy: number) => {
+    const raw = infiSzRef.current[sizeKey] - dy;
+    if (raw < min) {
+      collapseAccumRef.current[region] = (collapseAccumRef.current[region] ?? 0) + (min - raw);
+      if (collapseAccumRef.current[region] > 44) {
+        collapseAccumRef.current[region] = 0;
+        gestureCollapsedRef.current = true;
+        hideInfiRegion(region, sizeKey);
+        return;
+      }
+      setInfiLive({ [sizeKey]: min } as Partial<InfiSizes>);
+    } else {
+      collapseAccumRef.current[region] = 0;
+      setInfiLive({ [sizeKey]: clampSz(raw, min, max) } as Partial<InfiSizes>);
+    }
+  }, [setInfiLive, hideInfiRegion]);
+  // 스플리터 놓을 때: 접힘 제스처면 이미 저장됨(스킵), 아니면 크기 저장
+  const endInfiRegion = useCallback((region: string) => {
+    collapseAccumRef.current[region] = 0;
+    if (gestureCollapsedRef.current) { gestureCollapsedRef.current = false; return; }
+    persistViewerSizes();
+  }, [persistViewerSizes]);
   // E행 패널 사이 스플리터: 좌측 패널 폭 조절(좌측이 가변 report면 우측을 역방향 조절)
   const resizeE = useCallback((left: string, right: string, dx: number) => {
     const keyOf = (k: string): keyof LayoutSizes | null =>
@@ -2520,8 +2573,8 @@ export function Worklist() {
   }, []);
 
   // 사용자 환경설정 로드 (화면분석 §5.4/§5.5)
-  useEffect(() => {
-    loadHangingPrefs();
+  // worklist.prefs 로드 → 원본 보관 + 컬럼/패널/크기 해석 트리거. 마운트 + 설정 저장 신호에서 재사용.
+  const loadWlPrefs = useCallback(() => {
     api.getSetting("worklist.prefs").then((r) => {
       const v = r.value as {
         auto_refresh_sec?: number; default_status?: string; columns?: string[];
@@ -2547,11 +2600,20 @@ export function Worklist() {
       // 패널/크기는 뷰어별 해석 효과가 vk 확정 후 적용 — 여기서 tick 만 올려 트리거
       setWlBvTick((t) => t + 1);
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadHangingPrefs();
+    loadWlPrefs();
     loadTabs().then(setTabs).catch(() => {});
     loadTree().then(setTreeNodes).catch(() => {});
     // ETC 섹션의 3D 버튼(Viewer2D 내부) → 3D 뷰어 전환
     const h = (e: Event) => setViewer3dUid((e as CustomEvent).detail as string);
     window.addEventListener("sv-open-3d", h);
+    // 설정 저장 시 화면 즉시 반영 — Settings 모달은 Worklist 위 오버레이라 언마운트되지 않으므로
+    // 저장 신호를 받아 worklist.prefs 재로드(컬럼·패널·크기 재해석) + 뷰어 모드(refreshKey) 재로드
+    const onSettingsSaved = () => { loadWlPrefs(); setRefreshKey((k) => k + 1); };
+    window.addEventListener("sv-settings-saved", onSettingsSaved);
     // 07 A.2 SearchShortcut 저장/적용
     const onSave = () => {
       const label = prompt("바로가기 이름 (예: 오늘 CT 미판독)");
@@ -2572,10 +2634,11 @@ export function Worklist() {
     window.addEventListener("sv-apply-shortcut", onApply);
     return () => {
       window.removeEventListener("sv-open-3d", h);
+      window.removeEventListener("sv-settings-saved", onSettingsSaved);
       window.removeEventListener("sv-save-shortcut", onSave);
       window.removeEventListener("sv-apply-shortcut", onApply);
     };
-  }, []);
+  }, [loadWlPrefs]);
   const filtersRef = useRef(filters);
   const searchRef = useRef(searchText);
   useEffect(() => { filtersRef.current = filters; searchRef.current = searchText; }, [filters, searchText]);
@@ -3541,8 +3604,8 @@ export function Worklist() {
             {/* ⑤ Preview — 선택 검사 미리보기 (원본 좌하단 흑배경). 스플리터 최소까지 드래그=숨김 */}
             {panelsOn.preview ? (
               <>
-                <Splitter dir="h" onEnd={() => endInfiRegion("preview", "prevH", 60)}
-                          onDrag={(dy) => setInfiLive({ prevH: clampSz(infiSzRef.current.prevH - dy, 60, 600) })} />
+                <Splitter dir="h" onEnd={() => endInfiRegion("preview")}
+                          onDrag={(dy) => dragInfiRegion("preview", "prevH", 60, 600, dy)} />
                 <div style={{ height: infiSz.prevH, flexShrink: 0, background: "#000", border: "1px solid var(--border)",
                               borderRadius: 4, overflow: "hidden", display: "flex" }}>
                   <ThumbnailPanel detail={selected} onOpen={() => void doAction("viewdraft")} />
@@ -3567,8 +3630,8 @@ export function Worklist() {
             </div>
             {panelsOn.related ? (
               <>
-                <Splitter dir="h" onEnd={() => endInfiRegion("related", "priorH", 40)}
-                          onDrag={(dy) => setInfiLive({ priorH: clampSz(infiSzRef.current.priorH - dy, 40, 320) })} />
+                <Splitter dir="h" onEnd={() => endInfiRegion("related")}
+                          onDrag={(dy) => dragInfiRegion("related", "priorH", 40, 320, dy)} />
                 <div style={{ height: infiSz.priorH, flexShrink: 0, display: "flex" }}>
                   <PriorStudiesGrid detail={selected}
                                     onAddCompare={(e) => setCompareSet((prev) =>
@@ -3580,8 +3643,8 @@ export function Worklist() {
             )}
             {panelsOn.report ? (
               <>
-                <Splitter dir="h" onEnd={() => endInfiRegion("report", "repH", 56)}
-                          onDrag={(dy) => setInfiLive({ repH: clampSz(infiSzRef.current.repH - dy, 56, 640) })} />
+                <Splitter dir="h" onEnd={() => endInfiRegion("report")}
+                          onDrag={(dy) => dragInfiRegion("report", "repH", 56, 640, dy)} />
                 <div style={{ height: infiSz.repH, flexShrink: 0, display: "flex" }}>
                   <InfiReport detail={selected} />
                 </div>
