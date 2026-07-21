@@ -7,7 +7,7 @@ import {
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
 import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, TOOLBAR_DEFS, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
-import { IN_LAYOUTS, IN_PALETTE } from "../lib/infiConfig";
+import { IN_PALETTE } from "../lib/infiConfig";
 import { screenApiIssue } from "../lib/screens";
 import { SC_ACTIONS, SC_DEFAULTS, displayKey } from "../lib/shortcutDefs";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -1496,30 +1496,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 </div>
               </Group>
               </>
-            )}
-            {page === "viewerIn" && (
-              <Group title="Modality 기본 레이아웃 (In Viewer — 행잉과 별도)">
-                {["CT", "MR", "CR", "DX", "US", "XA", "*"].map((m) => (
-                  <Row key={m} label={m === "*" ? "기타(전체)" : m}>
-                    <span style={{ fontSize: 12 }}>Series</span>
-                    <select value={defLay[m]?.s ?? ""} style={{ fontSize: 12 }}
-                            onChange={(e) => setDefLay((p) => ({ ...p, [m]: { s: e.target.value, i: p[m]?.i ?? "" } }))}>
-                      <option value="">자동</option>
-                      {IN_LAYOUTS.map((l) => <option key={`${l.r}x${l.c}`}>{`${l.r} x ${l.c}`}</option>)}
-                    </select>
-                    <span style={{ fontSize: 12, marginLeft: 8 }}>Image</span>
-                    <select value={defLay[m]?.i ?? ""} style={{ fontSize: 12 }}
-                            onChange={(e) => setDefLay((p) => ({ ...p, [m]: { s: p[m]?.s ?? "", i: e.target.value } }))}>
-                      <option value="">자동</option>
-                      {IN_LAYOUTS.map((l) => <option key={`${l.r}x${l.c}`}>{`${l.r} x ${l.c}`}</option>)}
-                    </select>
-                  </Row>
-                ))}
-                <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                  검사를 열 때 해당 Modality 의 Series(페인)/Image(타일) 분할이 자동 적용됩니다.
-                  '자동' = 기존 규칙(CT/MR 다층 3x3).
-                </div>
-              </Group>
             )}
             {page === "viewerIn" && (
               <Group title="툴 팔레트 표시 (In Viewer)">
