@@ -58,7 +58,7 @@ import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { screenFeatures, screenFeaturesList } from "../lib/screens";
 import { showToast } from "../lib/toast";
-import { onStudySync, postStudySync } from "../lib/sync";
+import { onStudySync, postStudySync, postViewerAddTab } from "../lib/sync";
 import { Splitter, clampSz } from "../lib/Splitter";
 
 const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewer3D })));
@@ -95,22 +95,26 @@ export function loadHangingPrefs() {
   }).catch(() => {});
 }
 
-/** 뷰어 모니터 설정 → 모니터별 개별 창 features(번호 오름차순). Window Management API(Chrome) 가용 시.
- *  매 호출마다 최신 설정을 다시 읽는다(설정 저장 직후에도 반영). 단일/미감지는 1원소 리스트. */
-async function viewerWindowFeaturesList(): Promise<{ index: number; features: string }[]> {
+/** 뷰어 모니터 배치 계획 — 선택 모니터별 슬롯(번호 오름차순), 최대 열 영상 수(max_open)로 캡.
+ *  Window Management API(Chrome) 가용 시. 매 호출마다 최신 설정 재조회. 단일/미감지는 1원소. */
+async function viewerMonitorPlan(): Promise<{ index: number; features: string }[]> {
+  let maxOpen = 0;
   try {
     const r = await api.getSetting("viewer.prefs");
-    monitorScreens = ((r.value as { monitor?: { screens?: number[] } }).monitor?.screens) ?? monitorScreens;
+    const mon = (r.value as { monitor?: { screens?: number[]; max_open?: number } }).monitor;
+    monitorScreens = mon?.screens ?? monitorScreens;
+    maxOpen = Number(mon?.max_open) || 0;   // 0/미설정 = 선택 모니터 전부
   } catch { /* 캐시 유지 */ }
-  return screenFeaturesList(monitorScreens);
+  const list = await screenFeaturesList(monitorScreens);
+  // 실 모니터 리스트(index>=0)일 때만 max_open 으로 슬롯 수 제한
+  if (maxOpen > 0 && list[0]?.index >= 0 && list.length > maxOpen) return list.slice(0, maxOpen);
+  return list;
 }
-/** 뷰어 창 이름 규칙 — 최저번호 모니터는 표준 이름 "sv_viewer"(ReportWindow ◀▶·관련검사
- *  오픈이 참조하는 이름), 나머지는 sv_viewer_m{index}. 단일/미감지도 "sv_viewer". */
-function viewerWindowName(index: number, first: boolean, multi: boolean): string {
-  return !multi || first ? "sv_viewer" : `sv_viewer_m${index}`;
-}
-// 마지막 openV2 로 연 뷰어 창들(이름→핸들). 모니터 설정을 다중↔단일로 바꿔 열면
-// 이번 세트에 없는 이전 보조 창(sv_viewer_m*)을 닫아 고아 창이 남지 않게 한다.
+// 다중 모니터 라운드로빈 카운터(모듈 레벨 — Worklist 세션 동안 유지). 검사를 열 때마다 다음 슬롯.
+let viewerRoundRobin = 0;
+// 마지막 openV2 로 연 뷰어 창들(이름→핸들). 라운드로빈 대상 판정·고아 창 정리·닫힘 감지에 사용.
+// 최저번호 모니터(슬롯 0)는 표준 이름 "sv_viewer"(ReportWindow ◀▶·관련검사 오픈이 참조), 나머지는
+// "sv_viewer_slot{index}".
 const openedViewerWindows = new Map<string, Window>();
 
 /** 재사용 창(window.open 의 위치 옵션이 무시됨)도 지정 모니터로 이동/리사이즈 */
@@ -2634,33 +2638,51 @@ export function Worklist() {
       ? `${VIEWER_BASE.replace(/\/$/, "")}/`
       : `${window.location.origin}${window.location.pathname}`;
     const url = `${base}?${p}`;
-    void viewerWindowFeaturesList().then((list) => {
-      // 단일(또는 미감지): 기존과 동일하게 재사용 창 "sv_viewer" 1개.
-      // 다중 모니터: 최저번호 모니터=표준 "sv_viewer"(재사용·판독창 참조 유지), 나머지=sv_viewer_m{index}.
-      //   각 창을 applyWindowBounds 로 해당 모니터에 배치. 첫(최저번호) 창에 포커스.
-      //   ※ 단일 창을 여러 모니터에 스팬하는 것은 브라우저가 한 화면으로 클램프하므로 창을 나눈다.
-      const multi = list.length > 1;
-      const names = new Set<string>();
-      let opened = 0;
-      list.forEach((mon, i) => {
-        const name = viewerWindowName(mon.index, i === 0, multi);
-        names.add(name);
-        const w = window.open(url, name, mon.features);
-        // 재사용 창은 open() 위치 옵션이 무시되므로 명시적 이동/리사이즈로 해당 모니터에 배치
-        applyWindowBounds(w, mon.features);
-        if (w) { openedViewerWindows.set(name, w); opened += 1; if (i === 0) w.focus(); }
-      });
-      // 이번 세트에 없는 이전 뷰어 창(다중→단일 전환 시의 보조 창 등)은 닫아 고아 방지
+    // Exam 탭 라벨(Viewer2D 형식과 동일 — 다른 모니터 창의 탭 표시에 사용)
+    const d0 = cfg.detail;
+    const tabLabel = `${d0.modality} ${d0.body_part || d0.patient_name} ${d0.study_date} #${d0.id}`;
+    void viewerMonitorPlan().then((slots) => {
+      // 닫힌 창은 추적 맵에서 정리. 살아있는 창이 하나도 없으면 라운드로빈을 1번 모니터부터 재시작.
       for (const [nm, w] of [...openedViewerWindows]) {
-        if (!names.has(nm)) { try { w.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
+        if (w.closed) openedViewerWindows.delete(nm);
       }
-      // 최초 다중 오픈 시 팝업 차단으로 일부 창이 안 열렸으면 명시 안내(주소창 팝업 허용 유도)
-      if (multi && opened < list.length) {
+      const multi = slots.length > 1 && slots[0].index >= 0;
+      if (!multi) {
+        // 단일/미감지: 기존과 동일 — 재사용 창 "sv_viewer" 1개(매번 그 창에 새 검사 로드).
+        // 다중→단일 전환 시 이전 보조 창(sv_viewer_slot*)은 고아이므로 닫는다.
+        for (const [nm, ow] of [...openedViewerWindows]) {
+          if (nm !== "sv_viewer") { try { ow.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
+        }
+        const feat = slots[0]?.features ?? "width=1500,height=920";
+        const w = window.open(url, "sv_viewer", feat);
+        applyWindowBounds(w, feat);
+        if (w) openedViewerWindows.set("sv_viewer", w);
+        w?.focus();
+        return;
+      }
+      // 다중 모니터 라운드로빈: 검사를 열 때마다 다음 모니터(번호순)만 로드/리프레시,
+      // 나머지 열린 뷰어 창은 리로드 없이 Exam 탭만 추가(broadcast) — "깜빡임 없이 탭만 추가".
+      if (openedViewerWindows.size === 0) viewerRoundRobin = 0;   // 전부 닫힘 → 1번부터
+      const ti = viewerRoundRobin % slots.length;
+      viewerRoundRobin += 1;
+      const target = slots[ti];
+      const targetName = ti === 0 ? "sv_viewer" : `sv_viewer_slot${target.index}`;
+      // (1) 이미 열린 다른 뷰어 창들 → 탭만 추가(리로드 없음). 대상 창은 아래 URL 로 직접 로드됨.
+      postViewerAddTab(d0.id, d0.study_uid, tabLabel);
+      // (2) 대상 모니터 창만 열기/네비게이트(=그 뷰어만 전체 리프레시) + 해당 모니터에 배치.
+      const w = window.open(url, targetName, target.features);
+      applyWindowBounds(w, target.features);
+      if (w) { openedViewerWindows.set(targetName, w); w.focus(); }
+      else {
         showToast(
-          `팝업 차단으로 ${opened}/${list.length} 모니터에만 열렸습니다 — 주소창의 팝업 아이콘에서 ` +
-          `이 사이트를 '항상 허용'으로 설정한 뒤 다시 여세요`,
+          "팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창의 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요",
           "error",
         );
+      }
+      // 현재 선택 슬롯 집합에 없는 이전 보조 창(모니터 설정 축소 등)은 닫아 고아 방지
+      const validNames = new Set(slots.map((s, i) => (i === 0 ? "sv_viewer" : `sv_viewer_slot${s.index}`)));
+      for (const [nm, ow] of [...openedViewerWindows]) {
+        if (!validNames.has(nm)) { try { ow.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
       }
     });
   }, []);

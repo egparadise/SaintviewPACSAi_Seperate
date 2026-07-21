@@ -24,7 +24,7 @@ import { ReportDock } from "../components/ReportDock";
 import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { screenFeatures } from "../lib/screens";
-import { onStudySync, postStudySync } from "../lib/sync";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerCloseAll } from "../lib/sync";
 import { mammoAssign, type HpRule } from "../lib/viewerConfig";
 
 // 해부학 아이콘 — 심장(CTR)/척추(Spine)/측만(Cobb)/골반+다리(Limb) 그림 (em 크기 = 칩 글리프에 맞춰 확대)
@@ -391,6 +391,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // IN-1: GSPS 불러오기 목록 모달 · 닫기 동작(viewer.prefs.infi_close_mode) · 닫기 확인 다이얼로그
   const [gspsPick, setGspsPick] = useState<GspsItem[] | null>(null);
   const [closeMode, setCloseMode] = useState<CloseMode>("ask");
+  // All Close 범위(Setting>모니터 close_scope): "all"=전체 모니터 뷰어 닫기(기본) / "current"=현재 창만
+  const closeScopeRef = useRef<"all" | "current">("all");
   const [closeDlg, setCloseDlg] = useState<CloseReq | null>(null);
   const [closeRemember, setCloseRemember] = useState(false);
   const [role, setRole] = useState("user");
@@ -629,19 +631,23 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     }
   };
   const proceedCloseAll = () => {
-    localStorage.removeItem(EXAMS_KEY);
+    // close_scope="current"면 이 창만 닫으므로 공유 EXAMS_KEY(다른 창의 탭 복원용)를 지우지 않는다.
+    if (closeScopeRef.current !== "current") localStorage.removeItem(EXAMS_KEY);
     gotoWorklist();
     window.close();
     onClose();
   };
   /* IN-1 닫기 동작 — viewer.prefs.infi_close_mode: ask=물어봄 / save_current=주석 저장 /
      save_all=주석+GSPS(표시상태) 저장 / none=저장 없이 닫기 (TY close_mode 등가) */
+  // All Close(모든 모니터) 전파는 '확정 시점'에만(ask 취소 시 비원자 방지). 수신 창은 플래그 미설정 → 재전파 없음.
+  const closeAllBroadcastRef = useRef(false);
   const doCloseAction = async (mode: CloseMode, remember: boolean, req: CloseReq) => {
     setCloseDlg(null);
     if (remember && mode !== "ask") {
       setCloseMode(mode);
       persistPrefs({ infi_close_mode: mode });
     }
+    if (closeAllBroadcastRef.current) { closeAllBroadcastRef.current = false; postViewerCloseAll(); }
     try {
       if (mode === "save_current") await saveAnnos();
       else if (mode === "save_all") { await saveAnnos(); await doGsps(); }
@@ -650,9 +656,19 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     else proceedCloseAll();
   };
   const requestClose = (req: CloseReq) => {
+    // 모든 검사 닫기 + close_scope="all"(기본) → 확정 시 다른 모니터 뷰어도 닫기(요청 시점 아님)
+    if (req.kind === "all" && closeScopeRef.current !== "current") closeAllBroadcastRef.current = true;
     if (closeMode === "ask") { setCloseRemember(false); setCloseDlg(req); }
     else void doCloseAction(closeMode, false, req);
   };
+  // 다른 모니터에서 All Close(전체 범위) → 이 창도 대화상자 없이 닫는다(저장은 설정 모드대로, ask면 현재화면 저장).
+  // 플래그를 세우지 않으므로 재전파(스톰) 없음.
+  const doCloseActionRef = useRef(doCloseAction);
+  doCloseActionRef.current = doCloseAction;
+  useEffect(() => onViewerCloseAll(() => {
+    const m = closeMode === "ask" ? "save_current" : closeMode;
+    void doCloseActionRef.current(m, false, { kind: "all" });
+  }), [closeMode]);
   const curD = exams[activeExam]?.d ?? detail;
   const wlPresets = curD.modality === "MR" ? IN_WL_PRESETS_MR : IN_WL_PRESETS_CT;
 
@@ -851,6 +867,22 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     setSeries(ex.series);
     const pi = panesRef.current.findIndex((q) => q.studyUid === ex.d.study_uid);
     if (pi >= 0) setActive(pi);
+  }), []);
+  // 다중 모니터 라운드로빈 — 다른 모니터에서 검사를 열면 이 창은 활성 전환 없이 Exam 탭만 추가.
+  // (In-View 는 exam 이 시리즈까지 eager 로드 구조라 트리를 조회해 append. activeExam 은 불변.)
+  useEffect(() => onViewerAddTab((id) => {
+    if (examsRef.current.some((x) => x.d.id === id)) return;
+    void (async () => {
+      try {
+        const d = await api.study(id);
+        const t = await api.seriesTree(id);
+        setExams((es) => (es.some((x) => x.d.id === id) ? es : [...es, { d, series: t.series }]));
+        try {
+          const ids: number[] = JSON.parse(localStorage.getItem("sv_infi_exams") ?? "[]");
+          if (!ids.includes(id)) localStorage.setItem("sv_infi_exams", JSON.stringify([...ids, id]));
+        } catch { /* quota */ }
+      } catch { /* 조회 실패 — 탭 미추가 */ }
+    })();
   }), []);
   const takeSnap = (): Snap => ({
     vis: panesRef.current.map((p) => ({
@@ -2052,12 +2084,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // IN-2: 썸네일 로밍(⑤) · 판독창 모니터 배치(⑥) · OHIF 게이트(⑦)
       const n2 = r.value as { infi_thumb_size?: number; infi_thumb_mode?: "series" | "all";
                               ohif_enabled?: boolean;
-                              monitor?: { report?: number | null } };
+                              monitor?: { report?: number | null; close_scope?: "all" | "current" } };
       const tsz = n2.infi_thumb_size;
       if (tsz) setUi((u) => ({ ...u, thumbW: Math.min(260, Math.max(56, tsz)) }));
       if (n2.infi_thumb_mode === "series" || n2.infi_thumb_mode === "all") setThumbMode(n2.infi_thumb_mode);
       setOhifOn(!!n2.ohif_enabled);
       if (n2.monitor?.report != null) setMonReport(n2.monitor.report);
+      if (n2.monitor?.close_scope === "current" || n2.monitor?.close_scope === "all") closeScopeRef.current = n2.monitor.close_scope;
     }).catch(() => {});
   }, []);
   // 툴 활성화 카운트 +1 — 상위 50개만 유지, 2초 디바운스로 viewer.prefs.infi_usage 저장

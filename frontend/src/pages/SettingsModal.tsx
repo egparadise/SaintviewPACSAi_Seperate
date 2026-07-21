@@ -218,7 +218,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [closeMode, setCloseMode] = useState<"ask" | "save_current" | "save_all" | "discard">("ask");
   // 모니터 설정 — 하드웨어 모니터 감지 후 뷰어 표시 모니터 선택(다중=스팬)
   const [monitors, setMonitors] = useState<{ label: string; w: number; h: number; primary: boolean }[]>([]);
-  const [monitorSel, setMonitorSel] = useState<number[]>([]);   // 뷰어 (다중=스팬)
+  const [monitorSel, setMonitorSel] = useState<number[]>([]);   // 뷰어 모니터(다중=라운드로빈)
+  const [maxOpen, setMaxOpen] = useState(0);                     // 최대 열 영상 수(라운드로빈 슬롯, 0=선택 전부)
+  const [closeScope, setCloseScope] = useState<"all" | "current">("all");  // All Close 범위(전체/현재 모니터)
   const [wlMon, setWlMon] = useState<number | null>(null);      // 워크리스트 창
   const [rptMon, setRptMon] = useState<number | null>(null);    // 판독(Reading) 창
   const [monitorMsg, setMonitorMsg] = useState("");
@@ -355,10 +357,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (wp?.length) setWlPresets(wp);
       const cm = (v as { close_mode?: "ask" | "save_current" | "save_all" | "discard" }).close_mode;
       if (cm) setCloseMode(cm);
-      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null } }).monitor;
+      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current" } }).monitor;
       if (mon?.screens) setMonitorSel(mon.screens);
       if (mon?.worklist !== undefined) setWlMon(mon.worklist);
       if (mon?.report !== undefined) setRptMon(mon.report);
+      if (mon?.max_open != null) setMaxOpen(Number(mon.max_open) || 0);
+      if (mon?.close_scope === "all" || mon?.close_scope === "current") setCloseScope(mon.close_scope);
       const tc = v as { ty_tool_cols?: number };
       if (tc.ty_tool_cols) setTyToolCols(tc.ty_tool_cols);
       const sc = (v as { shortcuts?: { rdrag?: "wl" | "zoom" | "pan"; shift_rclick?: "zoomout" | "none" } }).shortcuts;
@@ -479,7 +483,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         .filter(([, cfg]) => (cfg as { s: unknown; i: unknown }).s || (cfg as { s: unknown; i: unknown }).i)),
       paletteSide, thumbSide, thumbSize, thumbMode, reportDock,
       toolbar: tbConfig, wl_presets: wlPresets, close_mode: closeMode,
-      monitor: { screens: monitorSel, worklist: wlMon, report: rptMon },
+      monitor: { screens: monitorSel, worklist: wlMon, report: rptMon, max_open: maxOpen, close_scope: closeScope },
       shortcuts: { rdrag: scRdrag, shift_rclick: scShiftR, keys: scKeys },
       drop_menu: dropMenu,
     }, "user");
@@ -1882,6 +1886,27 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       </tbody>
                     </table>
                   )}
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12.5 }}>최대 열 영상 수 (라운드로빈 슬롯)</span>
+                    <input type="number" min={0} max={monitorSel.length || 8} value={maxOpen}
+                           title="검사를 열 때 순환할 모니터(영상) 개수 — 0=선택한 뷰어 모니터 전부. 예: 3이면 1·2·3 모니터를 1,2,3,1,2,3… 순환"
+                           onChange={(e) => setMaxOpen(Math.max(0, Number(e.target.value) || 0))}
+                           style={{ width: 64 }} />
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      0 = 선택한 뷰어 모니터 전부 ({monitorSel.length || 0}대)
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12.5 }}>All Close(전체 닫기) 범위</span>
+                    <select value={closeScope} onChange={(e) => setCloseScope(e.target.value as "all" | "current")}
+                            title="뷰어의 All Close 버튼을 눌렀을 때 닫을 범위">
+                      <option value="all">전체 모니터 뷰어 닫기</option>
+                      <option value="current">현재 모니터 뷰어만 닫기</option>
+                    </select>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      뷰어의 <b>All Close ✕</b> 클릭 시
+                    </span>
+                  </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <button disabled={wlMon == null}
                             title="워크리스트를 선택한 모니터의 새 창으로 열기 (기존 탭은 닫아도 됨)"
@@ -1899,8 +1924,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   <div style={{ fontSize: 11.5, color: "var(--text-secondary)", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
                     <b>사용 방법:</b> ① 모니터 감지 → 🔢 모니터 확인(각 화면에 번호 표시·목록 번호와 대조)
                     → ② 창별 모니터 지정 → ③ 하단 <b>OK(저장)</b> → ④ 다음 오픈부터 적용.<br />
-                    · <b>뷰어 ☑</b>: 1대=해당 모니터 / <b>2대 이상=각 모니터에 개별 뷰어 창을 번호 오름차순으로 오픈</b> / 0대=기본 크기<br />
-                    &nbsp;&nbsp;&nbsp;(다중 모니터 최초 오픈 시 브라우저가 팝업을 차단하면, 주소창의 팝업 아이콘에서 이 사이트 <b>항상 허용</b>으로 설정)<br />
+                    · <b>뷰어 ☑</b>: 1대=해당 모니터 / <b>2대 이상=검사를 열 때마다 모니터 번호순으로 순환 배치</b>(1,2,3,1,2,3…) / 0대=기본 크기<br />
+                    &nbsp;&nbsp;&nbsp;검사가 열리는 그 모니터만 새로 로드되고, 나머지 모니터 뷰어는 <b>깜빡임 없이 Exam 탭만 추가</b>됩니다.<br />
+                    &nbsp;&nbsp;&nbsp;순환할 모니터 수는 위 <b>최대 열 영상 수</b>로 조절(0=선택 전부).
+                    최초 오픈 시 팝업이 차단되면 주소창 팝업 아이콘에서 이 사이트 <b>항상 허용</b>으로 설정하세요.<br />
                     · <b>워크리스트 ◉</b>: 위 버튼으로 해당 모니터에 새 창 오픈 (라디오 재클릭=해제)<br />
                     · <b>판독 ◉</b>: 뷰어의 [Reading] 버튼이 해당 모니터에 판독 창을 띄움
                   </div>

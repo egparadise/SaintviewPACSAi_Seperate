@@ -6,7 +6,7 @@ import { annoLabel, contentRect, measureAnno, refLineOn, screenToImage } from ".
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
 import { screenFeatures } from "../lib/screens";
-import { onStudySync, postStudySync } from "../lib/sync";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerCloseAll } from "../lib/sync";
 import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, mammoAssign, type HpRule } from "../lib/viewerConfig";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -300,7 +300,9 @@ interface ViewerPrefs {
   toolbar: Record<string, boolean>;  // 툴바 버튼 표시 여부 (기본 모두 표시)
   wl_presets: { key: string; label: string; q: string }[];  // W/L Presetting
   close_mode: "ask" | "save_current" | "save_all" | "discard";  // 닫기 동작 (Setting>Viewer)
-  monitor?: { screens?: number[]; worklist?: number | null; report?: number | null };  // 창별 모니터 배치
+  // 창별 모니터 배치 — screens(뷰어), worklist/report, max_open(라운드로빈 슬롯 수), close_scope(All Close 범위)
+  monitor?: { screens?: number[]; worklist?: number | null; report?: number | null;
+              max_open?: number; close_scope?: "all" | "current" };
 }
 const DEFAULT_PREFS: ViewerPrefs = {
   paletteSide: "left", thumbSide: "left", thumbSize: 128,
@@ -564,6 +566,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const off = onStudySync("viewer", (id) => {
       const opened = openTabsRef.current.find((t) => t.id === id);
       if (opened) void loadIntoActiveRef.current(opened.id);
+    });
+    return off;
+  }, []);
+  // 다중 모니터 라운드로빈 — 다른 모니터에서 검사를 열면 이 창은 리로드/활성 전환 없이 Exam 탭만 추가.
+  // (탭 클릭 시 loadIntoActive 로 온디맨드 로드 — "화면 깜빡임 없이 탭만 추가" 요구 충족)
+  useEffect(() => {
+    const off = onViewerAddTab((id, uid, label) => {
+      setOpenTabs((prev) => (prev.some((t) => t.id === id) ? prev : [...prev, { id, uid, label }]));
     });
     return off;
   }, []);
@@ -2507,12 +2517,21 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /* 판독 도크 동작·상태 — components/ReportDock.tsx 로 이사(리포트 로드/저장/승인/상용구/Ctrl+S 단축키) */
 
   /* 닫기 동작 — 3종 선택(체크 시 기본 저장 → viewer.prefs.close_mode, Setting>뷰어) */
+  // All Close(모든 모니터) 의도는 요청 시점이 아니라 '확정 시점'(doClose)에 브로드캐스트한다.
+  // (ask 모드에서 다이얼로그를 취소하면 다른 모니터가 이미 닫혀버리는 비원자적 상태 방지)
+  const closeAllMonitorsRef = useRef(false);
   const doClose = async (mode: "save_current" | "save_all" | "discard", remember: boolean) => {
     setCloseDlg(false);
     if (remember) {
       setPrefs((p) => ({ ...p, close_mode: mode }));
       api.getSetting("viewer.prefs").then((r) =>
         api.putSetting("viewer.prefs", { ...r.value, close_mode: mode }, "user")).catch(() => {});
+    }
+    // 확정된 순간에만 다른 모니터 뷰어에 닫기 전파 + 공유 탭 목록 정리
+    if (closeAllMonitorsRef.current) {
+      closeAllMonitorsRef.current = false;
+      postViewerCloseAll();
+      try { localStorage.removeItem(TABS_KEY); } catch { /* 무시 */ }
     }
     try {
       if (mode === "save_current") {
@@ -2524,17 +2543,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     } catch { /* 저장 실패해도 닫기는 진행 */ }
     onClose();
   };
-  const requestClose = () => {
-    if (prefs.close_mode === "ask") setCloseDlg(true);
+  const requestClose = (allMonitors = false) => {
+    closeAllMonitorsRef.current = allMonitors;
+    if (prefs.close_mode === "ask") setCloseDlg(true);   // 확정은 다이얼로그 → doClose 에서 전파
     else void doClose(prefs.close_mode, false);
   };
   const requestCloseRef = useRef(requestClose);
   requestCloseRef.current = requestClose;
   const closeAllTabs = () => {
-    try { localStorage.removeItem(TABS_KEY); } catch { /* 무시 */ }
-    setOpenTabs([]);
-    requestClose();
+    // All Close — close_scope="all"(기본)이면 확정 시 모든 모니터 닫기, "current"면 이 창만.
+    requestClose(prefs.monitor?.close_scope !== "current");
   };
+  // 다른 모니터에서 All Close(전체 범위) → 이 창도 대화상자 없이 닫는다(저장은 설정 모드대로, ask면 현재화면 저장)
+  const doCloseRef = useRef(doClose);
+  doCloseRef.current = doClose;
+  useEffect(() => onViewerCloseAll(() => {
+    const m = prefsRef.current.close_mode;
+    void doCloseRef.current(m === "ask" ? "save_current" : m, false);
+  }), []);
 
   /* 툴바 표시 여부 (Setting>뷰어>Tools bar — 계정 로밍, 기본 모두 표시) */
   const tbOn = (id: string) => prefs.toolbar?.[id] !== false;
@@ -3641,7 +3667,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       {/* 상단 검사탭 바 */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px",
                     background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
-        <button onClick={requestClose} style={{ fontWeight: 700 }}>WORKLIST</button>
+        <button onClick={() => requestClose()} style={{ fontWeight: 700 }}>WORKLIST</button>
         {/* 좌상단: Series Layout(뷰포트 분할) · Image Layout(페인 내 이미지 타일) — UBPACS p.14 */}
         <GridPicker label="Srs" max={10}
                     value={{ r: LAYOUTS[layout].rows, c: LAYOUTS[layout].cols }}
