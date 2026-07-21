@@ -56,7 +56,8 @@ import { OrderEntryRis } from "../components/OrderEntryRis";
 import { MergeIcon, ReadStateIcon } from "../components/readState";
 import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
-import { screenFeatures } from "../lib/screens";
+import { screenFeatures, screenFeaturesList } from "../lib/screens";
+import { showToast } from "../lib/toast";
 import { onStudySync, postStudySync } from "../lib/sync";
 import { Splitter, clampSz } from "../lib/Splitter";
 
@@ -94,15 +95,24 @@ export function loadHangingPrefs() {
   }).catch(() => {});
 }
 
-/** 모니터 설정 기반 창 위치/크기 — Window Management API(Chrome) 가용 시.
- *  매 호출마다 최신 설정을 다시 읽는다(설정 저장 직후에도 반영). */
-async function viewerWindowFeatures(): Promise<string> {
+/** 뷰어 모니터 설정 → 모니터별 개별 창 features(번호 오름차순). Window Management API(Chrome) 가용 시.
+ *  매 호출마다 최신 설정을 다시 읽는다(설정 저장 직후에도 반영). 단일/미감지는 1원소 리스트. */
+async function viewerWindowFeaturesList(): Promise<{ index: number; features: string }[]> {
   try {
     const r = await api.getSetting("viewer.prefs");
     monitorScreens = ((r.value as { monitor?: { screens?: number[] } }).monitor?.screens) ?? monitorScreens;
   } catch { /* 캐시 유지 */ }
-  return screenFeatures(monitorScreens);
+  return screenFeaturesList(monitorScreens);
 }
+/** 뷰어 창 이름 규칙 — 최저번호 모니터는 표준 이름 "sv_viewer"(ReportWindow ◀▶·관련검사
+ *  오픈이 참조하는 이름), 나머지는 sv_viewer_m{index}. 단일/미감지도 "sv_viewer". */
+function viewerWindowName(index: number, first: boolean, multi: boolean): string {
+  return !multi || first ? "sv_viewer" : `sv_viewer_m${index}`;
+}
+// 마지막 openV2 로 연 뷰어 창들(이름→핸들). 모니터 설정을 다중↔단일로 바꿔 열면
+// 이번 세트에 없는 이전 보조 창(sv_viewer_m*)을 닫아 고아 창이 남지 않게 한다.
+const openedViewerWindows = new Map<string, Window>();
+
 /** 재사용 창(window.open 의 위치 옵션이 무시됨)도 지정 모니터로 이동/리사이즈 */
 function applyWindowBounds(w: Window | null, features: string) {
   if (!w) return;
@@ -2619,15 +2629,39 @@ export function Worklist() {
       p.set("wo_ids", cfg.withOpen.ids.join(","));
     }
     // 같은 이름 창 재사용 — 뷰어 창 1개에 검사가 탭으로 누적.
-    // VIEWER_BASE 설정 시 별도 포트(출처)로, 모니터 설정 시 해당 모니터(들)에 배치(스팬)
+    // VIEWER_BASE 설정 시 별도 포트(출처)로, 모니터 설정 시 해당 모니터(들)에 배치.
     const base = VIEWER_BASE
       ? `${VIEWER_BASE.replace(/\/$/, "")}/`
       : `${window.location.origin}${window.location.pathname}`;
-    void viewerWindowFeatures().then((features) => {
-      const w = window.open(`${base}?${p}`, "sv_viewer", features);
-      // 재사용 창은 open() 의 위치 옵션이 무시되므로 명시적으로 이동/리사이즈 (모니터 설정 적용)
-      applyWindowBounds(w, features);
-      w?.focus();
+    const url = `${base}?${p}`;
+    void viewerWindowFeaturesList().then((list) => {
+      // 단일(또는 미감지): 기존과 동일하게 재사용 창 "sv_viewer" 1개.
+      // 다중 모니터: 최저번호 모니터=표준 "sv_viewer"(재사용·판독창 참조 유지), 나머지=sv_viewer_m{index}.
+      //   각 창을 applyWindowBounds 로 해당 모니터에 배치. 첫(최저번호) 창에 포커스.
+      //   ※ 단일 창을 여러 모니터에 스팬하는 것은 브라우저가 한 화면으로 클램프하므로 창을 나눈다.
+      const multi = list.length > 1;
+      const names = new Set<string>();
+      let opened = 0;
+      list.forEach((mon, i) => {
+        const name = viewerWindowName(mon.index, i === 0, multi);
+        names.add(name);
+        const w = window.open(url, name, mon.features);
+        // 재사용 창은 open() 위치 옵션이 무시되므로 명시적 이동/리사이즈로 해당 모니터에 배치
+        applyWindowBounds(w, mon.features);
+        if (w) { openedViewerWindows.set(name, w); opened += 1; if (i === 0) w.focus(); }
+      });
+      // 이번 세트에 없는 이전 뷰어 창(다중→단일 전환 시의 보조 창 등)은 닫아 고아 방지
+      for (const [nm, w] of [...openedViewerWindows]) {
+        if (!names.has(nm)) { try { w.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
+      }
+      // 최초 다중 오픈 시 팝업 차단으로 일부 창이 안 열렸으면 명시 안내(주소창 팝업 허용 유도)
+      if (multi && opened < list.length) {
+        showToast(
+          `팝업 차단으로 ${opened}/${list.length} 모니터에만 열렸습니다 — 주소창의 팝업 아이콘에서 ` +
+          `이 사이트를 '항상 허용'으로 설정한 뒤 다시 여세요`,
+          "error",
+        );
+      }
     });
   }, []);
 

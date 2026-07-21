@@ -1865,7 +1865,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                             <td style={{ textAlign: "center" }}>
                               <input type="checkbox" checked={monitorSel.includes(i)}
                                      onChange={(e) => setMonitorSel((p) =>
-                                       e.target.checked ? [...p, i].sort() : p.filter((x) => x !== i))} />
+                                       e.target.checked ? [...p, i].sort((a, b) => a - b) : p.filter((x) => x !== i))} />
                             </td>
                             <td style={{ textAlign: "center" }}>
                               <input type="radio" name="wlmon" checked={wlMon === i}
@@ -1899,7 +1899,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   <div style={{ fontSize: 11.5, color: "var(--text-secondary)", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
                     <b>사용 방법:</b> ① 모니터 감지 → 🔢 모니터 확인(각 화면에 번호 표시·목록 번호와 대조)
                     → ② 창별 모니터 지정 → ③ 하단 <b>OK(저장)</b> → ④ 다음 오픈부터 적용.<br />
-                    · <b>뷰어 ☑</b>: 1대=해당 모니터 / 2대 이상=스팬+Series Layout 영상 분할 / 0대=기본 크기<br />
+                    · <b>뷰어 ☑</b>: 1대=해당 모니터 / <b>2대 이상=각 모니터에 개별 뷰어 창을 번호 오름차순으로 오픈</b> / 0대=기본 크기<br />
+                    &nbsp;&nbsp;&nbsp;(다중 모니터 최초 오픈 시 브라우저가 팝업을 차단하면, 주소창의 팝업 아이콘에서 이 사이트 <b>항상 허용</b>으로 설정)<br />
                     · <b>워크리스트 ◉</b>: 위 버튼으로 해당 모니터에 새 창 오픈 (라디오 재클릭=해제)<br />
                     · <b>판독 ◉</b>: 뷰어의 [Reading] 버튼이 해당 모니터에 판독 창을 띄움
                   </div>
