@@ -221,6 +221,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [h2dCommonOn, setH2dCommonOn] = useState(true);
   const [h2dByViewer, setH2dByViewer] = useState<Record<string, Record<string, { s: string; i: string }>>>({});
   const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
+  // 비교(Compare) 설정 — viewer.prefs.compare (뷰어·openV2 가 소비). 편집은 판독(Reading) 탭.
+  //  enabled=기능 on/off · multi_monitor=Viewer 모니터 2개+면 비교검사를 다음 모니터에(끝번→첫번 순환) · labels=M/S 녹색 라벨
+  //  prior_mode=과거검사(History) 비교 표시 — "layout"(1:2 분할) / "monitor"(인접 모니터: 다음, 끝번이면 이전)
+  const [cmpCfg, setCmpCfg] = useState<{ enabled: boolean; multi_monitor: boolean; labels: boolean;
+                                         prior_mode: "layout" | "monitor" }>(
+    { enabled: true, multi_monitor: true, labels: true, prior_mode: "layout" });
   const [hospital, setHospital] = useState("");
   const [department, setDepartment] = useState("");
   const [footer, setFooter] = useState("");
@@ -333,6 +339,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       };
       const cv = (v as { client_viewer?: string }).client_viewer;
       if (cv && CLIENT_VIEWERS.some((x) => x.id === cv)) setClientViewer(cv);
+      const cmp = (v as { compare?: Partial<{ enabled: boolean; multi_monitor: boolean; labels: boolean;
+                                              prior_mode: "layout" | "monitor" }> }).compare;
+      if (cmp) setCmpCfg((p) => ({ ...p, ...cmp }));
       const mk = (v as { mode_key?: string }).mode_key;
       if (mk) setModeSel(mk);
       const iv = v as { infi_sel_color?: string; infi_overlay_font?: number; infi_overlay_visible?: boolean;
@@ -503,6 +512,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       hanging2d_common_on: h2dCommonOn,
       hanging2d_by_viewer: h2dByViewer,
       client_viewer: clientViewer,
+      compare: cmpCfg,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
       infi_toolbar: infTb,
       infi_tool_cols: infToolCols, infi_tool_labels: infToolLabels, infi_tool_size: infToolSize,
@@ -1087,6 +1097,35 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           <option value="cursor">커서 위치에 삽입</option>
                         </select>
                       </Row>
+                    </Group>
+                    <Group title="비교 (Compare) — 과거검사 나란히 보기">
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5 }}>
+                        <input type="checkbox" checked={cmpCfg.enabled}
+                               onChange={(e) => setCmpCfg((p) => ({ ...p, enabled: e.target.checked }))} />
+                        비교 기능 사용 (⇄ Compare)
+                      </label>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, opacity: cmpCfg.enabled ? 1 : 0.5 }}>
+                        <input type="checkbox" checked={cmpCfg.multi_monitor} disabled={!cmpCfg.enabled}
+                               onChange={(e) => setCmpCfg((p) => ({ ...p, multi_monitor: e.target.checked }))} />
+                        다중 모니터 배치 — Viewer 모니터가 2개 이상이면 비교검사를 다음 모니터에 (끝번→첫 모니터 순환)
+                      </label>
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, opacity: cmpCfg.enabled ? 1 : 0.5 }}>
+                        <input type="checkbox" checked={cmpCfg.labels} disabled={!cmpCfg.enabled}
+                               onChange={(e) => setCmpCfg((p) => ({ ...p, labels: e.target.checked }))} />
+                        M/S 라벨 표시 — 기준 검사 <b style={{ color: "var(--stat-final)" }}>Compare M</b>, 비교 검사 <b style={{ color: "var(--stat-final)" }}>Compare S1·S2</b> (녹색·중앙 상단)
+                      </label>
+                      <Row label="과거검사(History) 비교 표시">
+                        <select value={cmpCfg.prior_mode} disabled={!cmpCfg.enabled}
+                                onChange={(e) => setCmpCfg((p) => ({ ...p, prior_mode: e.target.value as "layout" | "monitor" }))}>
+                          <option value="layout">Layout 띄우기 — 한 화면 1:2 분할 (좌=현재, 우=과거)</option>
+                          <option value="monitor">Monitor 띄우기 — 인접 모니터 창 (다음, 끝번이면 이전)</option>
+                        </select>
+                      </Row>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                        판독 도크 History의 과거검사(Prior Studies) 썸네일 클릭 시 적용. Monitor 띄우기 예: 모니터 1·2·3에서
+                        3번 기준→2번, 1번 기준→2번에 표시. 조건 미충족(단일 모니터·감지/팝업 차단) 시 Layout 1:2로 폴백.
+                        ⇄ Compare(다중 선택)의 다중 모니터 배치는 위 체크가 담당합니다. 창 관리 권한(HTTPS)·팝업 허용 필요.
+                      </div>
                     </Group>
                     <Group title="시스템 단축키" right={
                       <button style={{ padding: "1px 8px", fontSize: 11 }}

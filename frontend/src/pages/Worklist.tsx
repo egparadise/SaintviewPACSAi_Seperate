@@ -2823,23 +2823,46 @@ export function Worklist() {
       for (const [nm, w] of [...openedViewerWindows]) {
         if (w.closed) openedViewerWindows.delete(nm);
       }
+      // 탭→모니터 배치 예외 대상 선계산 — mm 판정(창 다수 가능성)에 포함시키기 위해 urlFor 보다 먼저.
+      const activeTab = activeTabIdRef.current;
+      const navTabOn = Object.values(tabBinding).some((v) => !!v);
+      const ovMon = (cfg.forceRoundRobin || navTabOn) ? undefined
+        : tabMonMap.find((r) => r.tab && r.tab === activeTab)?.monitor;
+      // 다중 모니터 관리 배치(mm=1) — 라운드로빈/탭배치로 창이 여럿일 수 있을 때, 새로 열린 창도 공유
+      // Exam 레지스트리 전체를 탭으로 복원하게 한다(In-View 는 환자 혼합 방지 필터를 건너뜀 — 모든 모니터
+      // 동일 탭 목록, 각 창의 활성 검사만 다름). 탭배치 예외(ovMon)는 단일 감지여도 별도 창을 만들므로 포함.
+      // 단일 모니터(mm=0 명시)는 기존 규칙 유지 — 재사용 창을 mm 에서 강등(sessionStorage 해제).
+      const mmFlag = (slots.length > 1 && slots[0].index >= 0) || ovMon != null;
       // 모니터별 ◀▶ 탐색 탭(navtab)을 URL 에 실어 뷰어가 그 탭 필터 목록으로 이동하게 한다.
       const urlFor = (monitorIndex: number) => {
         const tab = tabBinding[monitorIndex];
-        return tab ? `${base}?${p}&navtab=${encodeURIComponent(tab)}` : `${base}?${p}`;
+        const mm = mmFlag ? "&mm=1" : "&mm=0";
+        return tab ? `${base}?${p}${mm}&navtab=${encodeURIComponent(tab)}` : `${base}?${p}${mm}`;
       };
+      // mm 배치 — 공유 Exam 레지스트리에 이 검사를 '창을 열기 전에' 워크리스트가 직접 선등록한다.
+      // 다중선택 일괄 오픈처럼 여러 창이 동시에 마운트되며 각자 read-modify-write 하면 항목이 유실되는
+      // 경합을 워크리스트(단일 기록자)의 순차 기록으로 제거. 뷰어 init 의 push 는 멱등이라 무해.
+      // (VIEWER_BASE 로 뷰어가 타 출처면 이 기록은 뷰어에 안 보이지만 무해 — 뷰어 자체 push 로 동작)
+      if (mmFlag) {
+        try {
+          const ids: number[] = JSON.parse(localStorage.getItem("sv_infi_exams") ?? "[]");
+          if (!ids.includes(d0.id)) localStorage.setItem("sv_infi_exams", JSON.stringify([...ids, d0.id]));
+        } catch { /* 무시 */ }
+        try {
+          const tabs: { id: number; uid: string; label: string }[] = JSON.parse(localStorage.getItem("sv_viewer_tabs") ?? "[]");
+          if (!tabs.some((t) => t.id === d0.id)) {
+            localStorage.setItem("sv_viewer_tabs", JSON.stringify([...tabs, { id: d0.id, uid: d0.study_uid, label: tabLabel }]));
+          }
+        } catch { /* 무시 */ }
+      }
       // 최저번호 모니터=표준 "sv_viewer"(판독창 참조·재사용), 나머지=sv_viewer_slot{index} (모니터 정체성 기준 고정)
       const nameFor = (monitorIndex: number) =>
         monitorIndex === slots[0]?.index ? "sv_viewer" : `sv_viewer_slot${monitorIndex}`;
 
       // ── 워크리스트 탭 → 모니터 배치 예외 (최우선) ──
       // 검사를 연 순간의 활성 워크리스트 탭에 지정 모니터가 있으면, 뷰어 모니터 선택·멀티 여부와
-      // 무관하게 그 모니터에 직접 연다. (다중선택 일괄 오픈은 forceRoundRobin 으로 제외)
+      // 무관하게 그 모니터에 직접 연다. (다중선택 일괄 오픈은 forceRoundRobin 으로 제외 — ovMon 은 위에서 선계산)
       // 상호 배타: 모니터별 ◀▶ 탐색 탭(tab_binding)이 하나라도 설정돼 있으면 이 배치 예외는 무시(설정 UI도 비활성).
-      const activeTab = activeTabIdRef.current;
-      const navTabOn = Object.values(tabBinding).some((v) => !!v);
-      const ovMon = (cfg.forceRoundRobin || navTabOn) ? undefined
-        : tabMonMap.find((r) => r.tab && r.tab === activeTab)?.monitor;
       if (ovMon != null) {
         const feat = await screenFeatures([ovMon], "width=1500,height=920");   // 지정 모니터 실좌표(감지 가능 시)
         const name = nameFor(ovMon);
@@ -2851,7 +2874,8 @@ export function Worklist() {
         return;
       }
 
-      const multi = slots.length > 1 && slots[0].index >= 0;
+      // 진짜 다중 모니터(감지 슬롯 2개+). ovMon 케이스는 위에서 return — 여기선 mmFlag=슬롯 판정과 동일.
+      const multi = mmFlag;
       if (!multi) {
         // 단일/미감지: 재사용 창 "sv_viewer" 1개. 다중→단일 전환 시 이전 보조 창은 고아이므로 닫는다.
         for (const [nm, ow] of [...openedViewerWindows]) {

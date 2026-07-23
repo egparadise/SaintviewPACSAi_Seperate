@@ -5,8 +5,8 @@ import { api, openViewer, type Anno, type InstanceNode, type SeriesNode, type St
 import { annoLabel, contentRect, measureAnno, refLineOn, screenToImage } from "../lib/annotations";
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
-import { screenFeatures } from "../lib/screens";
-import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerCloseAll } from "../lib/sync";
+import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
 import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, mammoAssign, type HpRule } from "../lib/viewerConfig";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -303,12 +303,16 @@ interface ViewerPrefs {
   // 창별 모니터 배치 — screens(뷰어), worklist/report, max_open(라운드로빈 슬롯 수), close_scope(All Close 범위)
   monitor?: { screens?: number[]; worklist?: number | null; report?: number | null;
               max_open?: number; close_scope?: "all" | "current" };
+  // 비교(Compare) 설정 — Setting>판독(Reading). enabled/multi_monitor/labels +
+  // prior_mode: 과거검사(History) 비교 표시 — "layout"=1:2 분할 / "monitor"=인접 모니터 창
+  compare?: { enabled?: boolean; multi_monitor?: boolean; labels?: boolean; prior_mode?: "layout" | "monitor" };
 }
 const DEFAULT_PREFS: ViewerPrefs = {
   paletteSide: "left", thumbSide: "left", thumbSize: 128,
   thumbMode: "series", hanging2d: {}, reportDock: false,  // 판독 도크 기본 숨김(Setting>뷰어공통에서 표시)
   paletteW: 200, dockW: 340, toolbar: {}, wl_presets: WL_PRESETS,
   close_mode: "ask",
+  compare: { enabled: true, multi_monitor: true, labels: true, prior_mode: "layout" },
 };
 
 // Exam 탭 영속 — 새 창 뷰어가 재사용/재오픈돼도 ✕/전체닫기 전까지 우측에 계속 쌓인다 (UBPACS)
@@ -586,6 +590,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const openTabsRef = useRef<{ id: number; uid: string; label: string }[]>([]);
   useEffect(() => {
     const off = onStudySync("viewer", (id) => {
+      // 다중 모니터 관리 배치(mm) — 탭이 전 창 공유이므로 외부 선택 동기로 전환하면 모든 모니터가
+      // 같은 검사로 일제 전환되어 배치가 깨진다 → mm 창은 전환하지 않음(탭 클릭으로만).
+      if (mmManaged()) return;
       const opened = openTabsRef.current.find((t) => t.id === id);
       if (opened) void loadIntoActiveRef.current(opened.id);
     });
@@ -658,10 +665,31 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // TY-3(9): Compare 모달 — 같은 환자 과거검사 다중 선택 비교
   const [cmpOpen, setCmpOpen] = useState(false);
   const [cmpSel, setCmpSel] = useState<Set<number>>(new Set());
+  // 비교 역할 라벨 — 다중 모니터 slave 창은 URL cmprole(S1/S2…), master 는 비교 시작 시 "M" 설정.
+  //  값이 있으면 창 전체가 그 역할(중앙 상단 녹색 라벨). 단일 모니터 인플레이스 비교는 페인별로 파생.
+  const [cmpRole, setCmpRole] = useState<string>(() => new URLSearchParams(window.location.search).get("cmprole") || "");
+  // 비교 활성 여부 — ⇄ Compare 로 명시 진입한 경우에만 M/S 라벨 표시(Add View·Stack·과거검사 드래그와 구분).
+  //  slave 창(URL cmprole)은 처음부터 활성.
+  const [cmpActive, setCmpActive] = useState<boolean>(() => !!new URLSearchParams(window.location.search).get("cmprole"));
+  // 다중 모니터 감지 슬롯 사전 캐시 — Compare 모달 열 때 미리 감지해 두고, "비교 열기" 클릭 시 동기 사용
+  //  (클릭 핸들러 내 await 없이 window.open → 사용자 활성화 유지 → 팝업 차단 회피).
+  const cmpSlotsRef = useRef<{ index: number; features: string }[]>([]);
+  // Compare 모달 열기 — 기능 off면 무시 + 다중 모니터 슬롯 사전 감지(클릭 활성화 유지 → 이후 window.open 팝업 허용)
+  const openCompareModal = () => {
+    if ((prefsRef.current.compare?.enabled) === false) return;
+    setCmpSel(new Set());
+    setCmpOpen(true);
+    if (prefsRef.current.compare?.multi_monitor !== false) {
+      void screenFeaturesList(prefsRef.current.monitor?.screens ?? [])
+        .then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
+    }
+    // multi_monitor=false 여도 캐시는 비우지 않는다 — 과거검사 '모니터 띄우기'(prior_mode)도 같은 캐시 사용
+  };
   // 워크리스트 ⇄ Compare 진입(?cmp=1) — 로드 직후 Compare 모달 자동 오픈(1회)
   const cmpParamRef = useRef(new URLSearchParams(window.location.search).get("cmp") === "1");
   useEffect(() => {
-    if (cmpParamRef.current) { cmpParamRef.current = false; setCmpOpen(true); }
+    if (cmpParamRef.current) { cmpParamRef.current = false; openCompareModal(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [thumbOpen, setThumbOpen] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(true);
@@ -954,6 +982,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (merged.paletteW === 100 || merged.paletteW === 138) merged.paletteW = 200;
       if (merged.dockW === 250) merged.dockW = 340;  // 판독 도크 에디터화(26차)에 맞춰 확대
       setPrefs(merged);
+      // 다중 모니터 슬롯 사전 감지 — Compare/과거검사 '모니터 띄우기'가 클릭 시 동기 사용(팝업 허용).
+      // 권한 미승인 등 실패 시 빈 캐시 유지 → 해당 기능은 Layout(인플레이스) 폴백.
+      if ((merged.monitor?.screens?.length ?? 0) > 1) {
+        void screenFeaturesList(merged.monitor!.screens!)
+          .then((s) => { cmpSlotsRef.current = s; }).catch(() => { cmpSlotsRef.current = []; });
+      }
       // 2D 행잉 — 모달리티별 Series 분할(setLayout) + Image 분할(페인 il). 구 형식(문자열=Series만) 호환.
       // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 뷰어별보다 우선. 아니면 뷰어별(sv/ty) 우선.
       // MG(mammo)는 전용 2×2 4-view 행잉이 우선(결정적) — 2D 행잉 설정 무시(경합·타일 분할 방지).
@@ -2393,10 +2427,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
 
   /* ── TY-3(9): Compare — 같은 환자 과거검사 다중 선택 비교 오픈 (In Compare 이식, 페이지 리로드 없이).
         related_exams 만 노출하므로 환자 혼합이 원천 차단된다(다른 환자 비교는 +Add 명시 동선). ── */
-  const openCompare = async () => {
-    const ids = [...cmpSel].slice(0, 29);           // 3열×10행 상한(주 검사 포함 30) — LAYOUTS 범위 보장
-    setCmpOpen(false);
-    if (!ids.length) return;
+  // 한 뷰어 안에서 분할 비교(단일 모니터 폴백) — 선택 과거검사를 페인 p1.. 에 로드 + SyncOther
+  const compareInPlace = async (ids: number[]) => {
+    setCmpActive(true);
     const n = ids.length + 1;                       // 주 검사(p0) + 선택 검사들
     const c = n <= 2 ? 2 : n <= 4 ? 2 : 3;
     const key = `${Math.ceil(n / c)}x${c}`;
@@ -2412,6 +2445,30 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     }
     setXmode("sync_other");
     setStatus(`Compare — 과거검사 ${ids.length}건 비교 오픈 (SyncOther ON)`);
+  };
+  const openCompare = async () => {
+    if ((prefs.compare?.enabled) === false) { setCmpOpen(false); return; }  // 기능 off
+    const ids = [...cmpSel].slice(0, 29);           // 3열×10행 상한(주 검사 포함 30) — LAYOUTS 범위 보장
+    setCmpOpen(false);
+    if (!ids.length) return;
+    // 다중 모니터 배치 — Viewer 모니터 2개+ 감지되면 비교검사를 "다음 모니터"에 개별 창으로(기준 모니터 제외,
+    //  끝번→첫 모니터 순환). placeCompareSlaves 는 사전 감지(cmpSlotsRef) 를 동기 사용 → 클릭 활성화 유지(팝업 허용).
+    if (prefs.compare?.multi_monitor !== false
+        && placeCompareSlaves(cmpSlotsRef.current, window.name, ids)) {
+      setCmpActive(true);
+      setCmpRole("M");                              // 이 창은 기준(중앙 상단 녹색 "Compare M")
+      // 다른 열린 창 + 이 창(발신자 — BroadcastChannel 미수신)에도 비교검사 Exam 탭 동기
+      for (const id of ids) {
+        const rx = detail.related_exams.find((q) => q.id === id);
+        const lbl = `${rx?.modality ?? "검사"} ${rx?.study_date ?? ""} #${id}`;
+        postViewerAddTab(id, rx?.study_uid ?? "", lbl);
+        addOpenTab(id, rx?.study_uid ?? "", lbl);
+      }
+      setStatus(`Compare — 비교검사 ${ids.length}건을 다음 모니터에 오픈 (기준=M)`);
+      return;
+    }
+    // 단일 모니터(또는 미감지) — 한 뷰어 안에서 분할 비교
+    await compareInPlace(ids);
   };
 
   /* 주석/Reference line SVG 오버레이 — 이미지 콘텐츠 사각형에 정합(viewBox=픽셀 격자) */
@@ -2649,6 +2706,27 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const apIl = panes[activePane]?.il;
   useEffect(() => { setImgLay(apIl ?? { r: 1, c: 1 }); }, [activePane, apIl?.r, apIl?.c]);   // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 비교(Compare) M/S 라벨 — 창 역할(cmpRole: 다중 모니터 slave/master) 우선, 없으면 인플레이스 페인별 파생.
+  //  기준 검사(detail)=M, 비교로 불러온 과거검사=S1/S2… (열린 순서). 설정 off/미비교 시 라벨 없음.
+  const cmpLabelsOn = (prefs.compare?.enabled !== false) && (prefs.compare?.labels !== false);
+  const cmpSlaveUids = useMemo(() => {
+    const out: string[] = [];
+    for (const pid of PANE_IDS) {
+      const u = panes[pid]?.studyUid;
+      if (u && u !== detail.study_uid && !out.includes(u)) out.push(u);
+    }
+    return out;
+  }, [panes, detail.study_uid]);
+  const paneCmpRole = (uid?: string): string | null => {
+    if (!cmpLabelsOn || !cmpActive) return null;        // ⇄ Compare 명시 진입 시에만(Add View·Stack 제외)
+    // 이 창의 기준 검사(detail)=주 역할: 다중모니터 master 창은 "M"(URL cmprole 없음), slave 창은 URL cmprole(S{k}).
+    if (uid === detail.study_uid) return cmpRole || "M";
+    // 같은 창의 다른 검사(인플레이스 비교로 불러온 과거검사) → S1/S2… (기준 다음 번호). 없으면 라벨 없음.
+    if (!cmpSlaveUids.length || !uid) return null;
+    const i = cmpSlaveUids.indexOf(uid);
+    return i >= 0 ? `S${i + 1}` : null;
+  };
+
   /* 페인 1개 렌더 — 경계 스플리터 뷰포트(행×열 flex) 안에서 사용.
      더블클릭=최대화/복원(spineCurve 드래프트 수집 중에는 종료 전용 — 최대화 금지), 확대경=마우스 추적 3배 렌즈 */
   const renderPane = (pid: string) => {
@@ -2798,6 +2876,20 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             🔑 KEY
           </div>
         )}
+        {/* 비교(Compare) M/S 라벨 — 녹색·중앙 상단. KEY 배지가 있으면 아래로 오프셋 */}
+        {(() => {
+          const role = paneCmpRole(p.studyUid);
+          if (!role) return null;
+          const keyBadge = !!(p.series?.instances[p.index] && keyMarks.has(p.series.instances[p.index].sop_uid));
+          return (
+            <div style={{ position: "absolute", top: keyBadge ? 28 : 5, left: "50%", transform: "translateX(-50%)", zIndex: 6,
+                          padding: "1px 11px", borderRadius: 10, background: "rgba(34,197,94,0.94)", color: "#08140b",
+                          fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", whiteSpace: "nowrap",
+                          boxShadow: "0 1px 5px rgba(0,0,0,0.5)" }}>
+              Compare {role}
+            </div>
+          );
+        })()}
         {overlayOn && p.series && (() => {
           const meta = studyMeta[p.studyUid] ?? detail;  // 페인의 검사 기준 — 다른 환자 영상에 주검사 환자명 오표기 방지
           const priorMark = isPrior && meta.patient_key === detail.patient_key;  // 같은 환자의 과거검사만 [비교/과거]
@@ -3782,9 +3874,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           </span>
         )}
         {/* TY-3(9): Compare — 같은 환자 과거검사 다중 선택 비교 (Related [+Add] 와 별개 진입점) */}
-        {tbOn("cmp") && (
+        {tbOn("cmp") && prefs.compare?.enabled !== false && (
           <button title="Compare — 같은 환자의 과거검사를 골라 나란히 비교 (동기 스크롤 ON)"
-                  onClick={() => { setCmpSel(new Set()); setCmpOpen(true); }}
+                  onClick={openCompareModal}
                   style={{ fontWeight: 700, padding: "3px 8px" }}>
             <ToolIconTy id="cmp" size={15} flat={!tyIcon3d} />
           </button>
@@ -4014,7 +4106,28 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {/* 판독 도크 — 공유 컴포넌트 (리포트 로드/저장/승인/상용구/단축키 내장) */}
         {prefs.reportDock && !reportCollapsed && (
           <ReportDock detail={detail} width={prefs.dockW}
-                      onLoadPrior={(id) => void loadPrior(id)} onStatus={setStatus} />
+                      onLoadPrior={(id) => {
+                        // Setting>판독 '과거검사 비교 표시' — monitor: 인접 모니터(다음, 끝번이면 이전) 창.
+                        // 실패/단일/미감지 시 Layout(1:2 분할 loadPrior)로 폴백. 라벨: 이 창=M, 인접 창=S1.
+                        // 슬롯 캐시 자가치유 — 이번 클릭은 캐시로 동기 시도, 다음 클릭용 재감지(권한 후승인 반영)
+                        if (prefsRef.current.compare?.prior_mode === "monitor"
+                            && (prefsRef.current.monitor?.screens?.length ?? 0) > 1) {
+                          void screenFeaturesList(prefsRef.current.monitor!.screens!)
+                            .then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
+                        }
+                        if (prefsRef.current.compare?.prior_mode === "monitor"
+                            && placePriorAdjacent(cmpSlotsRef.current, window.name, id)) {
+                          setCmpActive(true);
+                          // 다른 열린 창 + 이 창(발신자 — BroadcastChannel 미수신)에도 과거검사 Exam 탭 동기
+                          const rx = detail.related_exams.find((q) => q.id === id);
+                          const lbl = `${rx?.modality ?? "검사"} ${rx?.study_date ?? ""} #${id}`;
+                          postViewerAddTab(id, rx?.study_uid ?? "", lbl);
+                          addOpenTab(id, rx?.study_uid ?? "", lbl);
+                          return;
+                        }
+                        setCmpActive(true);   // Layout 1:2 비교 — M/S 라벨 활성(Add View 와 구분되는 명시 비교)
+                        void loadPrior(id);
+                      }} onStatus={setStatus} />
         )}
         {/* 접힘 상태 — 우측 세로 탭으로 다시 펼치기 */}
         {prefs.reportDock && reportCollapsed && (

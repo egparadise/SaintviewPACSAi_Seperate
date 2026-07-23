@@ -6,7 +6,7 @@
 //         Limb Length/Center Line/Profile/2D Table/Spine Label/Volume/3D 주석/2D 주석·ROI 계열/Cobb/Marking/Lens
 // 해부 측정 4종(공통 측정 스펙): Cobb Angle(4점 예각 0~90°)·Leg Length(4점 L/R/Δ)·
 //         Spine Curve(척추 외곡 — 3점+ 더블클릭 종료, 기준선 대비 최대 편위)·Pelvic Tilt(골반 틀어짐 — 2점 수평 대비 각·Δ높이)
-import { Fragment, Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Splitter } from "../lib/Splitter";
 
 // Setting(p.12 'Open the setting window of Viewer') — 워크리스트 헤더의 설정과 동일한 설정 창
@@ -23,8 +23,8 @@ import { GridPicker } from "../lib/GridPicker";
 import { ReportDock } from "../components/ReportDock";
 import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
-import { screenFeatures } from "../lib/screens";
-import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerCloseAll } from "../lib/sync";
+import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
 import { mammoAssign, type HpRule } from "../lib/viewerConfig";
 
 // 해부학 아이콘 — 심장(CTR)/척추(Spine)/측만(Cobb)/골반+다리(Limb) 그림 (em 크기 = 칩 글리프에 맞춰 확대)
@@ -375,10 +375,37 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // Compare — 같은 환자 과거검사 선택 비교 (선택 검사들을 페인으로 추가 + Sync With Other Exams)
   const [cmpOpen, setCmpOpen] = useState(false);
   const [cmpSel, setCmpSel] = useState<Set<number>>(new Set());
+  // 비교 역할 라벨(M / S1…) — 다중 모니터 slave 는 URL cmprole, master 는 비교 시작 시 "M" (중앙 상단 녹색)
+  const [cmpRole, setCmpRole] = useState<string>(() => new URLSearchParams(window.location.search).get("cmprole") || "");
+  // 비교 활성 여부 — ⇄ Compare 명시 진입 시에만 M/S 라벨(Add/Stack/드래그 제외). slave 창(URL cmprole)은 활성.
+  const [cmpActive, setCmpActive] = useState<boolean>(() => !!new URLSearchParams(window.location.search).get("cmprole"));
+  // 비교 기준 검사 uid — 비교를 '시작한 시점의 활성 검사'(탭 전환 후 비교해도 M 이 정확). 미설정=창 배정 검사(detail)
+  const [cmpMaster, setCmpMaster] = useState("");
+  // 비교 설정 (viewer.prefs.compare) + 다중 모니터 슬롯 사전 캐시(모달 열 때 감지 → 클릭 시 동기 사용, 팝업 허용)
+  //  prior_mode: 과거검사(History) 비교 표시 — "layout"=1:2 분할 / "monitor"=인접 모니터 창
+  const [cmpCfg, setCmpCfg] = useState<{ enabled: boolean; multi_monitor: boolean; labels: boolean;
+                                         prior_mode: "layout" | "monitor" }>(
+    { enabled: true, multi_monitor: true, labels: true, prior_mode: "layout" });
+  const cmpSlotsRef = useRef<{ index: number; features: string }[]>([]);
+  const cmpCfgRef = useRef(cmpCfg);
+  useEffect(() => { cmpCfgRef.current = cmpCfg; }, [cmpCfg]);
+  const monScreensRef = useRef<number[]>([]);
+  // Compare 모달 열기 — 기능 off면 무시 + 다중 모니터 슬롯 사전 감지(클릭 활성화 유지 → 이후 window.open 팝업 허용)
+  const openCompareModal = () => {
+    if (cmpCfgRef.current.enabled === false) return;
+    setCmpSel(new Set());
+    setCmpOpen(true);
+    if (cmpCfgRef.current.multi_monitor !== false) {
+      void screenFeaturesList(monScreensRef.current)
+        .then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
+    }
+    // multi_monitor=false 여도 캐시는 비우지 않는다 — 과거검사 '모니터 띄우기'(prior_mode)도 같은 캐시 사용
+  };
   // 워크리스트 ⇄ Compare 진입(?cmp=1) — 로드 직후 Compare 모달 자동 오픈(1회)
   const cmpParamRef = useRef(new URLSearchParams(window.location.search).get("cmp") === "1");
   useEffect(() => {
-    if (cmpParamRef.current) { cmpParamRef.current = false; setCmpOpen(true); }
+    if (cmpParamRef.current) { cmpParamRef.current = false; openCompareModal(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // IN-2 ①: 행잉 프로토콜 규칙(viewer.hp) — 검사 로드 시 자동 매칭 + 행잉 콤보에서 선택 (TY applyHp 등가)
   const [hpRules, setHpRules] = useState<HpRule[]>([]);
@@ -482,16 +509,26 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     }
     localStorage.setItem(EXAMS_KEY, JSON.stringify(ids));
     postStudySync(detail.id, "viewer");   // IN-2 ③: Worklist·Reading 창에 활성 검사 알림
-    // Compare 로 재진입한 경우 — Sync With Other Exams 자동 ON
-    if (localStorage.getItem("sv_infi_cmp") === "1") {
+    // Compare 로 재진입한 경우 — Sync With Other Exams 자동 ON + M/S 라벨 활성 (플래그는 아래 행잉 판단에도 사용)
+    const cmpRe = localStorage.getItem("sv_infi_cmp") === "1";
+    if (cmpRe) {
       localStorage.removeItem("sv_infi_cmp");
+      setCmpActive(true);
       setXlink((x) => ({ ...x, sync_other: true }));
     }
     Promise.all(ids.map(async (id) => {
-      const d = id === detail.id ? detail : await api.study(id);
-      const t = await api.seriesTree(id);
-      return { d, series: t.series };
-    })).then(async (list) => {
+      try {
+        const d = id === detail.id ? detail : await api.study(id);
+        const t = await api.seriesTree(id);
+        return { d, series: t.series };
+      } catch { return null; }   // 개별 검사 로드 실패(삭제·권한) — 그 검사만 제외(전체 빈 화면 방지)
+    })).then(async (raw) => {
+      const list = raw.filter((x): x is { d: StudyDetail; series: SeriesNode[] } => !!x);
+      // 로드에 실패한 id 는 레지스트리에서도 제거 — 죽은 검사가 창마다 영구 재시도되는 것 방지
+      if (list.length !== ids.length) {
+        const ok = new Set(list.map((e) => e.d.id));
+        try { localStorage.setItem(EXAMS_KEY, JSON.stringify(ids.filter((id) => ok.has(id)))); } catch { /* 무시 */ }
+      }
       // 저장된 표시상태(pstate: 적용 툴 W/L·방향·필터·셔터) 로드 → 시리즈별 페인 구성 시 적용(재오픈 재현)
       try {
         const psList = await Promise.all(
@@ -552,7 +589,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // 환자 혼합 방지 — 암묵적 열기(더블클릭/내비)에서는 같은 환자 검사만 유지.
       // 다른 환자 비교는 명시적 동선(+Add/Stack/With Open 체크/Compare)으로만 —
       // With Open 은 ids 가 비어도(과거검사 없음) 신호 자체가 명시적 다중 오픈 의사.
-      const explicit = !!(addDetail || stackDetail || withOpen || keySops?.length);
+      // 다중 모니터 관리 배치(mm — openV2 URL 승격 + 창 세션 영속)는 공유 레지스트리 전체를 탭으로
+      // 유지해야 하므로 필터를 건너뛴다: 모든 모니터가 동일한 Exam 탭(연 순서), 활성 검사만 창마다 다름.
+      const mm = mmManaged();
+      const explicit = !!(addDetail || stackDetail || withOpen || keySops?.length) || mm;
       if (!explicit) {
         const same = list.filter((e) => e.d.patient_key === detail.patient_key);
         if (same.length !== list.length) {
@@ -574,13 +614,21 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         setActive(0);
         return;
       }
+      // mm(다중 모니터 관리 배치): 레지스트리 전체는 'Exam 탭'으로만 유지 — 페인 행잉은 이 창의
+      // 배정 검사(+명시적 다중 오픈 대상: Add/Stack/With Open)만. 아니면(단일 창·Compare 재진입) 기존대로
+      // 전체 누적 행잉. 이 분리가 없으면 mm 창마다 레지스트리 전 검사(타 환자 포함)가 그리드로 깔린다.
+      const wids = new Set(withOpen?.ids ?? []);
+      // (Stack View 는 위에서 early-return — 여기 도달 시 stackDetail 은 항상 없음)
+      const hangList = (mm && !cmpRe)
+        ? list.filter((e) => e.d.id === detail.id || e.d.id === addDetail?.id || wids.has(e.d.id))
+        : list;
       // ①②: 페인 구성 — 단독 검사는 Modality 기본 레이아웃(설정) 우선, 다중 검사는 오른쪽 누적
-      const single = list.length === 1;
-      const mod = list[0]?.d.modality ?? "";
+      const single = hangList.length === 1;
+      const mod = hangList[0]?.d.modality ?? "";
       const defCfg = single ? (defMap[mod] ?? defMap["*"]) : undefined;
       // Mammo(MG) 전용 행잉 — 표준 2×2 [R CC, L CC, R MLO, L MLO] + 오버레이 텍스트 제거 (전 뷰어 공통 규칙)
       const mammo = single && mod === "MG";
-      const ma = mammo ? mammoAssign(list[0].series) : null;
+      const ma = mammo ? mammoAssign(hangList[0].series) : null;
       const mammoSeries = ma && ma.some(Boolean) ? ma : null;   // 매칭 0이면 순서대로 폴백(빈 페인 방지)
       if (mammo) setOvlVisible(false);
       let r: number, c: number;
@@ -598,28 +646,29 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         }));
       }
       else if (defCfg?.s) { r = defCfg.s.r; c = defCfg.s.c; }
-      else { const n = Math.max(1, list.length); c = Math.min(n, 4); r = Math.ceil(n / c); }
+      else { const n = Math.max(1, hangList.length); c = Math.min(n, 4); r = Math.ceil(n / c); }
       setSLayout({ r, c });
       setPanes(Array.from({ length: r * c }, (_, i) => {
         if (single) {
           // 단독 검사: 페인마다 시리즈를 순서대로(부족하면 빈 페인), Image 레이아웃은 설정값. Mammo 는 표준 4-view 배치.
-          const s0 = mammoSeries ? (mammoSeries[i] ?? null) : (list[0].series[i] ?? null);
-          const p = { ...initPane(list[0].d.study_uid), series: s0 };
+          const s0 = mammoSeries ? (mammoSeries[i] ?? null) : (hangList[0].series[i] ?? null);
+          const p = { ...initPane(hangList[0].d.study_uid), series: s0 };
           if (hpMatch) {   // IN-2 ①: HP 규칙의 Image layout·W/L 적용 (TY applyHp 동일)
             p.il = { r: Math.min(hpMatch.i.r, 10), c: Math.min(hpMatch.i.c, 10) };
             if (hpMatch.wl !== undefined) p.wl = hpMatch.wl ?? "";
           }
           else if (defCfg?.i) p.il = defCfg.i;
           else if (i === 0 && r * c === 1 && ["CT", "MR"].includes(mod)
-                   && (list[0].series[0]?.instances.length ?? 0) >= 9) {
+                   && (hangList[0].series[0]?.instances.length ?? 0) >= 9) {
             p.il = { r: 3, c: 3 };   // 설정 없을 때 기본 행잉 (원본)
           }
           return applyPStateToPane(p);   // 저장된 표시상태(W/L·방향·필터·셔터) 재현
         }
-        const ex = list[i];
+        const ex = hangList[i];
         return applyPStateToPane(ex ? { ...initPane(ex.d.study_uid), series: ex.series[0] ?? null } : initPane());
       }));
-      setActive(ai);
+      // 활성 페인 — 행잉된 페인 중 배정 검사의 위치(mm 단독 행잉이면 0. 비-mm 은 기존 ai 와 동일 결과)
+      setActive(Math.max(0, hangList.findIndex((e) => e.d.id === detail.id)));
     }).catch(() => {});
   }, [detail]);
   // Refresh Exam — 활성 검사 시리즈 재로드
@@ -689,6 +738,24 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     void doCloseActionRef.current(m, false, { kind: "all" });
   }), [closeMode]);
   const curD = exams[activeExam]?.d ?? detail;
+  // 비교(Compare) M/S 라벨 — 창 역할(cmpRole: 다중 모니터) 우선, 없으면 페인별 파생.
+  //  기준(master)=비교 시작 시점의 활성 검사(cmpMaster, 미설정=창 배정 detail). ⇄/History 명시 진입 시에만.
+  const cmpLabelsOn = cmpCfg.enabled !== false && cmpCfg.labels !== false;
+  const cmpMasterUid = cmpMaster || detail.study_uid;
+  const cmpSlaveUids = useMemo(() => {
+    const out: string[] = [];
+    for (const p of panes) {
+      if (p.studyUid && p.studyUid !== cmpMasterUid && !out.includes(p.studyUid)) out.push(p.studyUid);
+    }
+    return out;
+  }, [panes, cmpMasterUid]);
+  const paneCmpRole = (uid?: string): string | null => {
+    if (!cmpLabelsOn || !cmpActive) return null;        // ⇄ Compare 명시 진입 시에만(Add/Stack/드래그 제외)
+    if (uid === cmpMasterUid) return cmpRole || "M";    // 기준 검사 — master="M", slave 창=URL cmprole
+    if (!cmpSlaveUids.length || !uid) return null;
+    const i = cmpSlaveUids.indexOf(uid);
+    return i >= 0 ? `S${i + 1}` : null;
+  };
   const wlPresets = curD.modality === "MR" ? IN_WL_PRESETS_MR : IN_WL_PRESETS_CT;
 
   // 키이미지 마크 로드 — 열린 검사 전체의 key_images SOP 집합(합집합). 검사 변화 시 갱신
@@ -879,6 +946,9 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const examsRef = useRef(exams);
   useEffect(() => { examsRef.current = exams; }, [exams]);
   useEffect(() => onStudySync("viewer", (id) => {
+    // 다중 모니터 관리 배치(mm) — 탭이 전 창 공유이므로 외부(워크리스트/판독창) 선택 동기로 전환하면
+    // 모든 모니터가 같은 검사로 일제 전환되어 "모니터별 열린 순서 배치"가 깨진다 → mm 창은 전환 안 함(탭 클릭으로만).
+    if (mmManaged()) return;
     const i = examsRef.current.findIndex((x) => x.d.id === id);
     if (i < 0) return;   // 열려있지 않은 검사 — 무시
     const ex = examsRef.current[i];
@@ -2057,18 +2127,51 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     if (window.opener && !window.opener.closed) window.opener.focus();
     else window.open("/", "_blank");
   };
-  // Report 도크의 과거검사 비교(◀▶/Prior Studies 클릭) — 활성 페인에 첫 시리즈 표시
-  // + 좌측 과거 썸네일 목록에도 등록(수동 loadPrior 와 동일 누적)
+  // Report 도크의 과거검사 비교(◀▶/Prior Studies 클릭) — Setting>판독(Reading) '과거검사 비교 표시'에 따라:
+  //  monitor = 인접 모니터(다음, 끝번이면 이전 — 예: 1,2,3 중 3번 기준→2번, 1번 기준→2번)에 과거검사 창.
+  //            단일/미감지·팝업 차단 시 Layout 으로 폴백.
+  //  layout  = 1:2 분할(좌=현재 검사, 우=과거검사) + 동기 스크롤 + M/S 라벨.
+  //            (구 방식 '활성 페인 교체+시리즈 레일 하단 append 표시'는 혼동을 줘 폐지 — 레일 등록은 유지)
   const dockLoadPrior = (examId: number) => {
     const re = (curD.related_exams ?? []).find((r) => r.id === examId);
+    // 슬롯 캐시 자가치유 — 이번 클릭은 기존 캐시로 동기 시도(팝업 허용), 다음 클릭을 위해 비동기 재감지
+    // (마운트 후 권한 승인·모니터 구성 변경 반영. 실패는 무시 — 캐시 유지)
+    if (cmpCfgRef.current.prior_mode === "monitor" && monScreensRef.current.length > 1) {
+      void screenFeaturesList(monScreensRef.current).then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
+    }
+    if (cmpCfgRef.current.prior_mode === "monitor"
+        && placePriorAdjacent(cmpSlotsRef.current, window.name, examId)) {
+      setCmpActive(true);                 // 이 창=기준(녹색 Compare M), 인접 모니터 창=S1
+      setCmpMaster(curD.study_uid);       // 기준=비교를 시작한 활성 검사
+      // 다른 열린 뷰어 창에도 과거검사 Exam 탭 동기 + 이 창(발신자 — BroadcastChannel 미수신)에도 추가
+      postViewerAddTab(examId, re?.study_uid ?? "", `${re?.modality ?? "검사"} ${re?.study_date ?? ""} #${examId}`);
+      if (!exams.some((x) => x.d.id === examId)) {
+        void (async () => {
+          try {
+            const d = await api.study(examId);
+            const t = await api.seriesTree(examId);
+            setExams((es) => (es.some((x) => x.d.id === examId) ? es : [...es, { d, series: t.series }]));
+          } catch { /* 무시 */ }
+        })();
+      }
+      say(`과거검사 비교 — ${re ? `${re.study_date} ${re.modality}` : `#${examId}`} → 인접 모니터`);
+      return;
+    }
     api.seriesTree(examId).then((r) => {
       if (re && !priorLoaded.has(examId)) {
         setPriorLoaded((s) => new Set(s).add(examId));
         setPriorSeries((ps) => [...ps, ...r.series.map((s) => ({ uid: re.study_uid, label: re.study_date, s }))]);
       }
       const s0 = r.series[0];
-      if (s0) upd(active, { series: s0, index: 0, studyUid: re?.study_uid ?? "" });
-      if (re) say(`과거검사 비교 — ${re.study_date} ${re.modality}`);
+      if (s0) {
+        applySLayout({ r: 1, c: 2 });
+        setPanes((ps) => ps.map((p, i) => (i === 1 ? { ...initPane(re?.study_uid ?? ""), series: s0 } : p)));
+        setActive(0);
+        setXlink((x) => ({ ...x, sync_other: true }));
+        setCmpActive(true);
+        setCmpMaster(curD.study_uid);     // 기준=비교를 시작한 활성 검사(탭 전환 후에도 M 정확)
+      }
+      if (re) say(`과거검사 비교 — ${re.study_date} ${re.modality} (1:2 분할)`);
     }).catch(() => say("과거검사 로드 실패"));
   };
 
@@ -2124,13 +2227,23 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // IN-2: 썸네일 로밍(⑤) · 판독창 모니터 배치(⑥) · OHIF 게이트(⑦)
       const n2 = r.value as { infi_thumb_size?: number; infi_thumb_mode?: "series" | "all";
                               ohif_enabled?: boolean;
-                              monitor?: { report?: number | null; close_scope?: "all" | "current" } };
+                              monitor?: { report?: number | null; close_scope?: "all" | "current"; screens?: number[] };
+                              compare?: Partial<{ enabled: boolean; multi_monitor: boolean; labels: boolean;
+                                                  prior_mode: "layout" | "monitor" }> };
       const tsz = n2.infi_thumb_size;
       if (tsz) setUi((u) => ({ ...u, thumbW: Math.min(260, Math.max(56, tsz)) }));
       if (n2.infi_thumb_mode === "series" || n2.infi_thumb_mode === "all") setThumbMode(n2.infi_thumb_mode);
       setOhifOn(!!n2.ohif_enabled);
       if (n2.monitor?.report != null) setMonReport(n2.monitor.report);
       if (n2.monitor?.close_scope === "current" || n2.monitor?.close_scope === "all") closeScopeRef.current = n2.monitor.close_scope;
+      if (Array.isArray(n2.monitor?.screens)) monScreensRef.current = n2.monitor!.screens!;
+      if (n2.compare) setCmpCfg((p) => ({ ...p, ...n2.compare }));
+      // 다중 모니터 슬롯 사전 감지 — Compare/과거검사 '모니터 띄우기'가 클릭 시 동기 사용(팝업 허용).
+      // 권한 미승인 등으로 실패하면 빈 캐시 유지 → 해당 기능은 Layout(인플레이스) 폴백.
+      if (monScreensRef.current.length > 1) {
+        void screenFeaturesList(monScreensRef.current)
+          .then((s) => { cmpSlotsRef.current = s; }).catch(() => { cmpSlotsRef.current = []; });
+      }
     }).catch(() => {});
   }, []);
   // 툴 활성화 카운트 +1 — 상위 50개만 유지, 2초 디바운스로 viewer.prefs.infi_usage 저장
@@ -2437,6 +2550,20 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                       🔑 KEY
                     </div>
                   )}
+                  {/* 비교(Compare) M/S 라벨 — 녹색·중앙 상단. KEY 배지가 있으면 아래로 오프셋 */}
+                  {(() => {
+                    const role = paneCmpRole(p.studyUid);
+                    if (!role) return null;
+                    const keyBadge = !!(inst && keyMarks.has(inst.sop_uid));
+                    return (
+                      <div style={{ position: "absolute", top: keyBadge ? 28 : 5, left: "50%", transform: "translateX(-50%)", zIndex: 6,
+                                    padding: "1px 11px", borderRadius: 10, background: "rgba(34,197,94,0.94)", color: "#08140b",
+                                    fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", whiteSpace: "nowrap",
+                                    boxShadow: "0 1px 5px rgba(0,0,0,0.5)" }}>
+                        Compare {role}
+                      </div>
+                    );
+                  })()}
                   {ovlVisible && (
                     <>
                       <div style={ovl("tl", ovlFont)}>{pd.patient_name}<br />{pd.patient_key}</div>
@@ -2804,11 +2931,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                   style={{ marginLeft: 8, padding: "2px 12px", fontSize: 12, fontWeight: 700 }}>
             3D
           </button>
-          <button title="Compare — 같은 환자의 과거검사를 골라 나란히 비교(동기 스크롤)"
-                  onClick={() => { setCmpSel(new Set()); setCmpOpen(true); }}
-                  style={{ marginLeft: 4, padding: "2px 12px", fontSize: 12, fontWeight: 700 }}>
-            ⇄ Compare
-          </button>
+          {cmpCfg.enabled !== false && (
+            <button title="Compare — 같은 환자의 과거검사를 골라 나란히 비교(동기 스크롤)"
+                    onClick={openCompareModal}
+                    style={{ marginLeft: 4, padding: "2px 12px", fontSize: 12, fontWeight: 700 }}>
+              ⇄ Compare
+            </button>
+          )}
           {/* 시네 — ▶는 누르는 즉시 ⏸로 전환. 대상=활성 페인(멀티 선택 시 함께). 옆 숫자=간격(초) */}
           <button title={panes[active]?.playing
                     ? "Pause — 재생 정지"
@@ -3198,10 +3327,35 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="primary" disabled={!cmpSel.size}
                       onClick={() => {
-                        // 선택 검사를 누적 목록에 추가 후 재구성 — Sync With Other Exams 자동 ON
+                        if (cmpCfg.enabled === false) { setCmpOpen(false); return; }
+                        const sel = [...cmpSel];
+                        setCmpOpen(false);
+                        // 다중 모니터 — 비교검사를 "다음 모니터"에 개별 창으로(기준 모니터 제외, 끝번→첫 모니터 순환).
+                        //  사전 감지 슬롯(cmpSlotsRef)을 동기 사용 → 클릭 활성화 유지(팝업 허용). 이 창은 기준(M).
+                        if (cmpCfg.multi_monitor !== false && placeCompareSlaves(cmpSlotsRef.current, window.name, sel)) {
+                          setCmpActive(true);
+                          setCmpRole("M");
+                          setCmpMaster(curD.study_uid);
+                          // 다른 열린 창 + 이 창(발신자)에도 비교검사 Exam 탭 동기
+                          for (const id of sel) {
+                            const rx = (curD.related_exams ?? []).find((q) => q.id === id);
+                            postViewerAddTab(id, rx?.study_uid ?? "", `${rx?.modality ?? "검사"} ${rx?.study_date ?? ""} #${id}`);
+                            if (!exams.some((x) => x.d.id === id)) {
+                              void (async () => {
+                                try {
+                                  const d = await api.study(id);
+                                  const t = await api.seriesTree(id);
+                                  setExams((es) => (es.some((x) => x.d.id === id) ? es : [...es, { d, series: t.series }]));
+                                } catch { /* 무시 */ }
+                              })();
+                            }
+                          }
+                          return;
+                        }
+                        // 단일 모니터(또는 미감지) — 한 창에서 분할 비교(선택 검사를 누적 목록에 추가 후 재구성, Sync ON)
                         let ids: number[] = [];
                         try { ids = JSON.parse(localStorage.getItem(EXAMS_KEY) ?? "[]"); } catch { /* 초기화 */ }
-                        for (const id of cmpSel) if (!ids.includes(id)) ids.push(id);
+                        for (const id of sel) if (!ids.includes(id)) ids.push(id);
                         localStorage.setItem(EXAMS_KEY, JSON.stringify(ids));
                         localStorage.setItem("sv_infi_cmp", "1");
                         window.location.search = `?viewer=2d&study=${curD.id}`;
