@@ -19,3 +19,6 @@ frontend/certs/
 deploy/generated/
 deploy/orthanc-generated.json
 deploy/scp-policy.env
+
+# 배포 패키지 산출물 (deploy/make_dist.py)
+build/
