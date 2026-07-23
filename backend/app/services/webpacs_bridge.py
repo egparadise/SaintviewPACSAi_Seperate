@@ -99,6 +99,10 @@ class WebPacsClient:
         self.user_id = user_id
         self.password = password
         self._token: str | None = None
+        # A 는 단일 유효 토큰(로그인마다 이전 토큰 무효화)이라, 멀티스레드(FastAPI threadpool)에서
+        # 병렬 이미지 로드가 각자 재로그인하면 서로의 토큰을 무효화하는 401 폭풍이 난다.
+        # → 로그인을 락으로 직렬화 + "내가 쓴 토큰이 아직 유효할 때만" 재로그인(중복 로그인 방지).
+        self._auth_lock = threading.Lock()
         kw: dict[str, Any] = {"base_url": self.base_url, "timeout": timeout}
         if transport is not None:
             kw["transport"] = transport   # 테스트(ASGITransport) 주입
@@ -108,6 +112,10 @@ class WebPacsClient:
 
     # ── 인증 ──────────────────────────────────────────────
     def login(self) -> dict:
+        with self._auth_lock:
+            return self._login_locked()
+
+    def _login_locked(self) -> dict:
         r = self._client.post("/api/user/auth/login", json={
             "user_id": self.user_id, "user_passwd": self.password, "user_overwrite": True,
         })
@@ -120,22 +128,45 @@ class WebPacsClient:
         self._token = body["token"]
         return body
 
+    def _ensure_token(self) -> str:
+        """유효 토큰 확보(없으면 로그인). 반환: 요청에 사용할 토큰(경합 재시도 비교용)."""
+        tok = self._token
+        if tok is None:
+            with self._auth_lock:
+                if self._token is None:
+                    self._login_locked()
+                tok = self._token
+        return tok or ""
+
+    def _relogin_if_stale(self, used_token: str) -> None:
+        """401 재시도 전 — 내가 쓴 토큰이 아직 현재 토큰일 때만 재로그인.
+        다른 스레드가 이미 갱신했으면 그 토큰을 그대로 재사용(중복 로그인·상호 무효화 방지)."""
+        with self._auth_lock:
+            if self._token == used_token or self._token is None:
+                self._login_locked()
+
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         h = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         if extra:
             h.update(extra)
         return h
 
+    def _authed(self, send, *args, **kw) -> httpx.Response:
+        """토큰 부착 요청 실행 + 401 시 stale 판정 재로그인 1회 재시도(공용).
+        send: self._client.request/get/post 등. args/kw 에 headers 는 주입하지 않는다(여기서 부착)."""
+        used = self._ensure_token()
+        kw["headers"] = self._headers(kw.pop("headers", None))
+        r = send(*args, **kw)
+        if r.status_code == 401:
+            self._relogin_if_stale(used)
+            kw["headers"] = self._headers()
+            r = send(*args, **kw)
+        return r
+
     def _request(self, method: str, path: str, *, params: dict | None = None,
                  headers: dict[str, str] | None = None) -> httpx.Response:
-        """Bearer 부착 요청 — 401(토큰 만료/무효)이면 1회 재로그인 후 재시도."""
-        if self._token is None:
-            self.login()
-        r = self._client.request(method, path, params=params, headers=self._headers(headers))
-        if r.status_code == 401:
-            self.login()
-            r = self._client.request(method, path, params=params, headers=self._headers(headers))
-        return r
+        """Bearer 부착 요청 — 401(토큰 만료/무효)이면 stale 판정 후 재로그인 1회 재시도."""
+        return self._authed(self._client.request, method, path, params=params, headers=headers)
 
     def _json(self, path: str, params: dict | None = None) -> dict:
         r = self._request("GET", path, params=params)
@@ -172,8 +203,96 @@ class WebPacsClient:
             raise WebPacsError(f"인스턴스 다운로드 실패 {sop_uid}: HTTP {r.status_code}")
         return r.content
 
+    def series_metadata(self, study_uid: str, series_uid: str) -> list[dict]:
+        """DICOMweb v2 시리즈 메타데이터(dicom+json) — 인스턴스별 기하 태그(rows/cols/spacing 등)."""
+        r = self._request(
+            "GET",
+            f"/api/dicomweb/v2/studies/{study_uid}/series/{series_uid}/metadata",
+            headers={"Accept": "application/dicom+json"},
+        )
+        if r.status_code != 200:
+            raise WebPacsError(f"시리즈 메타데이터 실패 {series_uid}: HTTP {r.status_code}")
+        return r.json()
+
+    def thumbnail(self, study_uid: str, series_uid: str, sop_uid: str) -> bytes | None:
+        """v2 썸네일(128px JPEG) — 실패 시 None(호출부 폴백)."""
+        r = self._request(
+            "GET",
+            f"/api/dicomweb/v2/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/thumbnail",
+        )
+        return r.content if r.status_code == 200 else None
+
+    # ── 판독·상태·주석 (Live 모드 — A DB 가 단일 원본) ─────────────
+    def report_get(self, study_idx: int) -> dict | None:
+        """판독문 조회 — 없으면 None(A 는 200 + report_data:null)."""
+        body = self._json(f"/api/study/{study_idx}/report/")
+        data = body.get("report_data")
+        if isinstance(data, list):   # 콤마 다중조회 계약 방어
+            data = data[0] if data else None
+        return data or None
+
+    def report_save(self, payload: dict) -> dict:
+        """판독 저장/승인 — POST /api/study/{idx}/report/ (report_idx 있으면 UPDATE).
+
+        A 계약: report_cvr_send 는 미전송 시 서버 500 — 호출부가 반드시 채운다.
+        409(재배정)는 WebPacsError 로 승격해 메시지 전달.
+        """
+        study_idx = payload["study_idx"]
+        r = self._authed(self._client.post, f"/api/study/{study_idx}/report/", json=payload)
+        if r.status_code == 409:
+            raise WebPacsConflict(_msg_of(r) or "다른 판독의에게 재배정된 검사입니다")
+        if r.status_code != 200:
+            raise WebPacsError(f"판독 저장 실패 HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def change_status(self, study_idx: int, kind: str) -> dict:
+        """판독 작성중 선점/해제 — kind='report'(RI 선점) | 'end'(해제→E).
+
+        409 = 타 판독의 작성중/판독 완료 — WebPacsConflict 로 메시지 전달.
+        """
+        r = self._request("GET", f"/api/study/{study_idx}/report/change_status/{kind}")
+        if r.status_code == 409:
+            raise WebPacsConflict(_msg_of(r) or "이미 다른 판독의가 작성 중입니다")
+        if r.status_code != 200:
+            raise WebPacsError(f"상태 변경 실패 HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def annotation_get(self, study_uid: str) -> list[dict]:
+        """주석 조회 — 키는 StudyInstanceUID. 반환: pacs_image_annotation 행 배열."""
+        body = self._json(f"/api/study/{study_uid}/annotation")
+        return body.get("data") or []
+
+    def annotation_change(self, study_uid: str, tool_name: str, tool_value: str) -> dict:
+        """주석 업서트 — (study_uid, tool_name) 1행 전체 덮어쓰기(A 계약)."""
+        r = self._authed(self._client.post, "/api/study/annotation/change", json={
+            "study_instance_uid": study_uid,
+            "annotation_tool_name": tool_name,
+            "annotation_tool_value": tool_value,
+        })
+        if r.status_code != 200:
+            raise WebPacsError(f"주석 저장 실패 HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def study_keys(self, params: dict | None = None) -> list[dict]:
+        """경량 폴링 — study_idx+study_status 만(A GET /api/study/study_keys)."""
+        body = self._json("/api/study/study_keys", params=params or {})
+        # 응답 키는 배포본에 따라 study_data/keys 다를 수 있어 방어적으로
+        return body.get("study_data") or body.get("keys") or body.get("data") or []
+
     def close(self) -> None:
         self._client.close()
+
+
+class WebPacsConflict(WebPacsError):
+    """A 서버 409(작성중 선점·재배정·판독 완료) — 사용자 메시지 그대로 전달."""
+
+
+def _msg_of(r: httpx.Response) -> str:
+    try:
+        body = r.json()
+        return str(body.get("message") or body.get("detail") or "")
+    except Exception:  # noqa: BLE001
+        return r.text[:200]
 
 
 def client_from_config(cfg: dict[str, Any],

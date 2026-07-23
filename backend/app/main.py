@@ -31,6 +31,7 @@ from app.api import (
     signup,
     stt,
     webpacs,
+    webpacs_live,
     worklist,
 )
 
@@ -129,6 +130,7 @@ app.include_router(localpacs.router)  # Local Server 모드(/api/local — 레�
 app.include_router(examctl.router)  # Exam Control — 관리자용 검사 QC(/api/examctl)
 app.include_router(activity.router)  # 활동 하트비트 — 판독 상태(read_state) 신호
 app.include_router(webpacs.router)  # WebPACS 브리지 — 인계 웹서비스(webpacs_api) 검사 가져오기
+app.include_router(webpacs_live.router)  # WebPACS Live — A 직결(복사 없음, vid≥90M 라우팅)
 if insights_api is not None:
     app.include_router(insights_api.router)
 if hl7_api is not None:

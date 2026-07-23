@@ -2,7 +2,7 @@
 // [Report|History|Shortcuts|Templates] 탭 · Font size · CVR Notice · ◀▶ · Reset/Save/Approve
 // 동작은 Viewer2D 내장 시절과 완전 동일(이사만) — 리포트 로드/저장/승인/상용구/단축키 포함.
 import { useEffect, useRef, useState } from "react";
-import { PERM_DENIED_TIP, api, hasPerm, loadPermMe, type PermMe, type PhraseRow, type Report, type StudyDetail } from "../api";
+import { PERM_DENIED_TIP, api, hasPerm, isLiveId, loadPermMe, type PermMe, type PhraseRow, type Report, type StudyDetail } from "../api";
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { MicIcon } from "./MicIcon";
 
@@ -42,6 +42,31 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   const [permMe, setPermMe] = useState<PermMe | null>(null);
   useEffect(() => { loadPermMe().then(setPermMe).catch(() => {}); }, []);
   const canWrite = hasPerm(permMe, "report.write");
+
+  // ── WebPACS Live — 실시간 상태 폴링(5s): 타 사용자 작성중(서버 판정)·외부 판독문 갱신 감지 ──
+  const live = isLiveId(detail.id);
+  const [liveState, setLiveState] = useState<{ study_status: string; assignee: string;
+    report_updated: string; report_writer: string; viewers: string[];
+    other_writing: boolean; other_writers: string[] } | null>(null);
+  // 마지막으로 "내가 반영한" 원격 report_update_datetime. sentinel: null=아직 관측 전(첫 폴링에서 baseline 설정만)
+  const liveBaselineRef = useRef<string | null>(null);
+  useEffect(() => {
+    // 검사 전환 시 baseline 리셋 — 이전 검사의 갱신시각을 새 검사에 오탐하지 않게
+    liveBaselineRef.current = null;
+    if (!live) { setLiveState(null); return; }
+    let stop = false;
+    const poll = () => api.liveState(detail.id).then((s) => {
+      if (stop) return;
+      setLiveState(s);
+      if (liveBaselineRef.current === null) liveBaselineRef.current = s.report_updated;   // 최초 관측=baseline
+    }).catch(() => {});
+    poll();
+    const t = window.setInterval(poll, 5000);
+    return () => { stop = true; window.clearInterval(t); };
+  }, [detail.id, live]);
+  const liveOtherWriting = !!(live && liveState?.other_writing);
+  const liveExternalUpdate = !!(live && liveState && liveBaselineRef.current !== null
+    && liveState.report_updated && liveState.report_updated !== liveBaselineRef.current);
 
   // ── 판독 확정(Fixed) 잠금 — study.report_locked. 서버 409 가 최종 방어선, UI 는 선반영(UX) ──
   const [locked, setLocked] = useState(!!detail.report_locked);
@@ -127,7 +152,9 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     const sr = buildDockSr();
     if (!report || !sr) return;
     try {
-      await api.updateReport(report.id, sr);
+      const saved = await api.updateReport(report.id, sr);
+      // Live: 내 저장으로 바뀐 갱신시각을 baseline 으로 승격 — 5초 뒤 자기 저장을 '외부 갱신'으로 오탐하지 않게
+      if (live) liveBaselineRef.current = (saved.diff_metrics as { updated_at?: string })?.updated_at ?? liveBaselineRef.current;
       const r = await api.reports(detail.id);
       setVreports(r.items);
       setReadingTouched(false);
@@ -287,6 +314,25 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
           </div>
         ))}
       </div>
+      {/* WebPACS Live — 실시간 상태 배너(타 판독의 작성중 / 외부 판독문 갱신) */}
+      {live && (liveOtherWriting || liveExternalUpdate || (liveState?.viewers.length ?? 0) > 1) && (
+        <div style={{ padding: "4px 8px", fontSize: 11, borderBottom: "1px solid var(--border)",
+                      background: liveOtherWriting ? "rgba(239,68,68,0.15)" : "rgba(34,197,94,0.12)",
+                      color: liveOtherWriting ? "var(--stat-emergency)" : "#22c55e" }}>
+          {liveOtherWriting && <>⚠ 다른 사용자 작성중: <b>{(liveState?.other_writers ?? []).join(", ") || "원격"}</b> — 저장 시 차단될 수 있습니다</>}
+          {!liveOtherWriting && liveExternalUpdate && (
+            <>Δ 판독문이 외부에서 갱신됨({liveState?.report_writer || "원격"}) —
+              <button style={{ marginLeft: 4, fontSize: 10, padding: "0 6px" }}
+                      onClick={() => {
+                        liveBaselineRef.current = liveState?.report_updated ?? null;
+                        api.reports(detail.id).then((r) => { setVreports(r.items); initDockText(r.items[0] ?? null); }).catch(() => {});
+                      }}>새로고침</button></>
+          )}
+          {!liveOtherWriting && !liveExternalUpdate && (liveState?.viewers.length ?? 0) > 1 && (
+            <>👁 동시 열람: {liveState?.viewers.join(", ")}</>
+          )}
+        </div>
+      )}
       {/* 상단 바: Font size · CVR · ◀▶ · Reset/Save/Approve */}
       <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px",
                     borderBottom: "1px solid var(--border)", fontSize: 11, flexWrap: "wrap" }}>

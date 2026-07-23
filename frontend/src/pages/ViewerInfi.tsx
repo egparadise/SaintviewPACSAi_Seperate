@@ -16,6 +16,7 @@ const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewe
 import { api, openViewer, type Anno, type GspsItem, type InstanceNode, type SeriesNode, type StudyDetail } from "../api";
 import { annoLabel, measureAnno } from "../lib/annotations";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/cornerstone";
+import { renderedRootFor } from "../lib/liveUids";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -162,7 +163,9 @@ function instUrl(studyUid: string, s: SeriesNode, inst: InstanceNode, wl: string
   const stu = inst.study_uid ?? studyUid;
   const wasm = wasmFrameUrl(stu, su, inst.sop_uid, wl || "");
   if (wasm) return wasm;
-  return `${DICOMWEB_ROOT}/studies/${stu}/series/${su}/instances/${inst.sop_uid}/rendered${q}${renderedParams(!!q)}`;
+  // WebPACS Live 검사(UID 레지스트리)는 라이브 프록시가 서버측 윈도잉 렌더 — 페인 단위 판정
+  const root = renderedRootFor(stu, DICOMWEB_ROOT);
+  return `${root}/studies/${stu}/series/${su}/instances/${inst.sop_uid}/rendered${q}${renderedParams(!!q)}`;
 }
 // Combine — 여러 SeriesNode 를 하나의 논리적 시리즈로 이어붙인다(서버 병합 아님, 표시 결합).
 // 원본 시리즈(검사+시리즈 UID)별로 그룹화(첫 등장 순서 유지) → 그룹 내 instance_number 정렬·sop 중복 제거 →

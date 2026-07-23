@@ -67,6 +67,35 @@
 | `harness/mock_webpacs_api.py` | 인계 서버 계약 재현 모의 서버(테스트·E2E) — `py -3.11 harness/mock_webpacs_api.py --port 8014` |
 | `backend/tests/test_webpacs_bridge.py` | 6 테스트 — 로그인/목록/재로그인/가져오기/설정 마스킹/엔드포인트 E2E |
 
+## 2.5 Live 모드 — 원격 직결(복사 없음, A DB 단일 원본) ★
+
+미러(가져오기)와 별개로, **A 의 DB·스토리지를 단일 원본으로 두고 B 뷰어가 실시간 직결**하는
+모드. 워크리스트 우측 **[Live]** 버튼으로 전환한다(해제: Web Server).
+
+```
+[A webpacs_api] ◀──실시간 REST/DICOMweb v2──▶ [B 백엔드 /api/webpacs/live/*] ◀──▶ B 뷰어
+   판독·주석·상태의 원본                          가상 id(vid=90,000,000+A study_idx) 어댑터
+```
+
+| 축 | 동작 |
+|---|---|
+| 워크리스트 | A `/api/study/` 실시간 조회(5초 폴링, 최신순) → StudyRow(vid) — 복사·등록 없음 |
+| 영상 | A v2 인스턴스를 B 가 서버측 디코드+윈도잉(`/rendered` 동형, pylibjpeg 전 코덱) + 원본 bytes 디스크 캐시. 썸네일은 A 사전생성분 프록시 |
+| 판독 | 저장=A `POST report`(R)·승인=동일 POST(A) — **A `pacs_study_report` 에 기록**, study_status 는 A DB 트리거. 저장 전 `change_status/report`(RI 선점, 타 판독의 작성중 409) |
+| 주석/표시상태 | A `pacs_image_annotation` 에 전용 슬롯(`sv_annotation`/`sv_presentation`)으로 왕복 — B 클라이언트 간 공유(A 뷰어 주석과 공존, 형식 상이로 상호 렌더는 안 됨) |
+| presence | A 신호: `study_status==RI`+판독의명(워크리스트 ✍+MEMO, 판독 도크 배너) · B 간 열람: 라이브 하트비트(👁) · 판독문 외부 갱신 감지(Δ 배너+새로고침) |
+| 미지원(차단 안내) | AI 초안·GSPS/KOS·키이미지 등록·북마크·응급 토글·보류·잠금 토글(승인 상태가 곧 잠금)·3D/OHIF |
+
+- 프론트 계약: 검사 id 가 **vid 대역(≥90,000,000)** 이면 `api.ts` 가 자동으로 `/api/webpacs/live/*` 로
+  라우팅 — 뷰어(T-View/In-View/SaintView)·판독 도크는 무수정.
+- 원격 계정 권한 주의: A 는 일반 판독의(group_level<98)에게 "본인 배정 또는 미배정"만 보여주고
+  타인 배정 검사 저장을 409 로 막는다 — Live 용 계정은 `group_level≥98` 또는
+  `user_report_edit_all='Y'` 권장.
+- rendered/thumb 는 `<img>` 계약상 무인증(기존 Orthanc 프록시와 동일 자세) — 운영은 리버스
+  프록시에서 접근 통제.
+- 실시간 강화(후속): A 에 SSE `/see/stream`(상태/판독 변경 push)가 이미 있어 폴링을 push 로
+  교체 가능.
+
 ## 3. 운용 가이드 (실서버 연결)
 
 1. **원격 계정 준비**: 인계 PACS 에 `user_type` 에 `P` 가 포함된 계정(브리지 전용 계정 권장).

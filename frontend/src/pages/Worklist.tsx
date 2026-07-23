@@ -85,6 +85,12 @@ function localToRow(r: LocalStudyRow): StudyRow {
 /** LOCAL 모드에서 허용되는 툴바 액션 — 그 외 서버 액션은 비활성+툴팁 */
 const LOCAL_OK_ACTIONS = new Set(["import", "csv", "print", "refresh", "logout"]);
 const LOCAL_DENIED_TIP = "LOCAL 모드 — 서버 기능 비활성 (Import/새로고침/로컬 뷰어만 사용 가능)";
+/** LIVE(WebPACS 직결) 모드 허용 액션 — 열람·판독은 원격 왕복으로 동작, 로컬 DB 전용 기능만 차단 */
+const LIVE_OK_ACTIONS = new Set([
+  "viewdraft", "viewer2d", "ub_view", "ub_add", "ub_stack", "ub_key",
+  "compare", "compareOpen", "reading", "refresh", "csv", "print", "logout", "import",
+]);
+const LIVE_DENIED_TIP = "LIVE 모드(원격 PACS 직결) — 이 기능은 원격 검사에서 지원되지 않습니다";
 
 /* ── F-18 행잉 매핑 + 모니터 배치(viewer.prefs.monitor) ─────────────────── */
 let hangingMap: Record<string, string> = {};
@@ -751,8 +757,8 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
 /* ── 서버 선택 버튼 (탭 바 우측) — Local Server: 로컬 PACS 모드 전환+폴더 보기 / Web Server: 주소·포트 ──
  * mode 는 워크리스트 데이터 소스 전환(레인 F)을 위해 부모(Worklist)가 소유한다. */
 function ServerButtons({ mode, onMode, onWebPacs }: {
-  mode: "local" | "web" | null;
-  onMode: (m: "local" | "web") => void;
+  mode: "local" | "web" | "live" | null;
+  onMode: (m: "local" | "web" | "live") => void;
   onWebPacs?: () => void;   // WebPACS 브리지 모달 열기 (인계 PACS 검사 가져오기)
 }) {
   const [open, setOpen] = useState<null | "local" | "web">(null);
@@ -774,11 +780,12 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
     api.getSetting("server.network").then((r) => setNet(r.value as ServerNetwork)).catch(() => {});
   }, [open]);
 
-  const pick = (m: "local" | "web") => {
+  const pick = (m: "local" | "web" | "live") => {
     onMode(m);
     setErr("");
+    if (m === "live") { setOpen(null); return; }   // LIVE 는 팝오버 없음(배지가 상태 표시)
     if (open === m) { setOpen(null); return; }
-    setOpen(m);
+    setOpen(m as "local" | "web");
     if (m === "local") { setShareDir(""); setSub(""); openLocal(""); }
   };
   const fmtSize = (n: number) => n > 1048576 ? `${(n / 1048576).toFixed(1)}MB` : n > 1024 ? `${(n / 1024).toFixed(0)}KB` : `${n}B`;
@@ -799,9 +806,17 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
                        color: mode === "web" ? "#fff" : undefined }}>
         Web Server
       </button>
+      <button onClick={() => pick("live")}
+              title="WebPACS Live — 원격 PACS 직결(복사 없음): 실시간 워크리스트·판독 왕복·상태 동기"
+              style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700,
+                       background: mode === "live" ? "#22c55e" : undefined,
+                       color: mode === "live" ? "#fff" : "#22c55e",
+                       borderColor: "#22c55e" }}>
+        Live
+      </button>
       {onWebPacs && (
         <button onClick={onWebPacs}
-                title="WebPACS — 인계 PACS(webpacs_api)의 검사를 검색해 우리 뷰어로 가져오기"
+                title="WebPACS — 인계 PACS(webpacs_api)의 검사를 검색해 우리 뷰어로 가져오기(복사) + 접속 설정"
                 style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
           WebPACS
         </button>
@@ -895,8 +910,8 @@ function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, ser
   tabs: WorklistTab[]; activeId: string;
   onPick: (t: WorklistTab) => void; onAdd: () => void; onRemove: (id: string) => void;
   actions?: React.ReactNode;  // Local Server 왼쪽에 노출할 액션 버튼 그룹
-  serverMode: "local" | "web" | null;              // 데이터 소스 모드 (레인 F — Worklist 소유)
-  onServerMode: (m: "local" | "web") => void;
+  serverMode: "local" | "web" | "live" | null;     // 데이터 소스 모드 (레인 F — Worklist 소유)
+  onServerMode: (m: "local" | "web" | "live") => void;
   extraTab?: React.ReactNode; // WORKLIST 탭들 옆 추가 탭 (관리자 EXAM CONTROL — 레인 F)
   viewerName?: string;        // 선택 뷰어 이름(SaintView/I-View/T-View) — 탭 스트립 좌측에 표기
   onWebPacs?: () => void;     // WebPACS 브리지 모달 (인계 PACS 검사 가져오기)
@@ -2275,19 +2290,21 @@ function BatchReviewModal({ onClose, onDone }: { onClose: () => void; onDone: ()
 /* ════ 워크리스트 워크스페이스 루트 ════ */
 /* SAINT VIEW 워크리스트 상단 상태 카운트 바 (그림1) — 서버 counts 엔드포인트로 전 검사 정확 집계.
    서버 응답 전/실패 시 현재 페이지 집계로 폴백. 칩 클릭 시 상태 필터. */
-function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh }: {
+function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, pageOnly }: {
   queryParams: Record<string, string>;
   refreshKey: number;
   items: StudyRow[];
   onStatus: (patch: { status?: string; emergency?: string }) => void;
   onRefresh: () => void;
+  pageOnly?: boolean;   // LIVE 모드 — 서버(로컬 DB) 집계는 무의미, 현재 페이지 집계만
 }) {
   const [c, setC] = useState<{ total: number; emergency: number; unread: number; reading: number; draft_ready: number; finalized: number } | null>(null);
   useEffect(() => {
+    if (pageOnly) { setC(null); return; }
     let alive = true;
     api.worklistCounts(queryParams).then((r) => { if (alive) setC(r); }).catch(() => { if (alive) setC(null); });
     return () => { alive = false; };
-  }, [queryParams, refreshKey]);
+  }, [queryParams, refreshKey, pageOnly]);
   const pageN = (pred: (r: StudyRow) => boolean) => items.filter(pred).length;
   const chips: { label: string; n: number | undefined; fb: number; color: string; onClick: () => void }[] = [
     { label: "전체", n: c?.total, fb: items.length, color: "var(--accent)", onClick: () => onStatus({ status: "", emergency: "" }) },
@@ -2395,9 +2412,12 @@ export function Worklist() {
   const [viewer3dUid, setViewer3dUid] = useState<string | null>(null);
   // Local Server 모드 (레인 F) — ServerButtons 의 sv_server_mode 를 데이터 소스 전환으로 승격.
   // local 이면 서버 worklist 를 호출하지 않고(서버 검사·환자 완전 숨김) local.db 목록만 표시
-  const [serverMode, setServerMode] = useState<"local" | "web" | null>(
-    () => (localStorage.getItem("sv_server_mode") as "local" | "web") || null);
+  const [serverMode, setServerMode] = useState<"local" | "web" | "live" | null>(
+    () => (localStorage.getItem("sv_server_mode") as "local" | "web" | "live") || null);
   const localMode = serverMode === "local";
+  // WebPACS Live(A 직결) — 워크리스트 데이터 소스를 원격 PACS 실시간 조회로 전환(복사 없음).
+  // 검사 id 는 vid(≥90M) — api.* 가 자동으로 /api/webpacs/live 로 라우팅해 뷰어·판독이 그대로 동작
+  const liveMode = serverMode === "live";
   // EXAM CONTROL (레인 F) — 관리자 역할일 때만 탭 노출, 선택 시 본문을 검사 QC 화면으로 전환.
   // 탭 바는 TY·In 양 모드 공유이므로 두 모드 모두 자동 지원. 워크리스트 탭 클릭 시 원복.
   const isAdminRole = (localStorage.getItem("sv_role") ?? sessionStorage.getItem("sv_role") ?? "") === "admin";
@@ -2405,11 +2425,18 @@ export function Worklist() {
   const [localRoot, setLocalRoot] = useState("");           // localInit 결과 루트(배지·Import 안내)
   const [localErr, setLocalErr] = useState("");             // 백엔드 미구현/미설정 → '⚠ 준비 중' 우아 처리
   const [localViewerRow, setLocalViewerRow] = useState<StudyRow | null>(null);   // 로컬 뷰어 모달 대상
-  const pickServerMode = useCallback((m: "local" | "web") => {
+  const pickServerMode = useCallback((m: "local" | "web" | "live") => {
     setServerMode(m);
     localStorage.setItem("sv_server_mode", m);              // 새로고침에도 유지(기존 키)
     setRefreshKey((k) => k + 1);
   }, []);
+  // LIVE 진입: 선택 해제(연결 상태는 목록 조회가 판정 — 실패 시 liveErr 배지)
+  const [liveErr, setLiveErr] = useState("");
+  useEffect(() => {
+    if (!liveMode) return;
+    setSelected(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveMode]);
   // LOCAL 진입: 폴더 구조 보장(init — 멱등) + 루트 표시, 서버 선택 상태 해제
   useEffect(() => {
     if (!localMode) return;
@@ -2697,6 +2724,36 @@ export function Worklist() {
         .catch(() => { setItems([]); setTotal(0); });
       return;
     }
+    if (liveMode) {
+      // LIVE 모드 — 원격 A(webpacs_api) 워크리스트 실시간 조회(vid, 복사 없음).
+      // 지원 필터만 매핑(q/pid/pname/modality/기간) — 나머지 필터는 라이브에선 무시
+      const lp: Record<string, string | number> = {};
+      for (const k of ["q", "pid", "pname", "modality", "date_from", "date_to", "limit", "offset"] as const) {
+        const v = (queryParams as Record<string, string>)[k];
+        if (v) lp[k] = v;
+      }
+      api.liveWorklist(lp)
+        .then((r) => {
+          setItems(r.items);
+          setTotal(r.total);
+          setLiveErr("");
+          // 사라진 행 id 정리 — 다중선택·anchor stale 방지(일반 경로와 동일)
+          setSelectedIds((prev) => {
+            if (!prev.size) return prev;
+            const present = new Set(r.items.map((it) => it.id));
+            const next = new Set([...prev].filter((id) => present.has(id)));
+            return next.size === prev.size ? prev : next;
+          });
+          if (selAnchorRef.current != null && !r.items.some((it) => it.id === selAnchorRef.current)) {
+            selAnchorRef.current = null;
+          }
+        })
+        .catch((e) => {
+          // 폴링 1회 실패는 목록을 비우지 않는다(직전 목록 유지 + 배지만) — 깜빡임 방지
+          setLiveErr(e instanceof Error ? e.message : "원격 조회 실패");
+        });
+      return;
+    }
     api.worklist(queryParams).then((r) => {
       setItems(r.items);
       setTotal(r.total);
@@ -2712,7 +2769,7 @@ export function Worklist() {
         selAnchorRef.current = null;
       }
     }).catch(() => {});
-  }, [queryParams, refreshKey, localMode, searchText]);
+  }, [queryParams, refreshKey, localMode, liveMode, searchText]);
 
   // Search Filter 모달리티 분포 — 모달리티 필터가 꺼진 결과에서만 갱신(필터 중 카운트 유지)
   useEffect(() => {
@@ -2723,10 +2780,12 @@ export function Worklist() {
   }, [items, filters.modality]);
 
   useEffect(() => {
-    if (!refreshSec) return;
-    const t = setInterval(() => setRefreshKey((k) => k + 1), refreshSec * 1000);
+    // LIVE 모드 — 실시간 반영을 위해 5초 폴링 고정(원격 A 자체 클라이언트와 동일한 실시간성)
+    const sec = liveMode ? Math.min(refreshSec || 5, 5) : refreshSec;
+    if (!sec) return;
+    const t = setInterval(() => setRefreshKey((k) => k + 1), sec * 1000);
     return () => clearInterval(t);
-  }, [refreshSec]);
+  }, [refreshSec, liveMode]);
 
   // 판독 창 항상 열기(설정>판독) — 워크리스트 옆 별도 웹창(?report=1), 선택 동기(sync) 연동
   const readingWinRef = useRef<Window | null>(null);
@@ -2936,6 +2995,8 @@ export function Worklist() {
   const doAction = useCallback(async (a: string, row?: StudyRow) => {
     // LOCAL 모드 — 서버 검사 대상 액션 전면 차단(로컬 id 로 서버 API 오호출 방지). refresh 만 통과
     if (localMode && a !== "refresh") { alert(LOCAL_DENIED_TIP); return; }
+    // LIVE 모드 — 원격 미지원 기능만 차단(열람·판독·비교는 원격 왕복으로 정상 동작)
+    if (liveMode && !LIVE_OK_ACTIONS.has(a)) { alert(LIVE_DENIED_TIP); return; }
     const target = row ?? selected;
     switch (a) {
       case "refresh": setRefreshKey((k) => k + 1); break;
@@ -3146,7 +3207,7 @@ export function Worklist() {
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, onSelect, openStudy, onChanged, dblAction, withOpen, withOpenMode, openV2, localMode, items, selectedIds]);
+  }, [selected, onSelect, openStudy, onChanged, dblAction, withOpen, withOpenMode, openV2, localMode, liveMode, items, selectedIds]);
 
   const openCompare = useCallback(() => {
     if (!selected) return;
@@ -3379,6 +3440,8 @@ export function Worklist() {
   const infiTool = (act: string) => {
     // LOCAL 모드 — Import/Export/Print/Refresh/Logout 만 허용, 나머지 서버 액션 차단
     if (localMode && !LOCAL_OK_ACTIONS.has(act) && act !== "refresh") { alert(LOCAL_DENIED_TIP); return; }
+    // LIVE 모드 — 원격 미지원 기능 차단(열람·판독·Reading 은 허용)
+    if (liveMode && !LIVE_OK_ACTIONS.has(act) && act !== "refresh") { alert(LIVE_DENIED_TIP); return; }
     switch (act) {
       case "import": setImportOpen(true); break;  // Import DICOM — USB/CD .dcm 등록
       case "reading": {   // Report 창 — 판독 작성 (모니터 설정 반영, 선택 연동은 sync)
@@ -3498,10 +3561,12 @@ export function Worklist() {
                            ] as const).map(([a, label, title]) => {
                              // LOCAL 모드: 서버 전용 액션은 비활성+안내 툴팁 (Import/Export/Print/새로고침만 활성)
                              const localBlocked = localMode && !LOCAL_OK_ACTIONS.has(a);
-                             const ok = allowedAction(a) && !localBlocked;
+                             const liveBlockedBtn = liveMode && !LIVE_OK_ACTIONS.has(a);
+                             const ok = allowedAction(a) && !localBlocked && !liveBlockedBtn;
                              return (
                                <button key={a} disabled={!ok}
-                                       title={ok ? title : localBlocked ? LOCAL_DENIED_TIP : PERM_DENIED_TIP}
+                                       title={ok ? title : localBlocked ? LOCAL_DENIED_TIP
+                                              : liveBlockedBtn ? LIVE_DENIED_TIP : PERM_DENIED_TIP}
                                        onClick={() => infiTool(a)}
                                        style={{ padding: "2px 8px", fontSize: 11, whiteSpace: "nowrap" }}>
                                  {label}
@@ -3520,6 +3585,20 @@ export function Worklist() {
         </Suspense>
       ) : (
       <>
+      {/* LIVE 모드 배지 — 원격 A(webpacs_api) 직결 표시(복사 없음, 5초 실시간 폴링) */}
+      {liveMode && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 10px",
+                      background: "rgba(34,197,94,0.10)", borderBottom: "1px solid #22c55e", fontSize: 12 }}>
+          <b style={{ color: "#22c55e" }}>LIVE 모드</b>
+          <span>
+            원격 PACS 직결(복사 없음) — 판독·주석은 원격 DB 에 저장, 5초 실시간 동기
+            {liveErr && <span style={{ color: "var(--stat-emergency)" }}> · ⚠ {liveErr}</span>}
+          </span>
+          <span style={{ marginLeft: "auto", color: "var(--text-secondary)", fontSize: 11 }}>
+            접속 설정: [WebPACS] 버튼 — 해제: Web Server
+          </span>
+        </div>
+      )}
       {/* LOCAL 모드 배지 — 데이터 소스·루트 표시 + 서버 데이터 숨김 안내 (레인 F) */}
       {localMode && (
         <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 10px",
@@ -3539,12 +3618,14 @@ export function Worklist() {
           <div style={{ display: "flex", gap: 4, padding: "3px 6px", border: "1px solid var(--border)",
                         borderRadius: 6, background: "var(--bg-elevated)" }}>
             {INFI_ICONS.filter((t) => t.a !== "ub_adv" || ohifOn).map((t) => {
-              // 유효 권한 게이트 + LOCAL 모드 게이트 — 비활성+안내 툴팁 (UX 목적)
+              // 유효 권한 게이트 + LOCAL/LIVE 모드 게이트 — 비활성+안내 툴팁 (UX 목적)
               const localBlocked = localMode && !LOCAL_OK_ACTIONS.has(t.a);
-              const ok = allowedAction(t.a) && !localBlocked;
+              const liveBlockedBtn = liveMode && !LIVE_OK_ACTIONS.has(t.a);
+              const ok = allowedAction(t.a) && !localBlocked && !liveBlockedBtn;
               return (
                 <button key={t.a} disabled={!ok}
-                        title={ok ? t.l : `${t.l} — ${localBlocked ? LOCAL_DENIED_TIP : PERM_DENIED_TIP}`}
+                        title={ok ? t.l : `${t.l} — ${localBlocked ? LOCAL_DENIED_TIP
+                                : liveBlockedBtn ? LIVE_DENIED_TIP : PERM_DENIED_TIP}`}
                         onClick={() => infiTool(t.a)}
                         style={{ width: 46, height: 40, fontSize: 22, padding: 0, border: "none",
                                  display: "flex", alignItems: "center", justifyContent: "center",
@@ -3566,7 +3647,7 @@ export function Worklist() {
                       onUpload={() => setImportOpen(true)} />
           {svPerf
             ? <SvPerfCard mods={modCounts} />
-            : <SvStatusBar queryParams={queryParams} refreshKey={refreshKey} items={items}
+            : <SvStatusBar queryParams={queryParams} refreshKey={refreshKey} items={items} pageOnly={liveMode}
                            onStatus={(p) => { setFilters((f) => ({ ...f, ...p })); setRefreshKey((k) => k + 1); }}
                            onRefresh={() => setRefreshKey((k) => k + 1)} />}
         </>

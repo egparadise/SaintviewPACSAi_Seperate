@@ -1,10 +1,20 @@
 // API 클라이언트 — 백엔드 FastAPI
+import { registerLiveStudyUid } from "./lib/liveUids";
+
 const BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 const OHIF_BASE = import.meta.env.VITE_OHIF_BASE ?? "http://localhost:3000";
 /** 뷰어 창 베이스 — 별도 포트로 띄우려면 frontend/.env에 VITE_VIEWER_BASE=https://localhost:5176
  *  설정 후 `npm run dev:viewer`(5176)를 함께 실행(HTTPS 전용 — vite가 https로 고정). 빈값=같은 출처(포트) 사용.
  *  ⚠ 5173/5174/5175 는 포털 예약 포트(Landing/관리자/Client) — 뷰어 분리 포트로 쓰면 역할 가드와 충돌 */
 export const VIEWER_BASE: string = import.meta.env.VITE_VIEWER_BASE ?? "";
+
+/** WebPACS Live — 인계 PACS(A) 직결 모드의 가상 검사 id 대역(복사 없음, A DB 단일 원본).
+ *  이 대역이면 api.* 가 /api/webpacs/live/… 로 자동 라우팅 — 뷰어·판독 컴포넌트는 무수정. */
+export const VID_BASE = 90_000_000;
+export const isLiveId = (id: number) => id >= VID_BASE;
+const LIVE = "/api/webpacs/live";
+const liveBlocked = (what: string) =>
+  Promise.reject(new Error(`Live 모드(원격 PACS 직결) — ${what} 기능은 지원되지 않습니다`));
 
 /** View&Draft 동선: OHIF 뷰어를 해당 검사로 오픈 (디자인 §3.1 [A]).
  *  F-18: hangingProtocolId — 모달리티별 매핑(viewer.prefs.hanging)을 호출부에서 전달 */
@@ -305,8 +315,10 @@ export const api = {
     req<{ ok: boolean; count: number; password: string }>(`/api/hospitals/${hid}/clients/reset-all`, { method: "POST" }),
   // 휴대폰 촬영(QR) — 세션 생성/상태 폴링
   mobileCapture: (studyId: number, origin: string) =>
-    req<{ token: string; url: string; qr: string; expires_in: number }>(
-      `/api/studies/${studyId}/mobile-capture`, { method: "POST", body: JSON.stringify({ origin }) }),
+    isLiveId(studyId)
+      ? liveBlocked("휴대폰 촬영(QR)") as Promise<{ token: string; url: string; qr: string; expires_in: number }>
+      : req<{ token: string; url: string; qr: string; expires_in: number }>(
+          `/api/studies/${studyId}/mobile-capture`, { method: "POST", body: JSON.stringify({ origin }) }),
   mobileCaptureStatus: (token: string) =>
     req<{ uploaded: number; done: boolean; series_uid: string }>(`/api/mobile-capture/${token}/status`),
   // 병원별 뷰어 영상 전송 형식 — rendered 호출 포맷/품질
@@ -355,14 +367,24 @@ export const api = {
       `/api/hospitals/${hid}/clients/${cid}/enter`, { method: "POST" }),
   clientHeartbeat: (hid: number, cid: number) =>
     req<{ ok: boolean }>(`/api/hospitals/${hid}/clients/${cid}/heartbeat`, { method: "POST" }),
-  study: (id: number) => req<StudyDetail>(`/api/studies/${id}`),
-  reports: (studyId: number) => req<{ items: Report[] }>(`/api/studies/${studyId}/reports`),
+  study: (id: number) =>
+    req<StudyDetail>(isLiveId(id) ? `${LIVE}/studies/${id}` : `/api/studies/${id}`)
+      .then((d) => {
+        if (isLiveId(id)) registerLiveStudyUid(d.study_uid);   // rendered 루트 스위칭용
+        return d;
+      }),
+  reports: (studyId: number) =>
+    req<{ items: Report[] }>(isLiveId(studyId) ? `${LIVE}/studies/${studyId}/reports`
+                                               : `/api/studies/${studyId}/reports`),
   analyze: (studyId: number) =>
-    req<{ job_id: number }>(`/api/studies/${studyId}/analyze`, { method: "POST" }),
+    isLiveId(studyId) ? liveBlocked("AI 분석") as Promise<{ job_id: number }>
+      : req<{ job_id: number }>(`/api/studies/${studyId}/analyze`, { method: "POST" }),
   updateReport: (id: number, sr_json: SrJson) =>
-    req<Report>(`/api/reports/${id}`, { method: "PUT", body: JSON.stringify({ sr_json }) }),
+    req<Report>(isLiveId(id) ? `${LIVE}/reports/${id}` : `/api/reports/${id}`,
+                { method: "PUT", body: JSON.stringify({ sr_json }) }),
   finalizeReport: (id: number) =>
-    req<Report>(`/api/reports/${id}/finalize`, { method: "POST" }),
+    req<Report>(isLiveId(id) ? `${LIVE}/reports/${id}/finalize` : `/api/reports/${id}/finalize`,
+                { method: "POST" }),
   batchReview: () => req<{ items: BatchCandidate[] }>("/api/batch-review"),
   batchFinalize: (report_ids: number[]) =>
     req<{ finalized: number; total: number }>("/api/reports/batch-finalize", {
@@ -370,13 +392,16 @@ export const api = {
       body: JSON.stringify({ report_ids }),
     }),
   suspendReport: (id: number) =>
-    req<Report>(`/api/reports/${id}/suspend`, { method: "POST" }),
+    isLiveId(id) ? liveBlocked("판독 보류") as Promise<Report>
+      : req<Report>(`/api/reports/${id}/suspend`, { method: "POST" }),
   confirm2Report: (id: number) =>
-    req<Report>(`/api/reports/${id}/confirm2`, { method: "POST" }),
+    isLiveId(id) ? liveBlocked("2차 승인") as Promise<Report>
+      : req<Report>(`/api/reports/${id}/confirm2`, { method: "POST" }),
   sendSr: (reportId: number) =>
-    req<{ ok: boolean; sop_instance_uid: string }>(`/api/reports/${reportId}/send-sr`, {
-      method: "POST",
-    }),
+    isLiveId(reportId) ? liveBlocked("DICOM SR 전송") as Promise<{ ok: boolean; sop_instance_uid: string }>
+      : req<{ ok: boolean; sop_instance_uid: string }>(`/api/reports/${reportId}/send-sr`, {
+          method: "POST",
+        }),
   getSetting: (key: string) => req<{ key: string; value: Record<string, unknown> }>(`/api/settings/${key}`),
   putSetting: (key: string, value: Record<string, unknown>, scope: "user" | "global") =>
     req<{ ok: boolean }>(`/api/settings/${key}`, {
@@ -385,19 +410,24 @@ export const api = {
     }),
   aiQuality: () => req<AiQuality>("/api/admin/ai-quality"),
   instances: (studyId: number) =>
-    req<{ items: InstanceThumb[]; key_images: KeyImage[] }>(`/api/studies/${studyId}/instances`),
+    req<{ items: InstanceThumb[]; key_images: KeyImage[] }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/instances`
+                        : `/api/studies/${studyId}/instances`),
   setKeyImages: (studyId: number, items: KeyImage[]) =>
-    req<{ ok: boolean }>(`/api/studies/${studyId}/key-images`, {
-      method: "PUT",
-      body: JSON.stringify({ items }),
-    }),
+    isLiveId(studyId) ? liveBlocked("키이미지 등록") as Promise<{ ok: boolean }>
+      : req<{ ok: boolean }>(`/api/studies/${studyId}/key-images`, {
+          method: "PUT",
+          body: JSON.stringify({ items }),
+        }),
   sendKos: (studyId: number) =>
-    req<{ ok: boolean }>(`/api/studies/${studyId}/send-kos`, { method: "POST" }),
+    isLiveId(studyId) ? liveBlocked("KOS 전송") as Promise<{ ok: boolean }>
+      : req<{ ok: boolean }>(`/api/studies/${studyId}/send-kos`, { method: "POST" }),
   setPriority: (studyId: number, emergency: boolean) =>
-    req<{ ok: boolean }>(`/api/studies/${studyId}/priority`, {
-      method: "PUT",
-      body: JSON.stringify({ emergency }),
-    }),
+    isLiveId(studyId) ? liveBlocked("응급 우선순위 변경") as Promise<{ ok: boolean }>
+      : req<{ ok: boolean }>(`/api/studies/${studyId}/priority`, {
+          method: "PUT",
+          body: JSON.stringify({ emergency }),
+        }),
   orthancStatus: () => req<OrthancStatus>("/api/admin/orthanc-status"),
   importDicom: (files: File[]) => {
     const fd = new FormData();
@@ -427,40 +457,78 @@ export const api = {
     req<{ status: string; study_id?: number | null; total?: number; done?: number;
           failed?: number; error?: string | null }>(`/api/webpacs/import/${remoteIdx}/status`),
   seriesTree: (studyId: number) =>
-    req<{ study_uid: string; series: SeriesNode[] }>(`/api/studies/${studyId}/series-tree`),
+    req<{ study_uid: string; series: SeriesNode[] }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/series-tree`
+                        : `/api/studies/${studyId}/series-tree`)
+      .then((tree) => {
+        if (isLiveId(studyId)) {
+          registerLiveStudyUid(tree.study_uid);
+          for (const s of tree.series) {
+            for (const i of s.instances) registerLiveStudyUid(i.study_uid);
+          }
+        }
+        return tree;
+      }),
+  // ── WebPACS Live 전용 — 실시간 상태/presence·선점 ──
+  liveWorklist: (params: Record<string, string | number>) => {
+    const qs = Object.entries(params).filter(([, v]) => v !== "" && v !== undefined)
+      .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
+    return req<{ items: StudyRow[]; total: number }>(`${LIVE}/worklist${qs ? `?${qs}` : ""}`);
+  },
+  liveState: (studyId: number) =>
+    req<{ study_status: string; status: string; read_state: string; report_locked: boolean;
+          assignee: string; report_status: string; report_updated: string;
+          report_writer: string; viewers: string[];
+          other_writing: boolean; other_writers: string[] }>(`${LIVE}/studies/${studyId}/state`),
+  liveClaim: (studyId: number) =>
+    req<{ status: number; message: string }>(`${LIVE}/studies/${studyId}/claim`, { method: "POST" }),
+  liveRelease: (studyId: number) =>
+    req<{ status: number; message: string }>(`${LIVE}/studies/${studyId}/release`, { method: "POST" }),
   nlQuery: (text: string) =>
     req<NlQueryResult>("/api/worklist/nl-query", { method: "POST", body: JSON.stringify({ text }) }),
   mergeReports: (study_ids: number[]) =>
     req<Report>("/api/reports/merge", { method: "POST", body: JSON.stringify({ study_ids }) }),
   // 저장 표시상태(시리즈별) — 적용 툴 값. shutter 는 {kind, pts(정규화 0~1)} 또는 null
   annotations: (studyId: number) =>
-    req<{ items: Anno[] }>(`/api/studies/${studyId}/annotations`),
+    req<{ items: Anno[] }>(isLiveId(studyId) ? `${LIVE}/studies/${studyId}/annotations`
+                                             : `/api/studies/${studyId}/annotations`),
   saveAnnotations: (studyId: number, items: Anno[]) =>
-    req<{ ok: boolean; count: number }>(`/api/studies/${studyId}/annotations`, {
+    req<{ ok: boolean; count: number }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/annotations`
+                        : `/api/studies/${studyId}/annotations`, {
       method: "PUT", body: JSON.stringify({ items }),
     }),
   // 검사 표시상태(적용 툴: W/L·방향·필터·셔터) 저장/로드 — 재오픈 시 재현. series 는 {series_uid: PState}
   savePresentation: (studyId: number, series: Record<string, PState>) =>
-    req<{ ok: boolean; series: number }>(`/api/studies/${studyId}/presentation`, {
+    req<{ ok: boolean; series: number }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/presentation`
+                        : `/api/studies/${studyId}/presentation`, {
       method: "PUT", body: JSON.stringify({ series }),
     }),
   presentation: (studyId: number) =>
-    req<{ series: Record<string, PState> }>(`/api/studies/${studyId}/presentation`),
+    req<{ series: Record<string, PState> }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/presentation`
+                        : `/api/studies/${studyId}/presentation`),
   ctr: (studyId: number) =>
-    req<CtrResult>(`/api/studies/${studyId}/ctr`, { method: "POST" }),
+    isLiveId(studyId) ? liveBlocked("CTR 자동계측") as Promise<CtrResult>
+      : req<CtrResult>(`/api/studies/${studyId}/ctr`, { method: "POST" }),
   sendGsps: (studyId: number, body: {
     images: { sop_uid: string; series_uid: string; rows: number; cols: number }[];
     annotations: Anno[]; wc?: number | null; ww?: number | null; label?: string;
   }) =>
-    req<{ ok: boolean; sop_instance_uid: string }>(`/api/studies/${studyId}/send-gsps`, {
-      method: "POST", body: JSON.stringify(body),
-    }),
-  /** GSPS 불러오기 — 검사에 귀속된 PR(타사 포함) 주석·W/L 파싱 */
+    isLiveId(studyId) ? liveBlocked("GSPS 전송") as Promise<{ ok: boolean; sop_instance_uid: string }>
+      : req<{ ok: boolean; sop_instance_uid: string }>(`/api/studies/${studyId}/send-gsps`, {
+          method: "POST", body: JSON.stringify(body),
+        }),
+  /** GSPS 불러오기 — 검사에 귀속된 PR(타사 포함) 주석·W/L 파싱. Live=빈 목록 */
   loadGsps: (studyId: number) =>
-    req<{ items: GspsItem[] }>(`/api/studies/${studyId}/gsps`),
-  /** ROI HU 통계(드래그 W/L·HU ROI 통계) — points는 0~1 정규화 */
+    isLiveId(studyId) ? Promise.resolve({ items: [] as GspsItem[] })
+      : req<{ items: GspsItem[] }>(`/api/studies/${studyId}/gsps`),
+  /** ROI HU 통계(드래그 W/L·HU ROI 통계) — points는 0~1 정규화. Live 도 서버 픽셀 경로 지원 */
   roiStats: (studyId: number, body: { sop_uid: string; kind: string; points: number[][] }) =>
-    req<RoiStats>(`/api/studies/${studyId}/roi-stats`, { method: "POST", body: JSON.stringify(body) }),
+    req<RoiStats>(isLiveId(studyId) ? `${LIVE}/studies/${studyId}/roi-stats`
+                                    : `/api/studies/${studyId}/roi-stats`,
+                  { method: "POST", body: JSON.stringify(body) }),
   orders: (params: Record<string, string> = {}) =>
     req<{ items: OrderRow[] }>(`/api/orders?${new URLSearchParams(params)}`),
   createOrder: (body: Partial<OrderRow>) =>
@@ -476,13 +544,16 @@ export const api = {
   exportMwl: () =>
     req<{ ok: boolean; count: number; dir: string }>("/api/orders/export-mwl", { method: "POST" }),
   setBookmark: (studyId: number, bookmark: boolean) =>
-    req<{ ok: boolean; bookmark: boolean }>(`/api/studies/${studyId}/bookmark`, {
-      method: "PUT", body: JSON.stringify({ bookmark }),
-    }),
+    isLiveId(studyId) ? liveBlocked("북마크") as Promise<{ ok: boolean; bookmark: boolean }>
+      : req<{ ok: boolean; bookmark: boolean }>(`/api/studies/${studyId}/bookmark`, {
+          method: "PUT", body: JSON.stringify({ bookmark }),
+        }),
   setMemo: (studyId: number, memo: string) =>
-    req<{ ok: boolean }>(`/api/studies/${studyId}/memo`, {
-      method: "PUT", body: JSON.stringify({ memo }),
-    }),
+    // Live: 메모는 원격 스키마에 대응 없음 — 저장 흐름(판독창)을 막지 않게 조용히 무시
+    isLiveId(studyId) ? Promise.resolve({ ok: false })
+      : req<{ ok: boolean }>(`/api/studies/${studyId}/memo`, {
+          method: "PUT", body: JSON.stringify({ memo }),
+        }),
   phrases: () => req<{ items: PhraseRow[] }>("/api/phrases"),
   createPhrase: (body: Partial<PhraseRow>) =>
     req<PhraseRow>("/api/phrases", { method: "POST", body: JSON.stringify(body) }),
@@ -777,13 +848,27 @@ export const api = {
 
   // ── 판독 상태 (read_state — 하트비트/확정 잠금) ──
   /** 검사 활동 하트비트 — 뷰어 열림(viewer)/판독 작업(report). 45s 주기 권장, 서버 TTL 120s */
-  activityHeartbeat: (study_ids: number[], kind: "viewer" | "report", typing = false) =>
-    req<{ ok: boolean }>("/api/activity/heartbeat", {
-      method: "POST", body: JSON.stringify({ study_ids, kind, typing }) }),
-  /** 판독 확정(잠금) 토글 — 잠금 중 판독 수정·확정·재생성·병합 전부 409 */
+  activityHeartbeat: (study_ids: number[], kind: "viewer" | "report", typing = false) => {
+    // Live(vid)와 로컬 id 분리 전송 — Live 는 인메모리 presence(B 클라이언트 간 열람 표시)
+    const liveIds = study_ids.filter(isLiveId);
+    const localIds = study_ids.filter((i) => !isLiveId(i));
+    const calls: Promise<{ ok: boolean }>[] = [];
+    if (localIds.length) {
+      calls.push(req<{ ok: boolean }>("/api/activity/heartbeat", {
+        method: "POST", body: JSON.stringify({ study_ids: localIds, kind, typing }) }));
+    }
+    if (liveIds.length) {
+      calls.push(req<{ ok: boolean }>(`${LIVE}/heartbeat`, {
+        method: "POST", body: JSON.stringify({ study_ids: liveIds, kind, typing }) }));
+    }
+    return Promise.all(calls).then(() => ({ ok: true }));
+  },
+  /** 판독 확정(잠금) 토글 — 잠금 중 판독 수정·확정·재생성·병합 전부 409.
+   *  Live 는 원격 승인 상태(A/RA)가 곧 잠금 — 수동 토글 미지원 */
   reportLock: (studyId: number, locked: boolean) =>
-    req<{ locked: boolean }>(`/api/studies/${studyId}/report-lock`, {
-      method: "POST", body: JSON.stringify({ locked }) }),
+    isLiveId(studyId) ? liveBlocked("확정 잠금 토글(원격 승인 상태를 따름)") as Promise<{ locked: boolean }>
+      : req<{ locked: boolean }>(`/api/studies/${studyId}/report-lock`, {
+          method: "POST", body: JSON.stringify({ locked }) }),
 };
 
 // ── Exam Control 타입 (레인 F/B 공통 계약 /api/examctl) ──
@@ -1506,6 +1591,7 @@ export async function fetchSignupFields(kind: "hospital" | "client" | "modality"
 
 /** PDF 다운로드 — 인증 헤더가 필요하므로 fetch→blob 방식 */
 export async function downloadReportPdf(reportId: number) {
+  if (isLiveId(reportId)) throw new Error("Live 모드(원격 PACS 직결) — PDF 출력은 지원되지 않습니다");
   const res = await fetch(`${BASE}/api/reports/${reportId}/export?format=pdf`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("sv_token") ?? sessionStorage.getItem("sv_token")}` },
   });

@@ -16,6 +16,7 @@ import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { IN_MOUSE_OPS } from "../lib/infiConfig";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/cornerstone";
+import { renderedRootFor } from "../lib/liveUids";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
@@ -252,7 +253,9 @@ function renderedUrlAt(p: PaneState, idx: number): string | null {
   // WASM 파이프라인(베타) — 준비된 로컬 디코딩 프레임이 있으면 우선, 없으면 서버 렌더링 폴백
   const wasm = wasmFrameUrl(stu, su, inst.sop_uid, p.wl || "");
   if (wasm) return wasm;
-  return `${DICOMWEB_ROOT}/studies/${stu}/series/${su}/instances/${inst.sop_uid}/rendered${wl}${renderedParams(!!wl)}`;
+  // WebPACS Live 검사(UID 레지스트리)는 라이브 프록시가 서버측 윈도잉 렌더 — 페인 단위 판정
+  const root = renderedRootFor(stu, DICOMWEB_ROOT);
+  return `${root}/studies/${stu}/series/${su}/instances/${inst.sop_uid}/rendered${wl}${renderedParams(!!wl)}`;
 }
 // Combine — 여러 SeriesNode 를 하나의 논리적 시리즈로 이어붙임(서버 병합 아님, 표시 결합).
 // 원본 시리즈(검사+시리즈 UID)별로 그룹화(첫 등장 순서 유지) → 그룹 내 instance_number 정렬·sop 중복 제거 →
