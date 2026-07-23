@@ -63,6 +63,7 @@ import { Splitter, clampSz } from "../lib/Splitter";
 
 const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewer3D })));
 const ImportDialog = lazy(() => import("./ImportDialog").then((m) => ({ default: m.ImportDialog })));
+const WebPacsBrowser = lazy(() => import("./WebPacsBrowser").then((m) => ({ default: m.WebPacsBrowser })));
 const LocalViewer = lazy(() => import("./LocalViewer").then((m) => ({ default: m.LocalViewer })));
 // EXAM CONTROL (레인 F) — 관리자 전용 검사 QC 화면 (워크리스트 탭 바에서 전환)
 const ExamControl = lazy(() => import("./admin/ExamControl").then((m) => ({ default: m.ExamControl })));
@@ -749,9 +750,10 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
 
 /* ── 서버 선택 버튼 (탭 바 우측) — Local Server: 로컬 PACS 모드 전환+폴더 보기 / Web Server: 주소·포트 ──
  * mode 는 워크리스트 데이터 소스 전환(레인 F)을 위해 부모(Worklist)가 소유한다. */
-function ServerButtons({ mode, onMode }: {
+function ServerButtons({ mode, onMode, onWebPacs }: {
   mode: "local" | "web" | null;
   onMode: (m: "local" | "web") => void;
+  onWebPacs?: () => void;   // WebPACS 브리지 모달 열기 (인계 PACS 검사 가져오기)
 }) {
   const [open, setOpen] = useState<null | "local" | "web">(null);
   const [net, setNet] = useState<ServerNetwork>({});
@@ -797,6 +799,13 @@ function ServerButtons({ mode, onMode }: {
                        color: mode === "web" ? "#fff" : undefined }}>
         Web Server
       </button>
+      {onWebPacs && (
+        <button onClick={onWebPacs}
+                title="WebPACS — 인계 PACS(webpacs_api)의 검사를 검색해 우리 뷰어로 가져오기"
+                style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+          WebPACS
+        </button>
+      )}
       {open && (
         <div style={{
           position: "absolute", top: "100%", right: 0, zIndex: 360, minWidth: 320, maxHeight: 320,
@@ -882,7 +891,7 @@ function ServerButtons({ mode, onMode }: {
 }
 
 /* ── 워크리스트 페이지 탭 바 (UBPACS-Z — 저장된 검색 정의를 페이지로, 최대 10) ── */
-function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, serverMode, onServerMode, extraTab, viewerName }: {
+function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, serverMode, onServerMode, extraTab, viewerName, onWebPacs }: {
   tabs: WorklistTab[]; activeId: string;
   onPick: (t: WorklistTab) => void; onAdd: () => void; onRemove: (id: string) => void;
   actions?: React.ReactNode;  // Local Server 왼쪽에 노출할 액션 버튼 그룹
@@ -890,6 +899,7 @@ function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, ser
   onServerMode: (m: "local" | "web") => void;
   extraTab?: React.ReactNode; // WORKLIST 탭들 옆 추가 탭 (관리자 EXAM CONTROL — 레인 F)
   viewerName?: string;        // 선택 뷰어 이름(SaintView/I-View/T-View) — 탭 스트립 좌측에 표기
+  onWebPacs?: () => void;     // WebPACS 브리지 모달 (인계 PACS 검사 가져오기)
 }) {
   return (
     <div style={{
@@ -924,7 +934,7 @@ function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, ser
       {/* 우측 그룹: 액션 버튼(요청 — Local Server 왼쪽) + 서버 버튼 */}
       <span style={{ marginLeft: "auto", display: "flex", gap: 3, alignItems: "center", alignSelf: "center" }}>
         {actions}
-        <ServerButtons mode={serverMode} onMode={onServerMode} />
+        <ServerButtons mode={serverMode} onMode={onServerMode} onWebPacs={onWebPacs} />
       </span>
     </div>
   );
@@ -2381,6 +2391,7 @@ export function Worklist() {
   const [dblAction, setDblAction] = useState<"viewer2d" | "ohif">("viewer2d");
   const [batchOpen, setBatchOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [webPacsOpen, setWebPacsOpen] = useState(false);   // WebPACS 브리지(인계 PACS 가져오기)
   const [viewer3dUid, setViewer3dUid] = useState<string | null>(null);
   // Local Server 모드 (레인 F) — ServerButtons 의 sv_server_mode 를 데이터 소스 전환으로 승격.
   // local 이면 서버 worklist 를 호출하지 않고(서버 검사·환자 완전 숨김) local.db 목록만 표시
@@ -3457,6 +3468,7 @@ export function Worklist() {
                        onAdd={() => { setExamCtl(false); void addTab(); }}
                        onRemove={(id) => void removeTab(id)}
                        serverMode={serverMode} onServerMode={pickServerMode}
+                       onWebPacs={() => setWebPacsOpen(true)}
                        extraTab={isAdminRole && (
                          /* 관리자 전용 EXAM CONTROL 탭 — 기존 탭과 동일 스타일 + 보라 포인트 */
                          <div onClick={() => setExamCtl(true)}
@@ -3785,6 +3797,22 @@ export function Worklist() {
                           setFilters((f) => ({ ...f, tree_from: "", date_from_iso: "", date_to_iso: "" }));
                           setRefreshKey((k) => k + 1);
                         }} />
+        </Suspense>
+      )}
+      {/* WebPACS 브리지 — 인계 PACS(webpacs_api) 검사 검색·가져오기 → 우리 뷰어로 열기 */}
+      {webPacsOpen && (
+        <Suspense fallback={null}>
+          <WebPacsBrowser isAdmin={isAdminRole}
+                          onImported={() => setRefreshKey((k) => k + 1)}
+                          onOpenStudy={async (id) => {
+                            try {
+                              const d = await api.study(id);
+                              selectAndSync(d);
+                              localStorage.setItem("sv_infi_exams", "[]");   // View 교체 시맨틱
+                              void openV2({ detail: d });
+                            } catch { alert("검사 열기에 실패했습니다 — 워크리스트에서 다시 시도하세요"); }
+                          }}
+                          onClose={() => setWebPacsOpen(false)} />
         </Suspense>
       )}
       {/* 로컬 뷰어 — LOCAL 모드 검사 더블클릭(경량 뷰어 모달, 레인 F) */}

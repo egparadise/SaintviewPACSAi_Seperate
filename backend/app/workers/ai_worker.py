@@ -18,6 +18,7 @@ logger = logging.getLogger("saintview.ai_worker")
 
 POLL_INTERVAL_SEC = 2.0
 ORTHANC_SYNC_EVERY = 5  # 워커 폴링 N회마다 Orthanc 동기화 (≈10초)
+WEBPACS_SYNC_EVERY = 30  # 워커 폴링 N회마다 WebPACS 자동 동기화 점검 (≈60초, opt-in)
 _SYNC_SEQ_KEY = "orthanc.last_change_seq"
 
 
@@ -105,6 +106,11 @@ async def worker_loop(stop_event: asyncio.Event) -> None:
             if tick % ORTHANC_SYNC_EVERY == 0:
                 await asyncio.to_thread(sync_orthanc_once)
                 await asyncio.to_thread(scheduled_backup_once)
+            if tick % WEBPACS_SYNC_EVERY == 0:
+                # WebPACS 브리지 자동 가져오기 — 설정 enabled+auto_sync 일 때만 동작(내부 가드)
+                from app.services.webpacs_bridge import webpacs_sync_once
+
+                await asyncio.to_thread(webpacs_sync_once)
         except Exception:
             logger.exception("워커 루프 오류")
         tick += 1

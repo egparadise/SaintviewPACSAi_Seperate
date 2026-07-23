@@ -408,6 +408,24 @@ export const api = {
                  results: { filename: string; size: number; status: string }[] }>(
       `/api/import-dicom${hid ? `?hospital_id=${hid}` : ""}`, { method: "POST", body: fd });
   },
+  // ── WebPACS 브리지 — 인계 웹서비스(webpacs_api) 검사 탐색·가져오기 ──
+  webpacsConfig: () => req<{ value: WebPacsConfig }>("/api/webpacs/config"),
+  webpacsSaveConfig: (value: Partial<WebPacsConfig> & { password?: string }) =>
+    req<{ ok: boolean; value: WebPacsConfig }>("/api/webpacs/config", {
+      method: "PUT", body: JSON.stringify({ value }),
+    }),
+  webpacsTest: () => req<{ ok: boolean; study_count?: number; detail?: string }>(
+    "/api/webpacs/test", { method: "POST" }),
+  webpacsStudies: (params: Record<string, string | number>) => {
+    const qs = Object.entries(params).filter(([, v]) => v !== "" && v !== undefined)
+      .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
+    return req<{ items: WebPacsStudy[]; total: number }>(`/api/webpacs/studies${qs ? `?${qs}` : ""}`);
+  },
+  webpacsImport: (remoteIdx: number) =>
+    req<{ status: string; study_id?: number }>(`/api/webpacs/import/${remoteIdx}`, { method: "POST" }),
+  webpacsImportStatus: (remoteIdx: number) =>
+    req<{ status: string; study_id?: number | null; total?: number; done?: number;
+          failed?: number; error?: string | null }>(`/api/webpacs/import/${remoteIdx}/status`),
   seriesTree: (studyId: number) =>
     req<{ study_uid: string; series: SeriesNode[] }>(`/api/studies/${studyId}/series-tree`),
   nlQuery: (text: string) =>
@@ -810,6 +828,35 @@ export interface MergeItem {
   created_at: string;
 }
 export interface MergeResp { merge_id: number; moved: number }
+
+// ── WebPACS 브리지 타입 — 인계 웹서비스(webpacs_api) 연동 ──
+export interface WebPacsConfig {
+  enabled: boolean;
+  base_url: string;
+  user_id: string;
+  has_password?: boolean;   // GET 응답 — 비밀번호 자체는 서버가 마스킹
+  verify_ssl: boolean;
+  hospital_id: number;
+  auto_sync: boolean;
+  auto_sync_limit: number;
+}
+export interface WebPacsStudy {
+  study_idx: number;            // 원격 내부 PK (인계 서버 study_idx)
+  study_uid: string;
+  patient_id: string;
+  patient_name: string;
+  patient_sex: string;
+  patient_birth: string;
+  study_datetime: string;
+  modality: string;
+  body_part: string;
+  study_desc: string;
+  series_count: number;
+  image_count: number;
+  study_status: string;
+  hospital_name: string;
+  imported_study_id: number | null;  // 로컬 보유 시 우리 검사 id (→열기)
+}
 
 // ── Local Server 모드 타입 (레인 F/B 공통 계약) ──
 export interface LocalStudyRow {
