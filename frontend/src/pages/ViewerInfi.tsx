@@ -2132,6 +2132,28 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   //            단일/미감지·팝업 차단 시 Layout 으로 폴백.
   //  layout  = 1:2 분할(좌=현재 검사, 우=과거검사) + 동기 스크롤 + M/S 라벨.
   //            (구 방식 '활성 페인 교체+시리즈 레일 하단 append 표시'는 혼동을 줘 폐지 — 레일 등록은 유지)
+  // Exam 탭 전환 — 선택 검사의 페인이 이미 있으면(비교/타일 행잉) 그 페인만 활성.
+  // 없으면(다중 모니터 mm: 배정 검사만 행잉) 현재 Series 레이아웃을 유지한 채 전체 페인을
+  // 선택 검사의 시리즈로 재행잉(V2D 탭 전환의 '전 페인 재행잉 — 환자 혼합 방지'와 동일 정책).
+  const switchExam = (i: number) => {
+    const ex = exams[i];
+    if (!ex) return;
+    setActiveExam(i);
+    setSeries(ex.series);
+    const pi = panes.findIndex((p) => p.studyUid === ex.d.study_uid);
+    if (pi >= 0) {
+      setActive(pi);
+    } else {
+      setMaximized(null);
+      setPanes((ps) => ps.map((_, k) => applyPStateToPane({ ...initPane(ex.d.study_uid), series: ex.series[k] ?? null })));
+      setActive(0);
+      // 전체 재행잉 = 비교 맥락 이탈 — M/S 라벨 해제(비교 타일 안에서의 페인 전환은 위 분기라 유지)
+      setCmpActive(false);
+      setCmpMaster("");
+    }
+    postStudySync(ex.d.id, "viewer");   // IN-2 ③: Worklist·Reading 창 동기
+  };
+
   const dockLoadPrior = (examId: number) => {
     const re = (curD.related_exams ?? []).find((r) => r.id === examId);
     // 슬롯 캐시 자가치유 — 이번 클릭은 기존 캐시로 동기 시도(팝업 허용), 다음 클릭을 위해 비동기 재감지
@@ -2895,13 +2917,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         {/* Exam 탭 — 연 검사들이 오른쪽으로 누적. 클릭=활성 전환, ✕=그 검사만 닫기 */}
         {exams.map((e, i) => (
           <span key={e.d.id} title={`${e.d.patient_name} · ${e.d.study_desc}`}
-                onClick={() => {
-                  setActiveExam(i);
-                  setSeries(e.series);
-                  const pi = panes.findIndex((p) => p.studyUid === e.d.study_uid);
-                  if (pi >= 0) setActive(pi);
-                  postStudySync(e.d.id, "viewer");   // IN-2 ③: Worklist·Reading 창 동기
-                }}
+                onClick={() => switchExam(i)}
                 style={{ border: `1px solid ${i === activeExam ? "var(--accent)" : "var(--border)"}`,
                          borderRadius: 4, padding: "1px 8px", cursor: "pointer",
                          background: i === activeExam ? "var(--bg-elevated)" : "transparent",
