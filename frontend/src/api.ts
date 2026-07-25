@@ -379,12 +379,12 @@ export const api = {
   analyze: (studyId: number) =>
     isLiveId(studyId) ? liveBlocked("AI 분석") as Promise<{ job_id: number }>
       : req<{ job_id: number }>(`/api/studies/${studyId}/analyze`, { method: "POST" }),
-  updateReport: (id: number, sr_json: SrJson) =>
+  updateReport: (id: number, sr_json: SrJson, cvr = false) =>
     req<Report>(isLiveId(id) ? `${LIVE}/reports/${id}` : `/api/reports/${id}`,
-                { method: "PUT", body: JSON.stringify({ sr_json }) }),
-  finalizeReport: (id: number) =>
+                { method: "PUT", body: JSON.stringify(isLiveId(id) ? { sr_json, cvr } : { sr_json }) }),
+  finalizeReport: (id: number, cvr = false) =>
     req<Report>(isLiveId(id) ? `${LIVE}/reports/${id}/finalize` : `/api/reports/${id}/finalize`,
-                { method: "POST" }),
+                { method: "POST", ...(isLiveId(id) ? { body: JSON.stringify({ cvr }) } : {}) }),
   batchReview: () => req<{ items: BatchCandidate[] }>("/api/batch-review"),
   batchFinalize: (report_ids: number[]) =>
     req<{ finalized: number; total: number }>("/api/reports/batch-finalize", {
@@ -423,11 +423,11 @@ export const api = {
     isLiveId(studyId) ? liveBlocked("KOS 전송") as Promise<{ ok: boolean }>
       : req<{ ok: boolean }>(`/api/studies/${studyId}/send-kos`, { method: "POST" }),
   setPriority: (studyId: number, emergency: boolean) =>
-    isLiveId(studyId) ? liveBlocked("응급 우선순위 변경") as Promise<{ ok: boolean }>
-      : req<{ ok: boolean }>(`/api/studies/${studyId}/priority`, {
-          method: "PUT",
-          body: JSON.stringify({ emergency }),
-        }),
+    req<{ ok: boolean }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/priority` : `/api/studies/${studyId}/priority`, {
+        method: "PUT",
+        body: JSON.stringify({ emergency }),
+      }),
   orthancStatus: () => req<OrthancStatus>("/api/admin/orthanc-status"),
   importDicom: (files: File[]) => {
     const fd = new FormData();
@@ -469,6 +469,10 @@ export const api = {
         }
         return tree;
       }),
+  // ── WebPACS Live — 원격 PACS(A) 계정으로 직접 로그인(per-user, 요구4) ──
+  webpacsLogin: (user_id: string, user_passwd: string, base_url = "") =>
+    req<{ token: string; username: string; role: string; a_user_name: string; a_user_idx: number | null }>(
+      "/api/auth/webpacs-login", { method: "POST", body: JSON.stringify({ user_id, user_passwd, base_url }) }),
   // ── WebPACS Live 전용 — 실시간 상태/presence·선점 ──
   liveWorklist: (params: Record<string, string | number>) => {
     const qs = Object.entries(params).filter(([, v]) => v !== "" && v !== undefined)
@@ -544,16 +548,16 @@ export const api = {
   exportMwl: () =>
     req<{ ok: boolean; count: number; dir: string }>("/api/orders/export-mwl", { method: "POST" }),
   setBookmark: (studyId: number, bookmark: boolean) =>
-    isLiveId(studyId) ? liveBlocked("북마크") as Promise<{ ok: boolean; bookmark: boolean }>
-      : req<{ ok: boolean; bookmark: boolean }>(`/api/studies/${studyId}/bookmark`, {
-          method: "PUT", body: JSON.stringify({ bookmark }),
-        }),
+    req<{ ok: boolean; bookmark: boolean }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/bookmark` : `/api/studies/${studyId}/bookmark`, {
+        method: "PUT", body: JSON.stringify({ bookmark }),
+      }),
   setMemo: (studyId: number, memo: string) =>
-    // Live: 메모는 원격 스키마에 대응 없음 — 저장 흐름(판독창)을 막지 않게 조용히 무시
-    isLiveId(studyId) ? Promise.resolve({ ok: false })
-      : req<{ ok: boolean }>(`/api/studies/${studyId}/memo`, {
-          method: "PUT", body: JSON.stringify({ memo }),
-        }),
+    // Live: A study_comment 로 저장(요구5 — 무성 유실 제거)
+    req<{ ok: boolean }>(
+      isLiveId(studyId) ? `${LIVE}/studies/${studyId}/memo` : `/api/studies/${studyId}/memo`, {
+        method: "PUT", body: JSON.stringify({ memo }),
+      }),
   phrases: () => req<{ items: PhraseRow[] }>("/api/phrases"),
   createPhrase: (body: Partial<PhraseRow>) =>
     req<PhraseRow>("/api/phrases", { method: "POST", body: JSON.stringify(body) }),
@@ -1591,16 +1595,18 @@ export async function fetchSignupFields(kind: "hospital" | "client" | "modality"
 
 /** PDF 다운로드 — 인증 헤더가 필요하므로 fetch→blob 방식 */
 export async function downloadReportPdf(reportId: number) {
-  if (isLiveId(reportId)) throw new Error("Live 모드(원격 PACS 직결) — PDF 출력은 지원되지 않습니다");
-  const res = await fetch(`${BASE}/api/reports/${reportId}/export?format=pdf`, {
+  const url = isLiveId(reportId)
+    ? `${BASE}/api/webpacs/live/reports/${reportId}/pdf`   // Live: A 판독 데이터 → 우리 PDF 렌더러
+    : `${BASE}/api/reports/${reportId}/export?format=pdf`;
+  const res = await fetch(url, {
     headers: { Authorization: `Bearer ${localStorage.getItem("sv_token") ?? sessionStorage.getItem("sv_token")}` },
   });
   if (!res.ok) throw new Error("PDF 생성 실패");
   const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
+  a.href = blobUrl;
   a.download = res.headers.get("Content-Disposition")?.match(/filename="(.+)"/)?.[1] ?? "report.pdf";
   a.click();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(blobUrl);
 }

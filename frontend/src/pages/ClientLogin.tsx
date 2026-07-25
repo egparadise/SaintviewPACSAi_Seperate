@@ -16,6 +16,8 @@ export function ClientLogin({ onLogin, onBack }: {
   const [username, setUsername] = useState(remembered ? (localStorage.getItem("sv_client_user") ?? "admin") : "admin");
   const [password, setPassword] = useState(remembered ? (localStorage.getItem("sv_client_pw") ?? "") : "");
   const [remember, setRemember] = useState(remembered);
+  // ★ 원격 PACS(A) 계정으로 직접 로그인 — 그 서버 계정으로 로그인, Live 모드 자동 진입(요구4)
+  const [aMode, setAMode] = useState(localStorage.getItem("sv_login_mode") === "webpacs");
   const [error, setError] = useState("");
   const [dup, setDup] = useState(false);   // 중복 로그인 인계 프롬프트(Yes/No)
   const [mustChange, setMustChange] = useState<LoginResp | null>(null);  // 발급 계정 최초 로그인 강제변경
@@ -55,6 +57,18 @@ export function ClientLogin({ onLogin, onBack }: {
     e.preventDefault();
     setError(""); setDup(false);
     try {
+      if (aMode) {
+        // 원격 PACS(A) 계정 로그인 — 성공 시 Live 모드로 워크리스트 진입(그 사용자 A 계정으로 판독)
+        const a = await api.webpacsLogin(username.trim(), password);
+        setToken(a.token, remember);
+        localStorage.setItem("sv_login_mode", "webpacs");
+        localStorage.setItem("sv_server_mode", "live");   // 워크리스트가 Live 소스로 시작
+        localStorage.setItem("sv_user", a.a_user_name || a.username);
+        onLogin({ token: a.token, username: a.a_user_name || a.username, role: a.role,
+                  hospital_id: null, hospital_name: "WebPACS (원격 직결)" } as LoginResp);
+        return;
+      }
+      localStorage.setItem("sv_login_mode", "local");
       const r = await api.clientLogin(hospitalId.trim(), username.trim(), password);
       if (r.duplicate) { setDup(true); return; }   // 이미 사용 중 → Yes/No 프롬프트
       finish(r);
@@ -81,11 +95,19 @@ export function ClientLogin({ onLogin, onBack }: {
           Saintview <span style={{ color: "var(--ai,#a78bfa)" }}>PACS AI</span>
         </div>
         <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: -6 }}>Client 뷰어 로그인</div>
-        <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>병원 ID
-          <input style={inp} placeholder="병원 코드 또는 이름(예: HOSP002, 광주씨티병원)" value={hospitalId} onChange={(e) => setHospitalId(e.target.value)} autoFocus />
+        {/* ★ 원격 PACS 서버 계정으로 로그인 — 켜면 그 서버 계정으로 직결(Live) */}
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12,
+                        color: aMode ? "#22c55e" : "var(--text-secondary)", fontWeight: aMode ? 700 : 400 }}>
+          <input type="checkbox" checked={aMode} onChange={(e) => setAMode(e.target.checked)} />
+          원격 PACS 서버 계정으로 로그인 (직결 · Live)
         </label>
-        <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>개별 ID
-          <input style={inp} placeholder="아이디" value={username} onChange={(e) => setUsername(e.target.value)} />
+        {!aMode && (
+          <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>병원 ID
+            <input style={inp} placeholder="병원 코드 또는 이름(예: HOSP002, 광주씨티병원)" value={hospitalId} onChange={(e) => setHospitalId(e.target.value)} autoFocus />
+          </label>
+        )}
+        <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>{aMode ? "PACS 계정 ID" : "개별 ID"}
+          <input style={inp} placeholder="아이디" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus={aMode} />
         </label>
         <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>Password
           <input style={inp} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />

@@ -56,14 +56,20 @@ def to_remote_idx(vid: int) -> int:
     return int(vid) - VID_BASE
 
 
-# ── 공유 클라이언트 (로그인 세션 재사용 — 요청마다 재로그인 방지) ─────────
+# ── 클라이언트 해석 ───────────────────────────────────────────────────────
+# 서비스 계정(공유 브리지) — 이미지 검색(<img> 인증 불가)·설정·미인증 경로용.
 _client_lock = threading.Lock()
 _client: WebPacsClient | None = None
 _client_key: tuple | None = None
+# per-user A 클라이언트 풀 — (base_url, a_user_id) 키. A 는 계정당 단일 유효 토큰이라
+# 같은 A 사용자는 하나의 클라이언트(=하나의 A 토큰)를 공유해 401 폭풍을 막는다.
+_user_clients: dict[str, WebPacsClient] = {}
+_user_lock = threading.Lock()
 
 
-def live_client(db: Session) -> WebPacsClient:
-    """설정 기반 공유 원격 클라이언트 — 설정(주소/계정) 변경 시 재생성."""
+def service_client(db: Session) -> WebPacsClient:
+    """서비스 계정(공유 브리지) 클라이언트 — 설정(주소/계정) 변경 시 재생성.
+    이미지 검색·설정 등 사용자 귀속이 필요 없는 경로용."""
     global _client, _client_key
     cfg = get_bridge_config(db)
     if not cfg.get("enabled"):
@@ -80,6 +86,68 @@ def live_client(db: Session) -> WebPacsClient:
             _client = client_from_config(cfg)
             _client_key = key
         return _client
+
+
+def user_client(sess: dict) -> WebPacsClient:
+    """사용자별 A 클라이언트 — 그 사용자의 A 토큰으로 A 에 접근·기록(판독 귀속의 핵심).
+    sess: webpacs_session 레코드({base_url, token, refresh, a_user_id, sid, verify_ssl, ...})."""
+    from app.services import webpacs_session
+
+    key = f"{sess.get('base_url')}|{sess.get('a_user_id')}"
+    sid = sess.get("sid", "")
+    with _user_lock:
+        cli = _user_clients.get(key)
+        if cli is None:
+            cli = WebPacsClient(
+                sess["base_url"], str(sess.get("a_user_id") or ""),
+                verify_ssl=bool(sess.get("verify_ssl", True)),
+                token=sess.get("token"), refresh_token=sess.get("refresh"),
+                on_token=(lambda t, _sid=sid: webpacs_session.update_token(_sid, t)),
+            )
+            _user_clients[key] = cli
+        else:
+            # 최신 세션 토큰을 반영(다른 창에서 재로그인해 토큰이 바뀐 경우)
+            if sess.get("token"):
+                cli._token = sess["token"]  # noqa: SLF001 — 같은 A 사용자 토큰 동기화
+        return cli
+
+
+def live_client(db: Session, user: dict | None = None) -> WebPacsClient:
+    """Live 데이터/판독 호출용 클라이언트 해석.
+
+    - user 세션에 A 자격이 있으면 **그 사용자의 A 계정** 클라이언트(요구4·6: 실제 판독의 귀속).
+    - 없으면 서비스 계정(공유 브리지)로 폴백(하위호환·이미지·미인증 경로).
+    """
+    if user:
+        from app.services import webpacs_session
+
+        sess = webpacs_session.get(user.get("sid", ""))
+        if sess and sess.get("base_url"):
+            return user_client(sess)
+    return service_client(db)
+
+
+def has_user_a_session(user: dict | None) -> bool:
+    if not user:
+        return False
+    from app.services import webpacs_session
+
+    return webpacs_session.get(user.get("sid", "")) is not None
+
+
+def a_user_idx_of(user: dict | None) -> int | None:
+    """현재 사용자의 A user_idx(판독 귀속용) — per-user 세션이 있을 때만."""
+    if not user:
+        return None
+    from app.services import webpacs_session
+
+    sess = webpacs_session.get(user.get("sid", ""))
+    if sess and sess.get("a_user_idx") is not None:
+        try:
+            return int(sess["a_user_idx"])
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 # ── A study_status → B 상태 매핑 ─────────────────────────────────────────
@@ -196,9 +264,10 @@ def _row_of(r: dict) -> dict:
     }
 
 
-def live_worklist(db: Session, params: dict[str, Any]) -> dict:
-    """A 워크리스트 실시간 조회 → StudyRow 배열(vid). 최신순."""
-    client = live_client(db)
+def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None) -> dict:
+    """A 워크리스트 실시간 조회 → StudyRow 배열(vid). 최신순.
+    per-user 세션이 있으면 그 사용자 A 계정으로 조회(A 권한 스코프 그대로 적용)."""
+    client = live_client(db, user)
     q: dict[str, str] = {
         "limit": str(min(int(params.get("limit") or 100), 300)),
         "offset": str(int(params.get("offset") or 0)),
@@ -224,9 +293,9 @@ def live_worklist(db: Session, params: dict[str, Any]) -> dict:
     return {"items": items, "total": total}
 
 
-def live_detail(db: Session, vid: int) -> dict:
+def live_detail(db: Session, vid: int, user: dict | None = None) -> dict:
     """StudyDetail 동형 — related_exams 는 동일 환자의 다른 A 검사(vid)."""
-    client = live_client(db)
+    client = live_client(db, user)
     idx = to_remote_idx(vid)
     r = client.study_detail(idx)
     if not r:
@@ -255,7 +324,7 @@ def live_detail(db: Session, vid: int) -> dict:
                 })
         except Exception:  # noqa: BLE001 — 과거검사 실패는 상세 자체를 막지 않음
             pass
-    row["clinical_info"] = ""
+    row["clinical_info"] = str(r.get("study_comment") or r.get("report_study_comment") or "")
     row["orthanc_id"] = ""
     row["series"] = []
     row["related_exams"] = related
@@ -288,13 +357,14 @@ def _tag1(meta: dict, key: str, default=None):
     return v
 
 
-def live_series_tree(db: Session, vid: int) -> dict:
-    """series-tree 동형 — instances 에 rows/cols/spacing/position/orientation 포함."""
+def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
+    """series-tree 동형 — instances 에 rows/cols/spacing/position/orientation 포함.
+    구조는 사용자 무관이라 vid 로 캐시(픽셀 취득은 서비스 계정)."""
     with _TREE_LOCK:
         hit = _TREE_CACHE.get(vid)
         if hit and time.time() - hit[0] < _TREE_TTL:
             return hit[1]
-    client = live_client(db)
+    client = live_client(db, user)
     idx = to_remote_idx(vid)
     series_rows = client.series_viewer(idx)
     study_uid = ""
@@ -353,9 +423,9 @@ def live_series_tree(db: Session, vid: int) -> dict:
     return tree
 
 
-def find_uids(db: Session, vid: int, sop_uid: str) -> tuple[str, str, str] | None:
+def find_uids(db: Session, vid: int, sop_uid: str, user: dict | None = None) -> tuple[str, str, str] | None:
     """sop → (study_uid, series_uid, sop_uid) — series-tree 캐시 기반."""
-    tree = live_series_tree(db, vid)
+    tree = live_series_tree(db, vid, user)
     for s in tree["series"]:
         for inst in s["instances"]:
             if inst["sop_uid"] == sop_uid:
@@ -471,23 +541,41 @@ def render_instance(data: bytes, wc: float | None, ww: float | None,
 
 
 # ── 판독 (A pacs_study_report ↔ 우리 Report 계약) ─────────────────────────
-def _sr_from_remote(reading: str, conclusion: str) -> dict:
+def _sr_from_remote(reading: str, conclusion: str, remote: dict | None = None) -> dict:
     findings = []
-    if reading.strip():
+    body, recommendation = _split_recommendation(reading)
+    if body.strip():
         findings.append({
-            "organ": "", "observation": reading.strip(),
-            "severity": "critical" if "[CRITICAL]" in reading.upper() else "normal",
+            "organ": "", "observation": body.strip(),
+            "severity": "critical" if "[CRITICAL]" in body.upper() else "normal",
             "measurements": [],
         })
     return {
-        "exam": {}, "clinical_info": "", "comparison": None,
+        "exam": {}, "clinical_info": str((remote or {}).get("report_study_comment") or ""),
+        "comparison": {},
         "findings": findings,
         "impression": [{"rank": 1, "statement": conclusion or "", "confidence": "high", "codes": []}],
-        "recommendation": [], "critical": [],
+        "recommendation": [{"text": recommendation}] if recommendation else [],
+        "critical": [],
+        # A 왕복 코멘트(요구6) — 판독 도크·창이 표시·편집
+        "refer_comment": str((remote or {}).get("report_refer_comment") or ""),
     }
 
 
+_RECO_MARK = "[권고] "
+
+
+def _split_recommendation(reading: str) -> tuple[str, str]:
+    """reading 평문에서 [권고] 섹션 분리(무손실 왕복)."""
+    if _RECO_MARK in reading:
+        head, _, tail = reading.partition(_RECO_MARK)
+        return head.rstrip("\n"), tail.strip()
+    return reading, ""
+
+
 def _reading_from_sr(sr: dict) -> tuple[str, str]:
+    """SR → (reading 평문, conclusion). recommendation·critical·비교를 텍스트 섹션으로
+    직렬화해 A 평문 왕복에서 소실되지 않게 한다(요구6 SR 구조 보존)."""
     lines = []
     comp = (sr.get("comparison") or {}) if isinstance(sr.get("comparison"), dict) else {}
     if comp.get("summary"):
@@ -497,8 +585,35 @@ def _reading_from_sr(sr: dict) -> tuple[str, str]:
         obs = str(f.get("observation") or "")
         sev = " [CRITICAL]" if f.get("severity") == "critical" and "[CRITICAL]" not in obs.upper() else ""
         lines.append(f"{organ + ': ' if organ and organ != '판독' else ''}{obs}{sev}")
+    recos = [str(r.get("text") or r) for r in (sr.get("recommendation") or []) if r]
+    reading = "\n".join(lines)
+    reco_txt = "\n".join(x for x in recos if x)
+    if reco_txt:
+        reading = f"{reading}\n{_RECO_MARK}{reco_txt}" if reading else f"{_RECO_MARK}{reco_txt}"
     conclusion = "\n".join(str(i.get("statement") or "") for i in (sr.get("impression") or []))
-    return "\n".join(lines), conclusion
+    return reading, conclusion
+
+
+def _comments_from_sr(sr: dict) -> dict:
+    """SR 에서 A 코멘트 필드 추출 — 있으면 그 값, 없으면 None(A 미변경)."""
+    out: dict[str, Any] = {}
+    ci = sr.get("clinical_info")
+    if ci is not None:
+        out["study_comment"] = str(ci)[:2000]
+    rc = sr.get("refer_comment")
+    if rc is not None:
+        out["refer_comment"] = str(rc)[:2000]
+    return out
+
+
+def _has_critical(sr: dict) -> bool:
+    if sr.get("critical"):
+        return True
+    for f in sr.get("findings") or []:
+        obs = str(f.get("observation") or "")
+        if f.get("severity") == "critical" or "[CRITICAL]" in obs.upper():
+            return True
+    return False
 
 
 def _report_out(vid: int, remote: dict | None) -> dict:
@@ -518,7 +633,7 @@ def _report_out(vid: int, remote: dict | None) -> dict:
         "version": 1,
         "status": "finalized" if finalized else "in_review",
         "sr_json": _sr_from_remote(str(remote.get("report_reading") or ""),
-                                   str(remote.get("report_conclusion") or "")),
+                                   str(remote.get("report_conclusion") or ""), remote),
         "narrative_text": str(remote.get("report_reading") or ""),
         "created_by": str(remote.get("report_create_name") or remote.get("report_create_id") or ""),
         "reviewed_by": str(remote.get("report_approve_name") or "") or None,
@@ -531,24 +646,25 @@ def _report_out(vid: int, remote: dict | None) -> dict:
     }
 
 
-def live_reports(db: Session, vid: int) -> dict:
-    client = live_client(db)
+def live_reports(db: Session, vid: int, user: dict | None = None) -> dict:
+    client = live_client(db, user)
     remote = client.report_get(to_remote_idx(vid))
     return {"items": [_report_out(vid, remote)]}
 
 
-def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = False) -> dict:
-    """판독 저장(R)/승인(A) — A 로 되돌려 쓰기.
+def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = False,
+                     cvr: bool = False, user: dict | None = None) -> dict:
+    """판독 저장(R/RR)/승인(A/RA) — A 로 되돌려 쓰기.
 
-    안전 규칙(적대검증 반영, fail-closed):
-    - 승인 상태(A/RA) 검사에는 저장 금지(409) — 미승인으로 강등 방지.
-    - 저장 전 원격 상태를 직접 조회해 **다른 판독의가 작성중(RI)** 이면 문자열 매칭에 의존하지 않고 409.
-    - 승인은 빈 내용 금지 + 저장(R)과 동일한 선점/타인검사 가드 적용.
-    - 선점(change_status/report) 성공 후 report_save 가 실패하면 선점을 best-effort 해제(고착 방지).
+    귀속(요구4·6): per-user 세션이면 그 사용자의 A 계정으로 저장 →
+    A pacs_study_report 의 report_create_name/report_approve_name 이 **실제 판독의**로 기록.
+
+    완결(요구6): 재판독(RE→RR, RE/RR 승인→RA) 매핑, CVR 조건부 전송(critical value report
+    알림톡), study/refer 코멘트 왕복. 안전 규칙(적대검증, fail-closed) 유지.
     """
     from app.services.webpacs_bridge import WebPacsConflict
 
-    client = live_client(db)
+    client = live_client(db, user)
     idx = to_remote_idx(vid)
     reading, conclusion = _reading_from_sr(sr_json or {})
     if approve and not (reading.strip() or conclusion.strip()):
@@ -559,16 +675,18 @@ def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = Fa
     assignee_idx = detail.get("user_idx")
     remote = client.report_get(idx)
 
-    # 이미 승인된 검사 — 저장/재승인 금지(강등·중복 승인 방지)
+    # 이미 승인된 검사 — 저장/재승인 금지(강등·중복 승인 방지). 재판독은 원격에서 RE 로 열어야 함.
     if cur in ("A", "RA"):
-        raise WebPacsConflict("이미 승인된 판독입니다 — 수정하려면 원격에서 재판독으로 여세요")
+        raise WebPacsConflict("이미 승인된 판독입니다 — 재판독은 원격에서 재판독 대기(RE)로 여세요")
 
-    # 다른 판독의가 작성중(RI) — 문자열 매칭 대신 상태로 직접 판정(fail-closed).
-    # 브리지는 공유 계정이라 user_idx 일치는 '내 세션'을 보장하지 않지만, RI 자체가 선점 신호이므로
-    # 타 세션이 RI 를 잡고 있으면 차단(내 앞 change_status 로만 RI 진입).
-    my_idx = _bridge_user_idx(db)
+    # 다른 판독의가 작성중(RI) — 상태로 직접 판정(fail-closed). per-user 면 내 A user_idx 와 비교.
+    my_idx = a_user_idx_of(user) if has_user_a_session(user) else _bridge_user_idx(db)
     if cur == "RI" and assignee_idx is not None and my_idx is not None and assignee_idx != my_idx:
         raise WebPacsConflict("다른 판독의가 작성 중입니다 — 목록을 새로고침하세요")
+
+    # 재판독 구분(요구6): RE(재판독 대기)·RR(재판독 작성) 계열이면 R/A 대신 RR/RA 로 기록.
+    rework = cur in ("RE", "RR")
+    save_status = ("RA" if rework else "A") if approve else ("RR" if rework else "R")
 
     # 선점(RI) — 미완료 상태에서만. 이미 R/RR/REF(작성완료·미승인) 는 수정 저장이라 선점 생략.
     claimed = False
@@ -579,13 +697,25 @@ def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = Fa
         except WebPacsConflict:
             raise   # 타 판독의 작성중/완료 — 저장 차단(A 가 최종 판정)
 
+    comments = _comments_from_sr(sr_json or {})
     payload: dict[str, Any] = {
         "study_idx": idx,
-        "report_status": "A" if approve else "R",
+        "report_status": save_status,
         "report_reading": reading,
         "report_conclusion": conclusion,
-        "report_cvr_send": "N",   # A 계약: 미전송 시 서버 500 — 항상 명시
+        # CVR(critical value report) — critical 소견이거나 사용자가 CVR 지정 시 알림톡 발송(UA_1296)
+        "report_cvr_send": "Y" if (cvr or _has_critical(sr_json or {})) else "N",
     }
+    if comments.get("study_comment") is not None:
+        payload["report_study_comment"] = comments["study_comment"]
+    if comments.get("refer_comment") is not None:
+        payload["report_refer_comment"] = comments["refer_comment"]
+    # 실제 판독의 귀속 — per-user 면 A user_idx 를 명시(A 는 None/0 이면 토큰 사용자로 세팅하므로
+    # per-user 토큰만으로도 올바르나, 명시해 이중 안전).
+    if my_idx is not None:
+        payload["report_create_idx"] = my_idx
+        if approve:
+            payload["report_approve_idx"] = my_idx
     if remote and remote.get("report_idx"):
         payload["report_idx"] = remote["report_idx"]
     try:
@@ -601,8 +731,9 @@ def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = Fa
 
 
 def _bridge_user_idx(db: Session) -> int | None:
-    """브리지 로그인 계정의 원격 user_idx — 로그인 응답 user_data 에서 1회 확보(캐시)."""
-    client = live_client(db)
+    """서비스 계정(공유 브리지)의 원격 user_idx — 로그인 응답 user_data 에서 1회 확보(캐시).
+    (per-user 세션이 없을 때의 폴백 귀속·presence 판정용)."""
+    client = service_client(db)
     cached = getattr(client, "_sv_user_idx", "unset")
     if cached != "unset":
         return cached
@@ -617,16 +748,16 @@ def _bridge_user_idx(db: Session) -> int | None:
 
 
 # ── 상태/presence (실시간 변경 감지 폴링용) ───────────────────────────────
-def live_state(db: Session, vid: int, me: str = "") -> dict:
-    client = live_client(db)
+def live_state(db: Session, vid: int, me: str = "", user: dict | None = None) -> dict:
+    client = live_client(db, user)
     idx = to_remote_idx(vid)
     r = client.study_detail(idx)
     ss = str(r.get("study_status") or "").upper()
     status, read_state, locked = _map_status(ss)
     report = client.report_get(idx)
     # "다른 사람이 작성 중" 서버 판정(프론트 이름 매칭 불필요):
-    #  A 원주민 판독의가 RI 선점 + 브리지 계정이 아님, 또는 다른 B 사용자가 판독창 입력 중.
-    my_idx = _bridge_user_idx(db)
+    #  A 판독의가 RI 선점 + 나(내 A user_idx)가 아님, 또는 다른 B 사용자가 판독창 입력 중.
+    my_idx = a_user_idx_of(user) if has_user_a_session(user) else _bridge_user_idx(db)
     a_other = (ss == "RI" and r.get("user_idx") is not None
                and my_idx is not None and r.get("user_idx") != my_idx)
     b_typers = _report_typers_of(vid, exclude=me)
@@ -651,17 +782,17 @@ SV_ANNO_TOOL = "sv_annotation"       # (StudyUID, tool_name) 1행 — A 뷰어 �
 SV_PSTATE_TOOL = "sv_presentation"
 
 
-def _study_uid_of(db: Session, vid: int) -> str:
-    tree = live_series_tree(db, vid)
+def _study_uid_of(db: Session, vid: int, user: dict | None = None) -> str:
+    tree = live_series_tree(db, vid, user)
     if tree["study_uid"]:
         return tree["study_uid"]
-    detail = live_client(db).study_detail(to_remote_idx(vid))
+    detail = live_client(db, user).study_detail(to_remote_idx(vid))
     return str(detail.get("study_instance_uid") or "")
 
 
-def live_annotations_get(db: Session, vid: int) -> dict:
-    uid = _study_uid_of(db, vid)
-    rows = live_client(db).annotation_get(uid)
+def live_annotations_get(db: Session, vid: int, user: dict | None = None) -> dict:
+    uid = _study_uid_of(db, vid, user)
+    rows = live_client(db, user).annotation_get(uid)
     for row in rows:
         if row.get("annotation_tool_name") == SV_ANNO_TOOL:
             try:
@@ -671,15 +802,15 @@ def live_annotations_get(db: Session, vid: int) -> dict:
     return {"items": []}
 
 
-def live_annotations_put(db: Session, vid: int, items: list[dict]) -> dict:
-    uid = _study_uid_of(db, vid)
-    live_client(db).annotation_change(uid, SV_ANNO_TOOL, json.dumps(items, ensure_ascii=False))
+def live_annotations_put(db: Session, vid: int, items: list[dict], user: dict | None = None) -> dict:
+    uid = _study_uid_of(db, vid, user)
+    live_client(db, user).annotation_change(uid, SV_ANNO_TOOL, json.dumps(items, ensure_ascii=False))
     return {"ok": True, "count": len(items)}
 
 
-def live_presentation_get(db: Session, vid: int) -> dict:
-    uid = _study_uid_of(db, vid)
-    rows = live_client(db).annotation_get(uid)
+def live_presentation_get(db: Session, vid: int, user: dict | None = None) -> dict:
+    uid = _study_uid_of(db, vid, user)
+    rows = live_client(db, user).annotation_get(uid)
     for row in rows:
         if row.get("annotation_tool_name") == SV_PSTATE_TOOL:
             try:
@@ -689,7 +820,74 @@ def live_presentation_get(db: Session, vid: int) -> dict:
     return {"series": {}}
 
 
-def live_presentation_put(db: Session, vid: int, series: dict) -> dict:
-    uid = _study_uid_of(db, vid)
-    live_client(db).annotation_change(uid, SV_PSTATE_TOOL, json.dumps(series, ensure_ascii=False))
+def live_presentation_put(db: Session, vid: int, series: dict, user: dict | None = None) -> dict:
+    uid = _study_uid_of(db, vid, user)
+    live_client(db, user).annotation_change(uid, SV_PSTATE_TOOL, json.dumps(series, ensure_ascii=False))
     return {"ok": True, "series": len(series)}
+
+
+# ── A 대응 기능(요구5) — 메모·응급·북마크·PDF ────────────────────────────
+def live_set_memo(db: Session, vid: int, memo: str, user: dict | None = None) -> dict:
+    """메모(Hospital Comment) → A study_comment 업데이트."""
+    live_client(db, user).study_update(to_remote_idx(vid), {"study_comment": memo[:2000]})
+    return {"ok": True}
+
+
+def live_set_priority(db: Session, vid: int, emergency: bool, user: dict | None = None) -> dict:
+    """응급 우선순위 토글 → A study_emergency(ER/NR)."""
+    live_client(db, user).study_status_change(
+        to_remote_idx(vid), {"study_emergency": "ER" if emergency else "NR"})
+    return {"ok": True, "emergency": emergency}
+
+
+def live_set_bookmark(db: Session, vid: int, bookmark: bool, user: dict | None = None) -> dict:
+    """북마크 토글 → A BookMark."""
+    live_client(db, user).bookmark_toggle(to_remote_idx(vid), bookmark)
+    return {"ok": True, "bookmark": bookmark}
+
+
+class _Attr:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _Fmt:
+    """이미 포맷된 문자열을 strftime 계약에 맞춰 반환(렌더러의 finalized_at.strftime 대응)."""
+    def __init__(self, s: str):
+        self._s = s
+
+    def strftime(self, _fmt: str) -> str:
+        return self._s
+
+
+def live_report_pdf(db: Session, vid: int, user: dict | None = None) -> tuple[bytes, str]:
+    """판독서 PDF — A 판독 데이터를 우리 PDF 렌더러로 생성(A 자체 PDF 없음, 데이터는 있음).
+    render_report_pdf 가 ORM(Report/Study/Patient)을 읽으므로 덕타이핑 shim + 위임 db 로 재사용."""
+    from app.services.pdf_service import render_report_pdf
+
+    detail = live_detail(db, vid, user)
+    report = live_reports(db, vid, user)["items"][0]
+    patient = _Attr(patient_key=detail.get("patient_key", ""), name_masked=detail.get("patient_name", ""),
+                    sex=detail.get("sex", ""), birth_date=detail.get("birth_date", ""))
+    study = _Attr(patient_id=1, accession_no=detail.get("accession_no", ""),
+                  study_uid=detail.get("study_uid", ""), study_desc=detail.get("study_desc", ""),
+                  study_date=detail.get("study_date", ""), study_time=detail.get("study_time", ""),
+                  modality=detail.get("modality", ""), body_part=detail.get("body_part", ""),
+                  key_images=[])
+    fin = report.get("finalized_at")
+    rep = _Attr(study=study, sr_json=report.get("sr_json") or {}, version=report.get("version", 1),
+                status=report.get("status", ""), diff_metrics=report.get("diff_metrics") or {},
+                created_by=report.get("created_by") or "",
+                reviewed_by=report.get("reviewed_by") or report.get("created_by") or "",
+                finalized_at=_Fmt(str(fin)) if fin else None)
+
+    class _LiveDb:   # get_setting 는 실 db 위임, Patient 조회는 shim 반환
+        def get(self, _model, _pk):
+            return patient
+
+        def execute(self, *a, **k):
+            return db.execute(*a, **k)
+
+    pdf = render_report_pdf(_LiveDb(), rep)   # type: ignore[arg-type]
+    fname = f"report_{detail.get('patient_key', '')}_{detail.get('study_date', '')}.pdf"
+    return pdf, fname

@@ -53,26 +53,26 @@ def worklist(
     limit: int = Query(100, le=300), offset: int = 0,
     db: Session = Depends(get_db), user: dict = Depends(current_user),
 ):
-    return _wrap(live.live_worklist, db, {
+    return _wrap(lambda: live.live_worklist(db, {
         "q": q, "pid": pid, "pname": pname, "modality": modality,
         "date_from": date_from, "date_to": date_to, "limit": limit, "offset": offset,
-    })
+    }, user))
 
 
 @router.get("/studies/{vid}")
 def study_detail(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(live.live_detail, db, vid)
+    return _wrap(lambda: live.live_detail(db, vid, user))
 
 
 @router.get("/studies/{vid}/series-tree")
 def series_tree(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(live.live_series_tree, db, vid)
+    return _wrap(lambda: live.live_series_tree(db, vid, user))
 
 
 @router.get("/studies/{vid}/instances")
 def instances(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
     """키이미지 UI 계약 동형 — Live 는 키이미지 미지원(빈 선택)."""
-    tree = _wrap(live.live_series_tree, db, vid)
+    tree = _wrap(lambda: live.live_series_tree(db, vid, user))
     items = [
         {"sop_uid": i["sop_uid"], "instance_number": i["instance_number"],
          "preview_url": i["preview_url"], "series_uid": s["series_uid"]}
@@ -83,28 +83,33 @@ def instances(vid: int, db: Session = Depends(get_db), user: dict = Depends(curr
 
 @router.get("/studies/{vid}/reports")
 def reports(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(live.live_reports, db, vid)
+    return _wrap(lambda: live.live_reports(db, vid, user))
 
 
 class SrBody(BaseModel):
     sr_json: dict
+    cvr: bool = False   # critical value report — A 알림톡(UA_1296) 발송
 
 
 @router.put("/reports/{vid}")
 def update_report(vid: int, body: SrBody, db: Session = Depends(get_db),
                   user: dict = Depends(require_effective("report.write"))):
-    return _wrap(lambda: live.live_save_report(db, vid, body.sr_json, approve=False))
-
-
-@router.post("/reports/{vid}/finalize")
-def finalize_report(vid: int, db: Session = Depends(get_db),
-                    user: dict = Depends(require_effective("report.finalize"))):
-    return _wrap(lambda: live.live_save_report(
-        db, vid, live.live_reports(db, vid)["items"][0]["sr_json"], approve=True))
+    return _wrap(lambda: live.live_save_report(db, vid, body.sr_json, approve=False,
+                                               cvr=body.cvr, user=user))
 
 
 class FinalizeBody(BaseModel):
     sr_json: dict | None = None
+    cvr: bool = False
+
+
+@router.post("/reports/{vid}/finalize")
+def finalize_report(vid: int, body: FinalizeBody | None = None, db: Session = Depends(get_db),
+                    user: dict = Depends(require_effective("report.finalize"))):
+    b = body or FinalizeBody()
+    return _wrap(lambda: live.live_save_report(
+        db, vid, b.sr_json or live.live_reports(db, vid, user)["items"][0]["sr_json"],
+        approve=True, cvr=b.cvr, user=user))
 
 
 @router.post("/reports/{vid}/finalize-with")
@@ -112,26 +117,27 @@ def finalize_with(vid: int, body: FinalizeBody, db: Session = Depends(get_db),
                   user: dict = Depends(require_effective("report.finalize"))):
     """저장+승인 원자 경로 — dock 승인(update→finalize 2call)을 1call 로 쓸 수도 있게."""
     return _wrap(lambda: live.live_save_report(
-        db, vid, body.sr_json or live.live_reports(db, vid)["items"][0]["sr_json"], approve=True))
+        db, vid, body.sr_json or live.live_reports(db, vid, user)["items"][0]["sr_json"],
+        approve=True, cvr=body.cvr, user=user))
 
 
 @router.get("/studies/{vid}/state")
 def state(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(lambda: live.live_state(db, vid, me=user.get("sub", "")))
+    return _wrap(lambda: live.live_state(db, vid, me=user.get("sub", ""), user=user))
 
 
 @router.post("/studies/{vid}/claim")
 def claim(vid: int, db: Session = Depends(get_db),
           user: dict = Depends(require_effective("report.write"))):
     """판독 작성중 선점(A change_status/report — RI). 타 판독의 작성중=409."""
-    return _wrap(lambda: live.live_client(db).change_status(live.to_remote_idx(vid), "report"))
+    return _wrap(lambda: live.live_client(db, user).change_status(live.to_remote_idx(vid), "report"))
 
 
 @router.post("/studies/{vid}/release")
 def release(vid: int, db: Session = Depends(get_db),
             user: dict = Depends(require_effective("report.write"))):
     """선점 해제(A change_status/end → 대기 E). 저장 없이 닫을 때."""
-    return _wrap(lambda: live.live_client(db).change_status(live.to_remote_idx(vid), "end"))
+    return _wrap(lambda: live.live_client(db, user).change_status(live.to_remote_idx(vid), "end"))
 
 
 class HeartbeatBody(BaseModel):
@@ -153,7 +159,7 @@ class AnnoBody(BaseModel):
 
 @router.get("/studies/{vid}/annotations")
 def annotations_get(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(lambda: live.live_annotations_get(db, vid))
+    return _wrap(lambda: live.live_annotations_get(db, vid, user))
 
 
 @router.put("/studies/{vid}/annotations")
@@ -161,7 +167,7 @@ def annotations_put(vid: int, body: AnnoBody, db: Session = Depends(get_db),
                     user: dict = Depends(require_effective("report.write"))):
     if len(body.items) > 500:
         raise HTTPException(status_code=400, detail="주석이 너무 많습니다(≤500)")
-    return _wrap(lambda: live.live_annotations_put(db, vid, body.items))
+    return _wrap(lambda: live.live_annotations_put(db, vid, body.items, user))
 
 
 class PstateBody(BaseModel):
@@ -170,13 +176,51 @@ class PstateBody(BaseModel):
 
 @router.get("/studies/{vid}/presentation")
 def presentation_get(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(lambda: live.live_presentation_get(db, vid))
+    return _wrap(lambda: live.live_presentation_get(db, vid, user))
 
 
 @router.put("/studies/{vid}/presentation")
 def presentation_put(vid: int, body: PstateBody, db: Session = Depends(get_db),
                      user: dict = Depends(current_user)):
-    return _wrap(lambda: live.live_presentation_put(db, vid, body.series))
+    return _wrap(lambda: live.live_presentation_put(db, vid, body.series, user))
+
+
+# ── A 대응 기능(요구5) — 메모·응급·북마크·PDF ────────────────────────────
+class MemoBody(BaseModel):
+    memo: str = ""
+
+
+@router.put("/studies/{vid}/memo")
+def set_memo(vid: int, body: MemoBody, db: Session = Depends(get_db),
+             user: dict = Depends(current_user)):
+    return _wrap(lambda: live.live_set_memo(db, vid, body.memo, user))
+
+
+class PriorityBody(BaseModel):
+    emergency: bool = False
+
+
+@router.put("/studies/{vid}/priority")
+def set_priority(vid: int, body: PriorityBody, db: Session = Depends(get_db),
+                 user: dict = Depends(current_user)):
+    return _wrap(lambda: live.live_set_priority(db, vid, body.emergency, user))
+
+
+class BookmarkBody(BaseModel):
+    bookmark: bool = False
+
+
+@router.put("/studies/{vid}/bookmark")
+def set_bookmark(vid: int, body: BookmarkBody, db: Session = Depends(get_db),
+                 user: dict = Depends(current_user)):
+    return _wrap(lambda: live.live_set_bookmark(db, vid, body.bookmark, user))
+
+
+@router.get("/reports/{vid}/pdf")
+def report_pdf(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    pdf, fname = _wrap(lambda: live.live_report_pdf(db, vid, user))
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 class RoiBody(BaseModel):
@@ -197,10 +241,10 @@ def roi_stats(vid: int, body: RoiBody, db: Session = Depends(get_db),
 
     if len(body.points) < 2:
         raise HTTPException(status_code=400, detail="좌표가 부족합니다")
-    uids = _wrap(lambda: live.find_uids(db, vid, body.sop_uid))
+    uids = _wrap(lambda: live.find_uids(db, vid, body.sop_uid, user))
     if not uids:
         raise HTTPException(status_code=404, detail="인스턴스를 찾을 수 없습니다")
-    data = _wrap(lambda: live.get_instance_bytes(live.live_client(db), *uids))
+    data = _wrap(lambda: live.get_instance_bytes(live.service_client(db), *uids))
     try:
         ds = dcmread(_io.BytesIO(data), force=True)
         return roi_statistics(ds, body.kind, body.points)
@@ -213,7 +257,7 @@ def roi_stats(vid: int, body: RoiBody, db: Session = Depends(get_db),
 def _render_with_retry(db: Session, study_uid: str, series_uid: str, sop_uid: str,
                        wc, ww, fmt: str, quality: int) -> tuple[bytes, str]:
     """캐시 유래 렌더 실패 시 캐시 무효화 후 1회 재다운로드-재시도(손상 캐시 영구 고착 방지)."""
-    client = _wrap(lambda: live.live_client(db))
+    client = _wrap(lambda: live.service_client(db))
     data = _wrap(lambda: live.get_instance_bytes(client, study_uid, series_uid, sop_uid))
     try:
         return live.render_instance(data, wc, ww, fmt=fmt, quality=quality)
@@ -253,7 +297,7 @@ def rendered(study_uid: str, series_uid: str, sop_uid: str,
 def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(get_db)):
     """썸네일 — A v2 사전생성 썸네일 프록시(실패 시 렌더 폴백)."""
     _uid(study_uid, series_uid, sop_uid)   # UID 인젝션 차단(?/ 로 인스턴스 원본 노출 방지)
-    client = _wrap(lambda: live.live_client(db))
+    client = _wrap(lambda: live.service_client(db))
     data = None
     try:
         data = client.thumbnail(study_uid, series_uid, sop_uid)

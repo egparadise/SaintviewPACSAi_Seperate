@@ -25,7 +25,7 @@ from app.services.webpacs_live import VID_BASE  # noqa: E402
 def mock_remote():
     import uvicorn
 
-    app = build_app(num_studies=2, instances_per_study=3)
+    app = build_app(num_studies=3, instances_per_study=3)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -64,16 +64,17 @@ def live_ready(mock_remote):
 
 VID1 = VID_BASE + 1
 VID2 = VID_BASE + 2
+VID3 = VID_BASE + 3
 
 
 def test_live_worklist_vids(client, auth_headers, live_ready):
     r = client.get("/api/webpacs/live/worklist", headers=auth_headers)
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["total"] == 2
+    assert data["total"] == 3
     ids = [i["id"] for i in data["items"]]
-    assert ids == [VID2, VID1]   # 최신순(study_idx desc)
-    row = data["items"][1]
+    assert ids == [VID3, VID2, VID1]   # 최신순(study_idx desc)
+    row = next(i for i in data["items"] if i["id"] == VID1)
     assert row["patient_key"] == "WPX0001"
     assert row["read_state"] == "unread" and row["status"] == "received"
     assert row["source_aet"] == "WEBPACS-LIVE"
@@ -219,3 +220,68 @@ def test_live_claim_bad_vid_not_500(client, auth_headers, live_ready):
     """vid 경계(적대검증 #6) — 로컬 id 로 claim 시 500 이 아니라 502(WebPacsError)."""
     r = client.post("/api/webpacs/live/studies/1/claim", headers=auth_headers)
     assert r.status_code == 502   # to_remote_idx → WebPacsError → 502 (500 아님)
+
+
+# ─────────────── 요구4·6: per-user A 로그인 + 실제 판독의 귀속 ───────────────
+def test_webpacs_login_per_user(client, live_ready):
+    """요구4: 원격 PACS(A) 계정으로 직접 로그인 → 그 사용자의 A 세션."""
+    r = client.post("/api/auth/webpacs-login",
+                    json={"user_id": "dr_kim", "user_passwd": "kim1234"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["a_user_name"] == "김판독" and body["a_user_idx"] == 11
+    assert body["role"] == "doctor"   # group_level 50 → 판독의
+    # 잘못된 비번은 401
+    r = client.post("/api/auth/webpacs-login",
+                    json={"user_id": "dr_kim", "user_passwd": "wrong"})
+    assert r.status_code == 401
+
+
+def test_live_report_attribution(client, live_ready):
+    """요구6: 판독이 실제 판독의(A 계정) 이름으로 A DB 에 기록."""
+    # dr_lee 로 A 로그인 → 그 세션으로 판독 저장
+    r = client.post("/api/auth/webpacs-login",
+                    json={"user_id": "dr_lee", "user_passwd": "lee1234"})
+    tok = {"Authorization": f"Bearer {r.json()['token']}"}
+    sr = {"findings": [{"organ": "판독", "observation": "정상"}],
+          "impression": [{"statement": "정상 소견"}]}
+    r = client.put(f"/api/webpacs/live/reports/{VID3}", headers=tok, json={"sr_json": sr})
+    assert r.status_code == 200, r.text
+    # A DB(모의)에 이판독 이름으로 작성자 기록
+    assert r.json()["created_by"] == "이판독"
+
+
+def test_live_cvr_and_comments(client, auth_headers, live_ready):
+    """요구6: CVR 조건부 전송(critical) · 코멘트 왕복. VID3 는 앞 테스트에서 R 저장됨(수정 저장)."""
+    sr = {"findings": [{"organ": "폐", "observation": "종괴 의심", "severity": "critical"}],
+          "impression": [{"statement": "악성 의심 — CVR"}],
+          "clinical_info": "흉통 3일", "refer_comment": "의뢰: 흉부외과"}
+    r = client.put(f"/api/webpacs/live/reports/{VID3}", headers=auth_headers, json={"sr_json": sr})
+    assert r.status_code == 200, r.text
+    # 재조회 시 코멘트가 SR 에 실려 돌아옴(왕복)
+    rep = client.get(f"/api/webpacs/live/studies/{VID3}/reports", headers=auth_headers).json()["items"][0]
+    assert rep["sr_json"]["clinical_info"] == "흉통 3일"
+    assert rep["sr_json"].get("refer_comment") == "의뢰: 흉부외과"
+
+
+def test_live_memo_priority_bookmark_pdf(client, auth_headers, live_ready):
+    """요구5: A 대응 차단기능 구현 — 메모·응급·북마크·PDF. (fresh VID VID_BASE+... 오염 회피)."""
+    from app.services.webpacs_live import VID_BASE
+    vid = VID_BASE + 1   # 판독 저장 안 된 검사 — memo/priority/bookmark 는 판독 상태 무관
+    r = client.put(f"/api/webpacs/live/studies/{vid}/memo", headers=auth_headers,
+                   json={"memo": "판독 메모 테스트"})
+    assert r.status_code == 200 and r.json()["ok"]
+    r = client.put(f"/api/webpacs/live/studies/{vid}/priority", headers=auth_headers,
+                   json={"emergency": True})
+    assert r.status_code == 200 and r.json()["emergency"] is True
+    r = client.put(f"/api/webpacs/live/studies/{vid}/bookmark", headers=auth_headers,
+                   json={"bookmark": True})
+    assert r.status_code == 200
+    # 메모(study_comment)가 상세 clinical_info 로 표시
+    d = client.get(f"/api/webpacs/live/studies/{vid}", headers=auth_headers).json()
+    assert d["clinical_info"] == "판독 메모 테스트"
+    # PDF — application/pdf 바이너리
+    r = client.get(f"/api/webpacs/live/reports/{vid}/pdf", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.content[:4] == b"%PDF"

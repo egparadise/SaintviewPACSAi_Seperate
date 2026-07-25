@@ -147,6 +147,81 @@ def session_status(db: Session = Depends(get_db), user: dict = Depends(current_u
     return st
 
 
+class WebpacsLoginRequest(BaseModel):
+    user_id: str
+    user_passwd: str
+    base_url: str = ""     # 비우면 브리지 설정(webpacs.bridge)의 주소 사용
+
+
+@router.post("/webpacs-login")
+def webpacs_login(body: WebpacsLoginRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+    """★ 원격 PACS(A: webpacs_api) 계정으로 직접 로그인 (per-user A 로그인 키스톤).
+
+    사용자가 자기 A 계정 자격을 제시하면 A `/api/user/auth/login` 으로 검증하고, 성공 시
+    B 세션(JWT)을 발급하면서 그 사용자의 A 토큰·신원(user_idx·이름·권한)을 서버에 보관한다.
+    이후 Live 의 워크리스트·판독 호출은 **이 사용자의 A 계정**으로 A 에 접근·기록한다
+    (요구4: 그 서버 계정으로 로그인 / 요구6: 판독이 실제 판독의 이름으로 A DB 기록).
+    """
+    from app.services import security_service, session_service, webpacs_session
+    from app.services.auth_service import get_settings
+    from app.services.webpacs_bridge import WebPacsClient, WebPacsError, get_bridge_config
+
+    import jwt as _jwt
+
+    ip = _client_ip(request)
+    security_service.ensure_login_allowed(db, body.user_id, ip)
+
+    cfg = get_bridge_config(db)
+    base_url = body.base_url.strip() or str(cfg.get("base_url") or "")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="원격 PACS 주소가 설정되지 않았습니다 (설정>WebPACS)")
+
+    # A 자격 검증 — 실패는 B 로그인 실패와 동일 처리(계정·IP 잠금 카운터)
+    client = WebPacsClient(base_url, body.user_id, body.user_passwd,
+                           verify_ssl=bool(cfg.get("verify_ssl", True)))
+    try:
+        try:
+            a = client.login()
+        except WebPacsError as e:
+            security_service.record_login_failure(db, body.user_id, ip)
+            raise HTTPException(status_code=401, detail=f"원격 PACS 로그인 실패: {str(e)[:160]}")
+        udata = a.get("user_data") or {}
+        a_user_idx = udata.get("user_idx")
+        a_name = str(udata.get("user_name") or udata.get("user_id") or body.user_id)
+        group_level = udata.get("group_level")
+    finally:
+        client.close()
+
+    security_service.reset_login_failures(body.user_id, ip)
+
+    # A group_level → B 역할 매핑(권한 게이트용). 98+ = 관리자급(전 권한), 그 외 = 판독의.
+    try:
+        role = "admin" if (group_level is not None and int(group_level) >= 98) else "doctor"
+    except (TypeError, ValueError):
+        role = "doctor"
+
+    # B 세션 + JWT(sid) — B Account 없이 A 신원으로 세션 구성(sub=A user_id).
+    sid = session_service.register(db, None, f"a:{body.user_id}")
+    db.commit()
+    settings = get_settings()
+    from datetime import datetime, timedelta, timezone
+    payload = {
+        "sub": body.user_id, "role": role, "uid": None, "hid": None, "sid": sid,
+        "a_user": True,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes),
+    }
+    token = _jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+    # 사용자별 A 자격 보관 — Live 호출이 이 토큰으로 A 에 접근
+    webpacs_session.put(sid, {
+        "base_url": base_url, "token": a.get("token"), "refresh": a.get("refresh_token"),
+        "a_user_id": body.user_id, "a_user_idx": a_user_idx, "a_user_name": a_name,
+        "group_level": group_level, "verify_ssl": bool(cfg.get("verify_ssl", True)), "sid": sid,
+    })
+    return {"token": token, "username": body.user_id, "role": role,
+            "a_user_name": a_name, "a_user_idx": a_user_idx}
+
+
 class ProfileBody(BaseModel):
     display_name: str = ""
     license_no: str = ""

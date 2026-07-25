@@ -85,10 +85,12 @@ function localToRow(r: LocalStudyRow): StudyRow {
 /** LOCAL 모드에서 허용되는 툴바 액션 — 그 외 서버 액션은 비활성+툴팁 */
 const LOCAL_OK_ACTIONS = new Set(["import", "csv", "print", "refresh", "logout"]);
 const LOCAL_DENIED_TIP = "LOCAL 모드 — 서버 기능 비활성 (Import/새로고침/로컬 뷰어만 사용 가능)";
-/** LIVE(WebPACS 직결) 모드 허용 액션 — 열람·판독은 원격 왕복으로 동작, 로컬 DB 전용 기능만 차단 */
+/** LIVE(WebPACS 직결) 모드 허용 액션 — 열람·판독·응급·PDF·북마크는 A 왕복으로 동작.
+ *  A 미대응(KOS/SR/GSPS/키이미지·자사 AI·파괴적 QC)만 차단 */
 const LIVE_OK_ACTIONS = new Set([
   "viewdraft", "viewer2d", "ub_view", "ub_add", "ub_stack", "ub_key",
   "compare", "compareOpen", "reading", "refresh", "csv", "print", "logout", "import",
+  "emergency", "pdf", "copyreport", "3d",   // A 대응 구현(요구5)
 ]);
 const LIVE_DENIED_TIP = "LIVE 모드(원격 PACS 직결) — 이 기능은 원격 검사에서 지원되지 않습니다";
 

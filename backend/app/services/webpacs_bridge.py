@@ -90,18 +90,24 @@ def get_bridge_config(db: Session) -> dict[str, Any]:
 class WebPacsClient:
     """webpacs_api REST + DICOMweb v2 클라이언트 (Bearer 자동 갱신)."""
 
-    def __init__(self, base_url: str, user_id: str, password: str, *,
+    def __init__(self, base_url: str, user_id: str, password: str = "", *,
                  verify_ssl: bool = True, timeout: float = 60.0,
-                 transport: httpx.BaseTransport | None = None):
+                 transport: httpx.BaseTransport | None = None,
+                 token: str | None = None, refresh_token: str | None = None,
+                 on_token: "callable | None" = None):
         if not base_url:
             raise WebPacsError("WebPACS base_url 이 설정되지 않았습니다")
         self.base_url = base_url.rstrip("/")
         self.user_id = user_id
         self.password = password
-        self._token: str | None = None
+        # per-user 모드: 사용자의 A 로그인에서 받은 토큰으로 시작하고, 만료 시 refresh 로 갱신한다.
+        # (password 는 없을 수 있음 — 그 경우 refresh 만으로 재인증, 실패 시 재로그인 요구)
+        self._token: str | None = token
+        self._refresh_token: str | None = refresh_token
+        self._on_token = on_token   # 토큰 갱신 시 세션 저장소에 반영하는 콜백(선택)
         # A 는 단일 유효 토큰(로그인마다 이전 토큰 무효화)이라, 멀티스레드(FastAPI threadpool)에서
         # 병렬 이미지 로드가 각자 재로그인하면 서로의 토큰을 무효화하는 401 폭풍이 난다.
-        # → 로그인을 락으로 직렬화 + "내가 쓴 토큰이 아직 유효할 때만" 재로그인(중복 로그인 방지).
+        # → 재인증을 락으로 직렬화 + "내가 쓴 토큰이 아직 유효할 때만" 재인증(중복 재인증 방지).
         self._auth_lock = threading.Lock()
         kw: dict[str, Any] = {"base_url": self.base_url, "timeout": timeout}
         if transport is not None:
@@ -112,10 +118,11 @@ class WebPacsClient:
 
     # ── 인증 ──────────────────────────────────────────────
     def login(self) -> dict:
+        """비밀번호 로그인(서비스 계정·미러·초기 검증). per-user 모드는 _reauth 를 통해 refresh."""
         with self._auth_lock:
-            return self._login_locked()
+            return self._password_login_locked()
 
-    def _login_locked(self) -> dict:
+    def _password_login_locked(self) -> dict:
         r = self._client.post("/api/user/auth/login", json={
             "user_id": self.user_id, "user_passwd": self.password, "user_overwrite": True,
         })
@@ -126,24 +133,64 @@ class WebPacsClient:
         if not body.get("token"):
             raise WebPacsError(f"WebPACS 로그인 거부: {body.get('message', '')} (status={body.get('status')})")
         self._token = body["token"]
+        if body.get("refresh_token"):
+            self._refresh_token = body["refresh_token"]
+        self._emit_token()
         return body
 
+    def _refresh_locked(self) -> bool:
+        """refresh 토큰으로 access 갱신(A: POST /api/user/auth/refresh, 헤더 Bearer+바디 refresh_token).
+        성공 시 True. refresh 토큰 만료·부재면 False(호출부가 password 폴백 또는 예외)."""
+        if not self._refresh_token:
+            return False
+        try:
+            r = self._client.post(
+                "/api/user/auth/refresh",
+                json={"refresh_token": self._refresh_token},
+                headers={"Authorization": f"Bearer {self._token}"} if self._token else {},
+            )
+            if r.status_code == 200:
+                tok = r.json().get("token_access")
+                if tok:
+                    self._token = tok
+                    self._emit_token()
+                    return True
+        except Exception:  # noqa: BLE001 — refresh 실패는 password 폴백/예외로 처리
+            pass
+        return False
+
+    def _reauth_locked(self) -> None:
+        """재인증 — refresh 우선, 실패 시 password 로그인. 둘 다 불가면 세션 만료 예외."""
+        if self._refresh_locked():
+            return
+        if self.password:
+            self._password_login_locked()
+            return
+        raise WebPacsError("원격 PACS 세션이 만료되었습니다 — 다시 로그인하세요")
+
+    def _emit_token(self) -> None:
+        if self._on_token and self._token:
+            try:
+                self._on_token(self._token)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _ensure_token(self) -> str:
-        """유효 토큰 확보(없으면 로그인). 반환: 요청에 사용할 토큰(경합 재시도 비교용)."""
+        """유효 토큰 확보(없으면 재인증). 반환: 요청에 사용할 토큰(경합 재시도 비교용)."""
         tok = self._token
         if tok is None:
             with self._auth_lock:
                 if self._token is None:
-                    self._login_locked()
+                    self._reauth_locked()
                 tok = self._token
         return tok or ""
 
     def _relogin_if_stale(self, used_token: str) -> None:
-        """401 재시도 전 — 내가 쓴 토큰이 아직 현재 토큰일 때만 재로그인.
-        다른 스레드가 이미 갱신했으면 그 토큰을 그대로 재사용(중복 로그인·상호 무효화 방지)."""
+        """401 재시도 전 — 내가 쓴 토큰이 아직 현재 토큰일 때만 재인증.
+        다른 스레드가 이미 갱신했으면 그 토큰을 그대로 재사용(중복 재인증·상호 무효화 방지)."""
         with self._auth_lock:
             if self._token == used_token or self._token is None:
-                self._login_locked()
+                self._reauth_locked()
 
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         h = {"Authorization": f"Bearer {self._token}"} if self._token else {}
@@ -278,6 +325,34 @@ class WebPacsClient:
         body = self._json("/api/study/study_keys", params=params or {})
         # 응답 키는 배포본에 따라 study_data/keys 다를 수 있어 방어적으로
         return body.get("study_data") or body.get("keys") or body.get("data") or []
+
+    def study_update(self, study_idx: int, fields: dict) -> dict:
+        """검사 정보 수정 — POST /api/study/ (study_comment·study_emergency 등, A Study.py)."""
+        payload = {"study_idx": study_idx, **fields}
+        r = self._authed(self._client.post, "/api/study/", json=payload)
+        if r.status_code != 200:
+            raise WebPacsError(f"검사 수정 실패 HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def study_status_change(self, study_idx: int, fields: dict) -> dict:
+        """상태/응급 변경 — POST /api/study/status (study_emergency 등, A Study.py:508)."""
+        payload = {"study_idx": study_idx, **fields}
+        r = self._authed(self._client.post, "/api/study/status", json=payload)
+        if r.status_code != 200:
+            raise WebPacsError(f"상태 변경 실패 HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def bookmark_toggle(self, study_idx: int, on: bool, book_type: str = "study") -> dict:
+        """북마크 토글 — A BookMark.py POST/DELETE /api/bookMark."""
+        if on:
+            r = self._authed(self._client.post, "/api/bookMark",
+                             json={"study_idx": study_idx, "book_type": book_type})
+        else:
+            r = self._authed(self._client.request, "DELETE", "/api/bookMark",
+                             json={"study_idx": study_idx, "book_type": book_type})
+        if r.status_code not in (200, 201, 204):
+            raise WebPacsError(f"북마크 실패 HTTP {r.status_code}: {r.text[:200]}")
+        return {"ok": True}
 
     def close(self) -> None:
         self._client.close()
