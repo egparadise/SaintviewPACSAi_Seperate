@@ -481,6 +481,26 @@ export const api = {
                  results: { filename: string; size: number; status: string }[] }>(
       `/api/import-dicom${hid ? `?hospital_id=${hid}` : ""}`, { method: "POST", body: fd });
   },
+  // ── DICOM 내보내기 — 워크리스트 선택 검사를 폴더/USB·ZIP·CD용 ISO 로 반출 ──
+  exportManifest: (studyIds: string) =>
+    req<{ studies: { id: number; patient_key: string; patient_name: string; study_date: string;
+                     modality: string; study_desc: string; count: number;
+                     files: { path: string; sop_uid: string; series_uid: string }[] }[];
+          total_files: number }>(`/api/export/manifest?study_ids=${encodeURIComponent(studyIds)}`),
+  /** 단일 DICOM — 폴더/USB 저장이 한 장씩 받아 기록한다 */
+  exportFile: async (studyId: number, sopUid: string): Promise<ArrayBuffer> => {
+    const r = await fetch(
+      `${BASE}/api/export/file?study_id=${studyId}&sop_uid=${encodeURIComponent(sopUid)}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
+    if (!r.ok) throw new Error(`영상 취득 실패 (${r.status})`);
+    return r.arrayBuffer();
+  },
+  /** ZIP·ISO 내려받기 URL — 브라우저가 직접 받도록 토큰을 쿼리로 실어 준다(다운로드는 헤더를 못 붙임) */
+  exportPackageUrl: (studyIds: string, format: "zip" | "iso") => {
+    const t = token ?? localStorage.getItem("sv_token") ?? sessionStorage.getItem("sv_token") ?? "";
+    return `${BASE}/api/export/package?study_ids=${encodeURIComponent(studyIds)}`
+         + `&format=${format}&token=${encodeURIComponent(t)}`;
+  },
   // ── WebPACS 브리지 — 인계 웹서비스(webpacs_api) 검사 탐색·가져오기 ──
   webpacsConfig: () => req<{ value: WebPacsConfig }>("/api/webpacs/config"),
   webpacsSaveConfig: (value: Partial<WebPacsConfig> & { password?: string }) =>

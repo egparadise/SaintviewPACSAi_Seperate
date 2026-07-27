@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ExportDialog } from "./ExportDialog";
 import {
   PERM_DENIED_TIP,
   VIEWER_BASE,
@@ -2409,6 +2410,7 @@ export function Worklist() {
   const [selected, setSelected] = useState<StudyDetail | null>(null);
   // 다중선택 — Shift=범위, Ctrl/Cmd=개별 토글, 일반=단일. selected(포커스)와 별개의 선택 집합.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [exportRows, setExportRows] = useState<StudyRow[] | null>(null);   // DICOM 반출 대상
   const selAnchorRef = useRef<number | null>(null);   // Shift 범위 기준점(마지막 단일/토글 클릭)
   const [compareSet, setCompareSet] = useState<CompareItem[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -3500,16 +3502,13 @@ export function Worklist() {
         })();
         break;
       }
-      case "csv": {   // Export — 현재 워크리스트를 CSV 로 (원본 Export result to file)
-        const rows = [
-          ["PatientID", "Name", "Sex", "Modality", "StudyDate", "Description", "Status"].join(","),
-          ...items.map((r) => [r.patient_key, r.patient_name, r.sex, r.modality, r.study_date,
-                               (r.study_desc ?? "").replaceAll(",", " "), r.status].join(",")),
-        ].join("\n");
-        const url = URL.createObjectURL(new Blob(["﻿" + rows], { type: "text/csv;charset=utf-8" }));
-        const a = document.createElement("a");
-        a.href = url; a.download = `worklist_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
-        URL.revokeObjectURL(url);
+      case "csv": {   // Export — 선택한 Exam 의 **DICOM 영상** 반출 (목록 CSV 는 대화상자 안에)
+        // Ctrl/Shift 다중선택이 있으면 그 전부, 없으면 지금 선택한 한 건
+        const chosen = selectedIds.size
+          ? items.filter((r) => selectedIds.has(r.id))
+          : selected ? [selected] : [];
+        if (!chosen.length) { alert("내보낼 검사를 선택하세요 (Shift·Ctrl 로 여러 건 선택)"); break; }
+        setExportRows(chosen);
         break;
       }
       case "print": window.print(); break;
@@ -3552,7 +3551,7 @@ export function Worklist() {
     { i: "🧊", l: "3D — MPR/MIP 뷰어", a: "3d" },
     { i: "⇄", l: "Compare — 뷰어에서 과거검사 선택 비교(모달) 열기", a: "compareOpen" },
     { i: "📥", l: "Import — DICOM 파일 업로드(Orthanc)", a: "import" },
-    { i: "📤", l: "Export — 워크리스트 CSV 내보내기", a: "csv" },
+    { i: "📤", l: "Export — 선택 검사의 DICOM 내보내기 (CD/USB/폴더)", a: "csv" },
     { i: "🖨", l: "Print — 화면 인쇄", a: "print" },
     { i: "📄", l: "Report — 판독서 PDF 내려받기", a: "pdf" },
     { i: "📝", l: "Report 창 — 판독 작성 창 열기(선택 검사)", a: "reading" },
@@ -3593,7 +3592,7 @@ export function Worklist() {
                            {([
                              ["reading", "📝 Reading", "Report 창 — 판독 작성 창 열기(선택 검사)"],
                              ["import", "📥 Import", "Import — DICOM 파일/폴더 업로드(Orthanc)"],
-                             ["csv", "📤 Export", "Export — 워크리스트 CSV 내보내기"],
+                             ["csv", "📤 Export", "Export — 선택 검사의 DICOM 내보내기 (CD/USB/폴더)"],
                              ["print", "🖨 Print", "Print — 화면 인쇄"],
                              ["pdf", "📄 PDF", "판독서 PDF"],
                              ["emergency", "⚠ Emergency", "응급 우선순위 토글 (F-15)"],
@@ -3711,6 +3710,10 @@ export function Worklist() {
           <b>{selectedIds.size}개 Exam 선택됨</b>
           <button style={{ padding: "2px 10px" }} onClick={() => { setSelectedIds(new Set(items.map((r) => r.id))); selAnchorRef.current = items[0]?.id ?? null; }}>모두 선택</button>
           <button style={{ padding: "2px 10px" }} onClick={() => { setSelectedIds(new Set(selected ? [selected.id] : [])); selAnchorRef.current = selected?.id ?? null; }}>선택 해제</button>
+          <button className="primary" style={{ padding: "2px 10px" }}
+                  onClick={() => setExportRows(items.filter((r) => selectedIds.has(r.id)))}>
+            📤 DICOM 내보내기
+          </button>
           <span style={{ marginLeft: "auto", color: "var(--text-secondary)", fontSize: 11 }}>
             Shift+클릭 = 범위 · Ctrl/Cmd+클릭 = 개별 토글
           </span>
@@ -3911,6 +3914,24 @@ export function Worklist() {
         <span style={{ marginLeft: "auto" }}>{new Date().toLocaleString("ko-KR")}</span>
       </footer>
 
+      {exportRows && (
+        <ExportDialog rows={exportRows} onClose={() => setExportRows(null)}
+                      onCsv={() => {
+                        // 예전 Export(목록 CSV)도 남겨 둔다 — 영상이 아니라 표가 필요할 때
+                        const rows = [
+                          ["PatientID", "Name", "Sex", "Modality", "StudyDate", "Description", "Status"].join(","),
+                          ...items.map((r) => [r.patient_key, r.patient_name, r.sex, r.modality, r.study_date,
+                                               (r.study_desc ?? "").replaceAll(",", " "), r.status].join(",")),
+                        ].join("\n");
+                        const url = URL.createObjectURL(
+                          new Blob([String.fromCharCode(0xfeff) + rows], { type: "text/csv;charset=utf-8" }));
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `worklist_${new Date().toISOString().slice(0, 10)}.csv`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                      }} />
+      )}
       {batchOpen && <BatchReviewModal onClose={() => setBatchOpen(false)} onDone={() => setRefreshKey((k) => k + 1)} />}
       {importOpen && (
         <Suspense fallback={null}>

@@ -23,6 +23,25 @@ def current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="유효하지 않은 토큰입니다")
 
 
+def download_user(
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    token: str = "",
+) -> dict:
+    """다운로드 전용 인증 — 헤더가 없으면 ?token= 을 받는다.
+
+    브라우저의 파일 내려받기(location 이동·<a download>)는 Authorization 헤더를 붙일 수 없다.
+    그래서 이 통로만 쿼리 토큰을 허용한다. 검증은 current_user 와 같은 decode_token 이고,
+    쓰는 곳은 반출 패키지(ZIP/ISO) 하나뿐이다.
+    """
+    raw = creds.credentials if creds else token
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="인증이 필요합니다")
+    try:
+        return decode_token(raw)
+    except pyjwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="유효하지 않은 토큰입니다")
+
+
 def admin_user(user: dict = Depends(current_user)) -> dict:
     if user.get("role") != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="관리자 권한이 필요합니다")
@@ -62,4 +81,5 @@ def require_effective(perm: str):
 
 
 DbSession = Depends(get_db)
-__all__ = ["current_user", "admin_user", "require_perm", "require_effective", "get_db", "Session"]
+__all__ = ["current_user", "download_user", "admin_user", "require_perm", "require_effective",
+           "get_db", "Session"]
