@@ -40,3 +40,23 @@ export function pageLabel(page: number, total: number, size: number): string {
   const { from, to } = pageRange(page, total, size);
   return `${from + 1}–${to} / ${total}`;
 }
+
+// ── Image 분할(타일) 인덱스 정렬 ─────────────────────────────────────────
+/** 타일 분할에서 페인의 시작 인덱스를 **페이지 경계에 맞춘다**.
+ *
+ *  왜 필요한가: 타일은 `index, index+1, … index+tiles-1` 을 그린다. index 가 경계에 안 맞으면
+ *  마지막 타일이 시리즈 범위를 넘어가 **빈 칸**이 된다.
+ *  실제 사례 — 2장짜리 CR 을 1×2 로 걸었는데 index 가 1(가운데)이라 `1,2` 를 그려
+ *  두 번째 장만 보였다(2번이 없으므로). 0 으로 맞추면 `0,1` 이 되어 둘 다 보인다.
+ *
+ *  끝 쪽도 맞춘다: total 이 주어지면 마지막 페이지를 넘지 않게 잘라 낸다. */
+export function snapTileIndex(index: number, tiles: number, total?: number): number {
+  const t = Math.max(1, Math.floor(tiles));
+  if (t <= 1) return Math.max(0, Math.floor(index));
+  let i = Math.max(0, Math.floor(index));
+  if (typeof total === "number" && total > 0) {
+    const lastStart = Math.max(0, Math.floor((total - 1) / t) * t);
+    i = Math.min(i, lastStart);
+  }
+  return Math.floor(i / t) * t;
+}

@@ -17,7 +17,7 @@ import { api, openViewer, type Anno, type GspsItem, type InstanceNode, type Seri
 import { annoLabel, measureAnno } from "../lib/annotations";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
-import { clampPage, lastPage, pageLabel } from "../lib/seriesPage";
+import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -359,6 +359,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [sLayout, setSLayout] = useState<{ r: number; c: number }>({ r: 1, c: 1 });
   // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
   const [srsPage, setSrsPage] = useState(0);
+  /** Image 분할 변경 — index 를 페이지 경계에 맞춰야 마지막 타일이 빈 칸이 되지 않는다 */
+  const setPaneIl = (pi: number, il: { r: number; c: number }) =>
+    setPanes((prev) => prev.map((p, i) => (i === pi
+      ? { ...p, il, index: snapTileIndex(p.index, Math.max(1, il.r * il.c), p.series?.instances.length) }
+      : p)));
   const [panes, setPanes] = useState<Pane[]>([initPane()]);
   const [active, setActive] = useState(0);
   const [tool, setTool] = useState<Tool>("select");
@@ -701,6 +706,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                    && (hangList[0].series[0]?.instances.length ?? 0) >= 9) {
             p.il = { r: 3, c: 3 };   // 설정 없을 때 기본 행잉 (원본)
           }
+          // 타일 분할이면 index 를 페이지 경계로 — 안 그러면 마지막 타일이 빈 칸이 된다
+          p.index = snapTileIndex(p.index, Math.max(1, p.il.r * p.il.c), s0?.instances.length);
           return applyPStateToPane(p);   // 저장된 표시상태(W/L·방향·필터·셔터) 재현
         }
         const ex = hangList[i];
@@ -833,6 +840,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     setPanes((ps) => ps.map((p) => ({
       ...p,
       il: { r: Math.min(rule.i.r, 10), c: Math.min(rule.i.c, 10) },
+      index: snapTileIndex(0, Math.max(1, Math.min(rule.i.r, 10) * Math.min(rule.i.c, 10))),
       ...(rule.wl !== undefined ? { wl: rule.wl ?? "" } : {}),
     })));
     // 옵션 → Crosslink/스크롤 동기/Scout (정의된 것만 반영)
@@ -3090,7 +3098,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           <GridPicker label="Series" max={10} value={sLayout}
                       onPick={(v) => applySLayout({ r: Math.min(v.r, 10), c: Math.min(v.c, 10) })} />
           <GridPicker label="Image" max={10} value={panes[active]?.il ?? { r: 1, c: 1 }}
-                      onPick={(v) => upd(active, { il: { r: Math.min(v.r, 10), c: Math.min(v.c, 10) } })} />
+                      onPick={(v) => setPaneIl(active, { r: Math.min(v.r, 10), c: Math.min(v.c, 10) })} />
           <button title="3D — 현재 검사의 MPR/MIP 볼륨 뷰어 열기"
                   onClick={() => setShow3d(true)}
                   style={{ marginLeft: 8, padding: "2px 12px", fontSize: 12, fontWeight: 700 }}>
@@ -3149,7 +3157,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
               </label>
               <select value={`${panes[active]?.il.r ?? 2}x${panes[active]?.il.c ?? 2}`}
                       title="MG 배치 — Image layout"
-                      onChange={(e) => { const v = toRC(e.target.value); setSLayout({ r: 1, c: 1 }); upd(active, { il: v }); }}
+                      onChange={(e) => { const v = toRC(e.target.value); setSLayout({ r: 1, c: 1 }); setPaneIl(active, v); }}
                       style={{ fontSize: 11, padding: "0 2px" }}>
                 {MG_LAYOUTS.map((l) => <option key={l} value={l}>{l.replace("x", "×")}</option>)}
                 {!(MG_LAYOUTS as readonly string[]).includes(`${panes[active]?.il.r}x${panes[active]?.il.c}`) && (
@@ -3200,7 +3208,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                       if (rule) applyHpIn(rule);
                     }
                     else if (v === "stack") { applySLayout({ r: 1, c: 1 }); upd(0, { il: { r: 1, c: 1 } }); setHpName("기본"); }
-                    else if (v === "tile") { applySLayout({ r: 1, c: 1 }); upd(0, { il: { r: 3, c: 3 } }); setHpName("기본"); }
+                    else if (v === "tile") { applySLayout({ r: 1, c: 1 }); setPaneIl(0, { r: 3, c: 3 }); setHpName("기본"); }
                     else if (v === "cmp") { applySLayout({ r: 1, c: 2 }); setHpName("기본"); }
                     e.target.value = "";
                   }} style={{ fontSize: 10 }}>

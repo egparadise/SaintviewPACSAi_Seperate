@@ -22,7 +22,7 @@ import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu
 import { IN_MOUSE_OPS } from "../lib/infiConfig";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
-import { clampPage, lastPage, pageLabel } from "../lib/seriesPage";
+import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
@@ -494,6 +494,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [layout, setLayout] = useState<keyof typeof LAYOUTS>("1x1");
   // Image Layout — 페인 내부 이미지 분할(연속 이미지 N×M 타일, UBPACS)
   const [imgLay, setImgLay] = useState({ r: 1, c: 1 });
+  /** Image 분할을 바꿀 때는 **index 도 페이지 경계에 맞춰야** 한다.
+   *  안 맞추면 마지막 타일이 시리즈 범위를 넘어 빈 칸이 된다
+   *  (2장짜리 CR 을 1×2 로 걸었는데 index=1 이라 둘째 장만 보이던 문제). */
+  const setPaneIl = useCallback((pid: string, il: { r: number; c: number }) => {
+    setPanes((prev) => {
+      const p = prev[pid];
+      if (!p) return prev;
+      const tiles = Math.max(1, il.r * il.c);
+      return { ...prev, [pid]: { ...p, il,
+        index: snapTileIndex(p.index, tiles, p.series?.instances.length) } };
+    });
+  }, []);
   // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
   const [srsPage, setSrsPage] = useState(0);   // 콤보 표시용 — 실제 적용은 페인별 il
   // 2D 행잉(모달리티→Image 분할) 기본 il — 검사 열 때 페인에 적용(prefs 로드에서 해석)
@@ -975,7 +987,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const sg = vd?.grid ?? rule.s;
     const key = `${Math.min(sg.r, 10)}x${Math.min(sg.c, 10)}`;
     if (LAYOUTS[key]) setLayout(key);
-    setImgLay({ r: Math.min(rule.i.r, 10), c: Math.min(rule.i.c, 10) });
+    {
+      const il = { r: Math.min(rule.i.r, 10), c: Math.min(rule.i.c, 10) };
+      setImgLay(il);
+      const tiles = Math.max(1, il.r * il.c);
+      setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, pp]) => [k, { ...pp, il,
+        index: snapTileIndex(pp.index, tiles, pp.series?.instances.length) }])));
+    }
     if (rule.wl !== undefined) {
       setPanes((prev) => Object.fromEntries(
         Object.entries(prev).map(([k, p]) => [k, { ...p, wl: rule.wl ?? "" }])));
@@ -1032,7 +1050,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (ig) {
         setImgLay(ig);
         // 이미 생성된 페인에도 즉시 적용(prefs 로드가 시리즈 로드보다 늦은 경우)
-        setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, pp]) => [k, { ...pp, il: ig }])));
+        setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, pp]) => [k, { ...pp, il: ig,
+          index: snapTileIndex(pp.index, Math.max(1, ig.r * ig.c), pp.series?.instances.length) }])));
       }
       // TY 팔레트·오버레이 개인화 키 소비 (viewer.prefs 통짜 — 계정 로밍)
       const t = r.value as {
@@ -1184,8 +1203,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             // Mammo 는 표준 4-view 배치, 그 외는 순서대로
             const s = mammoSeries ? (mammoSeries[i] ?? null) : imgSeries[i];
             next[pid] = s
-              ? applyPState({ ...initPane(detail.study_uid), series: s,
-                  index: Math.floor(s.instances.length / 2), wl: ai?.q ?? "",
+              ? applyPState({ ...initPane(detail.study_uid), series: s, wl: ai?.q ?? "",
+                  // 타일 분할이면 index 를 페이지 경계로 — 안 그러면 마지막 타일이 빈 칸이 된다
+                  index: snapTileIndex(Math.floor(s.instances.length / 2),
+                    Math.max(1, (hang2dImgRef.current?.r ?? 1) * (hang2dImgRef.current?.c ?? 1)),
+                    s.instances.length),
                   il: hang2dImgRef.current ?? undefined })   // 모달리티 기본 Image 분할
               : initPane(detail.study_uid);
           });
@@ -4080,7 +4102,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                     value={{ r: LAYOUTS[layout].rows, c: LAYOUTS[layout].cols }}
                     onPick={(v) => setLayout(`${v.r}x${v.c}`)} />
         <GridPicker label="Img" max={10} value={imgLay}
-                    onPick={(v) => { setImgLay(v); patch(activePane, { il: v }); }} />
+                    onPick={(v) => { setImgLay(v); setPaneIl(activePane, v); }} />
         {/* 오픈 검사 탭 — 좌→우로 쌓임. 클릭=활성 페인에 표시, ✕=닫기(주 검사로 복귀) */}
         <div style={{ display: "flex", gap: 2, alignSelf: "flex-end", overflowX: "auto", maxWidth: "55%" }}>
           {openTabs.map((t) => {
