@@ -57,6 +57,9 @@ INCLUDE_FILES = [
     "deploy/gen_prod_conf.py",
     "deploy/hospital-orthanc.template.yml",
     "deploy/README_PILOT.md",
+    # ⚡ 운영 nginx 설정 — 이게 빠져 있으면 현장에서 gzip·캐시가 꺼진 채로 서비스된다
+    #    (실측: 미적용 서버가 index-*.js 823KB 를 무압축 전송. QUICKSTART §7 참조)
+    "deploy/nginx-viewer.conf",
 ]
 # 시크릿·개인키 — 패키지에 절대 포함 금지(포함 시 빌드 실패)
 FORBIDDEN = ["backend/.env", "frontend/certs/dev.key", "frontend/certs/dev.crt"]
