@@ -134,12 +134,23 @@ A 서버는 손대지 않습니다.
 | **JS 무압축 전송** (823KB 그대로) | 브라우저 F12 > 네트워크 > `index-*.js` 의 "전송" ≈ "크기" 면 무압축 | 아래 스크립트 한 줄 → **823KB → 220KB** |
 | **자산 캐시 없음** | 응답 헤더에 `Cache-Control` 없음 | 같은 파일의 `/assets/` 블록(`immutable, max-age=1y`) 적용 → 재방문 시 재검증 0회 |
 
-**적용 (서버에서 한 줄)** — 기존 `server { }` 블록은 건드리지 않는다.
+**① 먼저 진단** — 서버에 들어가지 않고 **아무 PC 에서나** 현 상태를 판정한다.
+
+```bash
+sh deploy/patch_nginx.sh --check https://<주소>
+```
+
+gzip / brotli / 자산 캐시 / index.html / 304 를 각각 ✅❌ 로 알려 주고, 손댈 게 없으면
+"모두 적용돼 있습니다" 로 끝난다.
+
+**② 필요할 때만 적용 (서버에서)** — 기존 `server { }` 블록은 **건드리지 않는다**.
 `conf.d` 에 http 컨텍스트 드롭인 한 장만 넣고, `nginx -t` 실패 시 자동 원복한다.
 
 ```bash
-sudo sh deploy/apply_nginx.sh https://<주소>
+sudo sh deploy/patch_nginx.sh --apply https://<주소>
 ```
+
+미리보기 `--dry-run` · 되돌리기 `--rollback`(파일 하나 삭제).
 
 Windows nginx 라면:
 
@@ -154,7 +165,7 @@ curl -sI https://<주소>/assets/index-XXXX.js | grep -iE "content-encoding|cach
 #  → content-encoding: gzip  와  cache-control: ...immutable  이 나와야 정상
 ```
 
-되돌리기: `sudo rm /etc/nginx/conf.d/zz-saintview-gzip.conf && sudo nginx -s reload`
+되돌리기: `sudo sh deploy/patch_nginx.sh --rollback`
 
 빌드가 `.gz`/`.br` 를 함께 만들어 두므로 `gzip_static on;` 이면 **런타임 CPU 없이** 압축본이 나간다.
 
@@ -168,7 +179,7 @@ curl -sI https://<주소>/assets/index-XXXX.js | grep -iE "content-encoding|cach
 **⑦ 서버 압축(gzip)** — 브라우저가 실제로 받은 바이트와 압축 해제 후 크기를 비교해 판정한다.
 
 자주 나오는 판정:
-- 🔴 *서버 gzip 이 꺼져 있습니다* → 위 `apply_nginx.sh` 한 줄
+- 🔴 *서버 gzip 이 꺼져 있습니다* → 위 `patch_nginx.sh --apply` 한 줄
 - 🔴 *개발(dev) 모드로 서빙 중* → 서버에서 `start_viewer_suite.bat`(인자 없이) 재기동
 - 🔴 *첫 영상이 큰 PNG* → 설정 > 병원 설정 > 뷰어 영상 형식을 **JPEG(품질 90)** 로
 - 🟠 *서버 왕복이 큼* → 회선/거리 문제. 프리페치·캐시가 2회차부터 흡수

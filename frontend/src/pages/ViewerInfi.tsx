@@ -360,6 +360,14 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [sLayout, setSLayout] = useState<{ r: number; c: number }>({ r: 1, c: 1 });
   // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
   const [srsPage, setSrsPage] = useState(0);
+  // ── 검사별 화면 구성 기억(세션) ────────────────────────────────────────
+  // 사용자가 화면에서 즉흥적으로 잡은 구성(Series/Image 분할·어느 페인에 어느 시리즈·현재 장·
+  // W/L·확대·회전…)은 **설정에 저장한 것이 아니어도** 탭을 오갈 때 유지돼야 한다.
+  // 예전엔 그 검사의 페인이 화면에 없으면 전체를 기본 행잉으로 다시 깔아 구성이 날아갔다.
+  // 창을 닫기 전까지는 검사별로 그대로 기억한다.
+  const examViewRef = useRef<Record<number, {
+    sLayout: { r: number; c: number }; panes: Pane[]; active: number; srsPage: number;
+  }>>({});
   /** Image 분할 변경 — index 를 페이지 경계에 맞춰야 마지막 타일이 빈 칸이 되지 않는다 */
   const setPaneIl = (pi: number, il: { r: number; c: number }) =>
     setPanes((prev) => prev.map((p, i) => (i === pi
@@ -2270,11 +2278,24 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const switchExam = (i: number) => {
     const ex = exams[i];
     if (!ex) return;
+    // 떠나기 전 지금 구성을 이 검사 몫으로 저장 — 되돌아오면 그대로 복원한다
+    examViewRef.current[curD.id] = {
+      sLayout, panes: panesRef.current, active, srsPage,
+    };
     setActiveExam(i);
     setSeries(ex.series);
     const pi = panes.findIndex((p) => p.studyUid === ex.d.study_uid);
+    const memo = examViewRef.current[ex.d.id];
     if (pi >= 0) {
       setActive(pi);
+    } else if (memo) {
+      // 이 검사에서 보던 구성이 있으면 **기본 행잉 대신 그것을 되살린다**
+      setMaximized(null);
+      setSLayout(memo.sLayout);
+      setPanes(memo.panes);
+      setActive(memo.active);
+      setSrsPage(memo.srsPage);
+      setToast("이 검사에서 보던 화면 구성을 복원했습니다");
     } else {
       setMaximized(null);
       setPanes((ps) => ps.map((_, k) => applyPStateToPane({ ...initPane(ex.d.study_uid), series: ex.series[k] ?? null })));

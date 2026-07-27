@@ -60,9 +60,10 @@ INCLUDE_FILES = [
     # ⚡ 운영 nginx 설정 — 이게 빠져 있으면 현장에서 gzip·캐시가 꺼진 채로 서비스된다
     #    (실측: 미적용 서버가 index-*.js 823KB 를 무압축 전송. QUICKSTART §7 참조)
     "deploy/nginx-viewer.conf",
-    # 위 설정을 한 줄로 적용하는 스크립트(server 블록 무수정 드롭인 + 문법검사 + 검증)
-    "deploy/apply_nginx.sh",
-    "deploy/apply_nginx.ps1",
+    # 전송 최적화 패치(자립 스크립트) — 원격 진단(--check)·적용(--apply)·되돌리기(--rollback).
+    # server 블록을 편집하지 않고 conf.d 드롭인 한 장만 쓰므로 되돌리기가 파일 삭제 하나다.
+    "deploy/patch_nginx.sh",
+    "deploy/apply_nginx.ps1",   # Windows nginx 용(셸 스크립트가 안 도는 환경)
 ]
 # 시크릿·개인키 — 패키지에 절대 포함 금지(포함 시 빌드 실패)
 FORBIDDEN = ["backend/.env", "frontend/certs/dev.key", "frontend/certs/dev.crt"]

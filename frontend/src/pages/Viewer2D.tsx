@@ -636,6 +636,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     Object.fromEntries(PANE_IDS.map((p) => [p, initPane(detail.study_uid)])),
   );
   const [selSeries, setSelSeries] = useState<string | null>(null);
+  // ── 검사별 화면 구성 기억(세션) ────────────────────────────────────────
+  // 사용자가 화면에서 즉흥적으로 잡은 구성(Series/Image 분할·어느 페인에 어느 시리즈·현재 장·
+  // W/L·확대·회전…)은 **설정에 저장한 것이 아니어도** 탭을 오갈 때 유지돼야 한다.
+  // 예전엔 다른 환자 검사로 전환하면 hangAll() 이 기본 행잉으로 전체를 다시 깔아 사용자가
+  // 잡아 둔 구성이 통째로 날아갔다. 창을 닫기 전까지는 검사별로 그대로 기억한다.
+  interface ExamView { layout: keyof typeof LAYOUTS; imgLay: { r: number; c: number };
+                       panes: Record<string, PaneState>; activePane: string; srsPage: number }
+  const examViewRef = useRef<Record<number, ExamView>>({});
+  // 지금 화면이 보여 주는 검사 — 판독창·상단 정보가 이 값을 따라간다(영상만 바뀌고 판독이
+  // 이전 검사에 머물러 있던 문제). 창을 연 검사(detail)와 다를 수 있다.
+  const [activeExamId, setActiveExamId] = useState<number>(detail.id);
+  const [examDetails, setExamDetails] = useState<Record<number, StudyDetail>>({ [detail.id]: detail });
   // 기본 툴은 항상 Select — 시작·해제 공통(In-View 정합). Zoom/Pan/W/L 은 사용자가 명시 선택 시에만
   const [mouseMode, setMouseMode] = useState<"wl" | "zoom" | "pan" | "select" | "scroll">("select");
   // 팔레트 섹션 — 기본 전체 펼침(헤더 클릭으로 개별 접기)
@@ -1309,6 +1321,32 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setSelPanes(new Set());
   };
 
+  /** 지금 화면 구성을 이 검사 몫으로 저장 — 탭을 떠나기 직전에 부른다 */
+  const saveExamView = (id: number) => {
+    examViewRef.current[id] = {
+      layout, imgLay, panes: panesRef.current, activePane, srsPage,
+    };
+  };
+  /** 기억해 둔 구성 복원. 없으면 false(호출부가 기본 행잉을 한다) */
+  const restoreExamView = (id: number): boolean => {
+    const v = examViewRef.current[id];
+    if (!v) return false;
+    setLayout(v.layout);
+    setImgLay(v.imgLay);
+    setPanes(v.panes);
+    setActivePane(v.activePane);
+    setSrsPage(v.srsPage);
+    return true;
+  };
+  /** 판독창·상단 정보가 지금 보는 검사를 따라가게 한다(없으면 1회 조회해 캐시) */
+  const focusExam = (id: number) => {
+    setActiveExamId(id);
+    if (examDetails[id]) return;
+    api.study(id, { related: false })
+      .then((d) => setExamDetails((m) => (m[id] ? m : { ...m, [id]: d })))
+      .catch(() => {});
+  };
+
   const loadIntoActive = async (id: number) => {
     const isMain = id === detail.id;
     try {
@@ -1330,13 +1368,22 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         return !!k && k !== targetKey;
       });
       if (mixed) {
-        // 다른 환자로의 전환 — 활성 페인만 바꾸면 이전 환자 영상이 격자에 남아 섞이므로 전체 재행잉
-        hangAll(tree.uid, tree.series);
-        setStatus("검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다 (혼합 비교는 ⇄ Compare/+Add 사용)");
+        // 다른 환자로의 전환 — 활성 페인만 바꾸면 이전 환자 영상이 격자에 남아 섞이므로 화면 전체를 바꾼다.
+        // ⚠ 떠나기 전에 지금 구성을 저장하고, 대상 검사에 기억해 둔 구성이 있으면 **그것을 되살린다**.
+        //    (예전엔 무조건 기본 행잉이라 사용자가 잡아 둔 구성이 매번 날아갔다)
+        saveExamView(activeExamId);
+        if (restoreExamView(id)) {
+          setStatus("검사 전환 — 이 검사에서 보던 화면 구성을 복원했습니다");
+        } else {
+          hangAll(tree.uid, tree.series);
+          setStatus("검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다 (혼합 비교는 ⇄ Compare/+Add 사용)");
+        }
+        focusExam(id);   // 판독창·상단 정보도 이 검사로
         return;
       }
       const s = tree.series[0];
       patch(activePane, { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
+      focusExam(id);
     } catch { setStatus("검사 전환 실패"); }
   };
   loadIntoActiveRef.current = loadIntoActive;  // 동기 리스너에서 최신 클로저 사용
@@ -4423,8 +4470,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                            background: "var(--bg-elevated)", border: "none", borderLeft: "1px solid var(--border)" }}>▸</button>
         )}
         {/* 판독 도크 — 공유 컴포넌트 (리포트 로드/저장/승인/상용구/단축키 내장) */}
+        {/* 판독창은 **지금 보는 검사**를 따라간다 — 영상만 바뀌고 판독이 이전 검사에
+            머물러 있으면 다른 검사의 판독을 그 환자 것으로 오인한다(안전 문제). */}
         {prefs.reportDock && !reportCollapsed && (
-          <ReportDock detail={detail} width={prefs.dockW}
+          <ReportDock detail={examDetails[activeExamId] ?? detail} width={prefs.dockW}
                       onLoadPrior={(id) => {
                         // Setting>판독 '과거검사 비교 표시' — monitor: 인접 모니터(다음, 끝번이면 이전) 창.
                         // 실패/단일/미감지 시 Layout(1:2 분할 loadPrior)로 폴백. 라벨: 이 창=M, 인접 창=S1.
