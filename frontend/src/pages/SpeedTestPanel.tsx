@@ -133,7 +133,7 @@ export function SpeedTestPanel() {
       if (srvGzip === false) {
         v.push("🔴 **서버 gzip 이 꺼져 있습니다** — 앱 번들이 무압축으로 전송됩니다(약 4배). "
              + "영상 이전에 화면이 뜨는 것 자체가 늦어집니다. 서버에서 아래 한 줄이면 됩니다:\n"
-             + "  sudo sh deploy/apply_nginx.sh " + location.origin + "\n"
+             + "  sudo sh deploy/patch_nginx.sh --apply " + location.origin + "\n"
              + "  (Windows nginx: powershell -File deploy\\apply_nginx.ps1 -NginxDir C:\\nginx)");
       }
       if (!v.length) v.push(`🟢 정상 — 첫 영상까지 ${fmt(tFirst)}. 목표(DR 1s·CT 3s) 내입니다.`);
