@@ -9,6 +9,8 @@ import { GridPicker } from "../lib/GridPicker";
 import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, TOOLBAR_DEFS, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
 import { IN_PALETTE } from "../lib/infiConfig";
 import { DEFAULT_MG_CFG, MG_LAYOUTS, readMgCfg, type MgCfg } from "../lib/mgHang";
+import { OverlayLayoutEditor } from "../components/OverlayLayoutEditor";
+import { normCorners, type CornerMap } from "../lib/overlayFields";
 import { screenApiIssue } from "../lib/screens";
 import { SC_ACTIONS, SC_DEFAULTS, displayKey } from "../lib/shortcutDefs";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -233,6 +235,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   // 오류 기록(정보 탭) — 화면 백지화 원인이 새로고침으로 사라지지 않게 보관한 것
   const [crashes, setCrashes] = useState<CrashEntry[]>([]);
+  // 영상 위 4모서리 오버레이 구성 — 모달리티별(viewer.prefs.overlay_by_modality)
+  const [ovlCfg, setOvlCfg] = useState<Record<string, CornerMap>>({});
   // Live(원격 PACS 직결) 접속 설정 — 웹 서버 설정과 같은 자리에서 등록한다(워크리스트 팝업에만
   // 있던 것을 옮김). 비밀번호는 서버가 마스킹해 내려주므로 빈 칸이면 기존 값을 유지한다.
   const [lv, setLv] = useState<{ enabled: boolean; base_url: string; user_id: string;
@@ -433,6 +437,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (vv.hanging2d_common_on !== undefined) setH2dCommonOn(!!vv.hanging2d_common_on);
       if (vv.hanging2d_by_viewer) setH2dByViewer(vv.hanging2d_by_viewer);
       setMgCfg(readMgCfg((v as { mg_hang?: unknown }).mg_hang));
+      {
+        const raw = (v as { overlay_by_modality?: Record<string, unknown> }).overlay_by_modality;
+        if (raw && typeof raw === "object") {
+          setOvlCfg(Object.fromEntries(Object.entries(raw).map(([k, val]) => [k, normCorners(val)])));
+        }
+      }
       if (v.reportDock !== undefined) setReportDock(v.reportDock);
       const tb = (v as { toolbar?: Record<string, boolean> }).toolbar;
       if (tb) setTbConfig(tb);
@@ -541,6 +551,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       hanging2d_common_on: h2dCommonOn,
       hanging2d_by_viewer: h2dByViewer,
       mg_hang: mgCfg,
+      overlay_by_modality: ovlCfg,
       client_viewer: clientViewer,
       compare: cmpCfg,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
@@ -1800,6 +1811,17 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     </span>
                   </Row>
                 </div>
+              </Group>
+            )}
+            {page === "viewer" && (
+              <Group title="영상 정보 표시 (모서리 오버레이) — 모달리티별">
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 7, lineHeight: 1.7 }}>
+                  DICOM 헤더의 환자·검사·시리즈·영상 정보를 영상 상자의 <b>네 귀퉁이 중 어디에</b> 보일지
+                  정합니다. <b>모달리티마다 다르게</b> 지정할 수 있습니다(CT 는 슬라이스 두께, MG 는 좌우·자세 등).
+                  Image 분할에서는 <b>칸마다</b> 그 칸의 영상 기준으로 표시됩니다.
+                  SaintView·I-View·T-View 공통으로 적용됩니다.
+                </div>
+                <OverlayLayoutEditor cfg={ovlCfg} onChange={setOvlCfg} />
               </Group>
             )}
             {(page === "viewerTy" || page === "viewerSv") && (

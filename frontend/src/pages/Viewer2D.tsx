@@ -24,6 +24,7 @@ import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageForma
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { TileGridLines } from "../components/TileGridLines";
+import { CORNERS, cornerLines, cornersFor, type OverlaySource } from "../lib/overlayFields";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
@@ -663,6 +664,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [mgBoxes, setMgBoxes] = useState<Record<string, MgProbe>>({});   // SOP → 조직 경계 탐지 결과
   const [prevDone, setPrevDone] = useState<Record<string, true>>({});   // 원본이 한 번 뜬 SOP
   const [mgReady, setMgReady] = useState(false);   // viewer.prefs 로드 완료(행잉 경합 방지)
+  // 모서리 오버레이 구성(모달리티별) — 설정 > 뷰어 공통 > 영상 정보 표시
+  const [ovlCfg, setOvlCfg] = useState<Record<string, unknown>>({});
   const { sizes: tileSizes, sizeRef } = useTileSizes();
   // window 리스너(빈 deps) 안의 드래그 경로가 최신 보정 함수를 쓰도록 — 아래 mgAt 정의 후 대입
   const mgAtRef = useRef<(p: PaneState, rect: { width: number; height: number }) => PaneState>((p) => p);
@@ -1028,6 +1031,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         mg_hang?: unknown;
       };
       // 2D-MG(유방 여백 제거) — 체크 초기값·기본 Image layout. 실제 MG 행잉 적용은 아래 전용 effect
+      const oc = (v as { overlay_by_modality?: Record<string, unknown> }).overlay_by_modality;
+      if (oc && typeof oc === "object") setOvlCfg(oc);
       const mg = readMgCfg(v.mg_hang);
       setMgCfg(mg);
       setMgOn(mg.on);
@@ -3003,6 +3008,41 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setMgBoxes((m) => (m[sop] ? m : { ...m, [sop]: b }));
   };
 
+  /** 설정에 따른 4모서리 오버레이 — 값이 없는 항목은 그리지 않는다 */
+  const renderCorners = (src: OverlaySource, font: number) => {
+    const map = cornersFor(ovlCfg, src.modality || src.series_modality);
+    return (
+      <>
+        {CORNERS.map((c) => {
+          const lines = cornerLines(map[c], src);
+          if (!lines.length) return null;
+          return (
+            <div key={c} style={ov(c, font)}>
+              {lines.map((t, i) => <div key={i}>{t}</div>)}
+            </div>
+          );
+        })}
+      </>
+    );
+  };
+  /** 페인/타일 → 오버레이에 넣을 값 모음 */
+  const srcOf = (p: PaneState, inst: InstanceNode | undefined, idx: number, zoom: number): OverlaySource => {
+    const m = studyMeta[p.studyUid] ?? detail;
+    return {
+      patient_name: m.patient_name, sex: m.sex, patient_key: m.patient_key,
+      study_date: m.study_date, study_desc: m.study_desc,
+      body_part: (m as { body_part?: string }).body_part, modality: m.modality,
+      accession: (m as { accession?: string }).accession,
+      series_number: p.series?.series_number, series_desc: p.series?.series_desc,
+      series_modality: p.series?.modality,
+      image_no: inst ? idx + 1 : undefined, image_total: p.series?.instances.length,
+      rows: inst?.rows, cols: inst?.cols, pixel_spacing: inst?.pixel_spacing,
+      laterality: inst ? mammoView(p.series?.series_desc ?? "").lat || undefined : undefined,
+      view_position: inst ? mammoView(p.series?.series_desc ?? "").view || undefined : undefined,
+      wl: p.wl, zoom, fx: p.fx || undefined,
+    };
+  };
+
   const renderPane = (pid: string) => {
     const p = panes[pid];
     // 페인별 Image Layout — 이 페인에 지정된 il 만 적용(다른 페인은 1×1 유지)
@@ -3177,25 +3217,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                       {/* 타일별 4모서리 정보 — 분할에서는 **칸마다** 환자·검사·W/L·확대율이 보여야 한다.
                           예전엔 페인 한 곳에만 떠서 어느 칸이 무엇인지 알 수 없었다(맘모 4뷰에서 특히).
                           ⚠ 변환 wrapper **밖**이라 확대/이동에 딸려 움직이지 않는다(칸에 고정). */}
-                      {overlayOn && ti && (() => {
-                        const tm = studyMeta[p.studyUid] ?? detail;
-                        const tf = Math.max(8, tyOvFont - 1.5);
-                        // 화면에 실제로 적용된 배율(2D-MG 보정 포함) — 100% 가 아니면 알려 준다
-                        const zEff = (mgTiles ? mgApply(p, fk).zoom : p.zoom) * 100;
-                        return (
-                          <>
-                            <div style={ov("tl", tf)}>{tm.patient_name} ({tm.sex})<br />{tm.study_date}</div>
-                            <div style={ov("tr", tf)}>
-                              S{p.series?.series_number} {p.series?.series_desc || p.series?.modality}<br />
-                              Img: {tIdx + 1}/{nInst}
-                            </div>
-                            <div style={ov("bl", tf)}>{tm.modality} · {tm.patient_key}</div>
-                            <div style={ov("br", tf)}>
-                              Z: {zEff.toFixed(0)}%{p.wl && <><br />W/L: {p.wl}</>}
-                            </div>
-                          </>
-                        );
-                      })()}
+                      {overlayOn && ti && renderCorners(
+                        // 배율은 화면에 실제로 적용된 값(2D-MG 보정 포함)
+                        srcOf(p, ti, tIdx, mgTiles ? mgApply(p, fk).zoom : p.zoom),
+                        Math.max(8, tyOvFont - 1.5))}
                       {/* 키이미지 표시는 칸 단위로도 보여야 한다(현재 이미지만 보던 것을 확장) */}
                       {ti && keyMarks.has(ti.sop_uid) && (
                         <div style={{ position: "absolute", top: 2, right: 3, zIndex: 3,
@@ -3262,30 +3287,20 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {overlayOn && p.series && tileCount <= 1 && (() => {
           const meta = studyMeta[p.studyUid] ?? detail;  // 페인의 검사 기준 — 다른 환자 영상에 주검사 환자명 오표기 방지
           const priorMark = isPrior && meta.patient_key === detail.patient_key;  // 같은 환자의 과거검사만 [비교/과거]
+          const zEff = mgApply(p, mgFitFor(pid, 0, p, p.series?.instances[p.index])).zoom;
           return (
           <>
-            <div style={ov("tl", tyOvFont)}>
-              {meta.patient_name} ({meta.sex})<br />
-              {priorMark ? "[비교/과거] " : ""}{meta.study_desc}<br />{meta.study_date}
-              {priorMark && (() => {
-                // 현재 판독 검사(detail) 대비 이 과거영상이 얼마전인지 — 노란색
-                const t = durText(meta.study_date, detail.study_date);
-                return t ? <><br /><span style={{ color: "#fde047", fontWeight: 700 }}>{t}</span></> : null;
-              })()}
-            </div>
-            <div style={ov("tr", tyOvFont)}>
-              S{p.series.series_number} {p.series.series_desc || p.series.modality}<br />
-              {/* 분할(타일)에서는 칸마다 번호가 붙으므로 여기선 총 장수만 — 중복 표기 제거 */}
-              {tileCount > 1
-                ? `Img: ${p.series.instances.length}장`
-                : `Img: ${p.index + 1}/${p.series.instances.length}`}
-            </div>
-            <div style={ov("bl", tyOvFont)}>{meta.modality} · {meta.patient_key}</div>
-            <div style={ov("br", tyOvFont)}>
-              {/* 2D-MG 보정으로 확대된 경우도 **실제 화면 배율**을 보여 준다(100% 가 아니면 그 값) */}
-              Z: {(mgApply(p, mgFitFor(pid, 0, p, p.series?.instances[p.index])).zoom * 100).toFixed(0)}%
-              {p.wl && <><br />W/L: {p.wl}</>}{p.fx && <><br />{p.fx}</>}
-            </div>
+            {renderCorners(srcOf(p, p.series.instances[p.index], p.index, zEff), tyOvFont)}
+            {/* 과거검사 비교 표시는 설정과 무관하게 항상 — 어느 시점 영상인지 혼동하면 안 된다 */}
+            {priorMark && (() => {
+              const t = durText(meta.study_date, detail.study_date);
+              return (
+                <div style={{ ...ov("tl", tyOvFont), top: undefined, marginTop: 0,
+                              transform: "translateY(52px)" }}>
+                  <span style={{ color: "#fde047", fontWeight: 700 }}>[비교/과거]{t ? ` ${t}` : ""}</span>
+                </div>
+              );
+            })()}
           </>
           );
         })()}

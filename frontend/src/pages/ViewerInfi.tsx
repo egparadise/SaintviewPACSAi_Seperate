@@ -19,6 +19,7 @@ import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageForma
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { TileGridLines } from "../components/TileGridLines";
+import { CORNERS, cornerLines, cornersFor, type OverlaySource } from "../lib/overlayFields";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -360,6 +361,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [sLayout, setSLayout] = useState<{ r: number; c: number }>({ r: 1, c: 1 });
   // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
   const [srsPage, setSrsPage] = useState(0);
+  // 모서리 오버레이 구성(모달리티별) — 설정 > 뷰어 공통 > 영상 정보 표시
+  const [ovlCfg, setOvlCfg] = useState<Record<string, unknown>>({});
   // ── 검사별 화면 구성 기억(세션) ────────────────────────────────────────
   // 사용자가 화면에서 즉흥적으로 잡은 구성(Series/Image 분할·어느 페인에 어느 시리즈·현재 장·
   // W/L·확대·회전…)은 **설정에 저장한 것이 아니어도** 탭을 오갈 때 유지돼야 한다.
@@ -582,6 +585,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         mg_hang?: unknown;
       };
       // 2D-MG(유방 여백 제거) 설정 — 체크 초기값·기본 Image layout 을 여기서 확정
+      {
+        const oc = (prefsRes.value as { overlay_by_modality?: Record<string, unknown> }).overlay_by_modality;
+        if (oc && typeof oc === "object") setOvlCfg(oc);
+      }
       const mg = readMgCfg(prefsV.mg_hang);
       setMgCfg(mg);
       setMgOn(mg.on);
@@ -2609,7 +2616,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       );
     }
     const insts = p.series?.instances ?? [];
-    const wlText = p.wl ? p.wl.replace(",", " / ") : "기본";
+
     return (
       <div data-pane={pi} onMouseDown={(e) => onPaneMouseDown(e, pi)} onMouseMove={onMouseMove}
            onWheel={(e) => onWheel(e, pi)}
@@ -2796,14 +2803,36 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                       </div>
                     );
                   })()}
-                  {ovlVisible && (
-                    <>
-                      <div style={ovl("tl", ovlFont)}>{pd.patient_name}<br />{pd.patient_key}</div>
-                      <div style={ovl("tr", ovlFont)}>{pd.modality} {pd.study_date}</div>
-                      <div style={ovl("bl", ovlFont)}>Se:{p.series.series_number} Im:{idx + 1}/{insts.length}<br />W/L: {wlText}</div>
-                      <div style={ovl("br", ovlFont)}>Zoom {(p.zoom * 100).toFixed(0)}%{p.fx ? ` · ${p.fx}` : ""}</div>
-                    </>
-                  )}
+                  {ovlVisible && (() => {
+                    // 설정(모달리티별)에 따라 네 귀퉁이를 그린다. 값이 없는 항목은 생략.
+                    // 배율은 2D-MG 보정을 포함한 **실제 화면 배율**.
+                    const src: OverlaySource = {
+                      patient_name: pd.patient_name, sex: pd.sex, patient_key: pd.patient_key,
+                      study_date: pd.study_date, study_desc: pd.study_desc,
+                      body_part: pd.body_part, modality: pd.modality,
+                      series_number: p.series?.series_number, series_desc: p.series?.series_desc,
+                      series_modality: p.series?.modality,
+                      image_no: idx + 1, image_total: insts.length,
+                      rows: inst.rows, cols: inst.cols, pixel_spacing: inst.pixel_spacing,
+                      laterality: mammoView(p.series?.series_desc ?? "").lat || undefined,
+                      view_position: mammoView(p.series?.series_desc ?? "").view || undefined,
+                      wl: p.wl, zoom: pT.zoom, fx: p.fx || undefined,
+                    };
+                    const map = cornersFor(ovlCfg, pd.modality || p.series?.modality);
+                    return (
+                      <>
+                        {CORNERS.map((c) => {
+                          const lines = cornerLines(map[c], src);
+                          if (!lines.length) return null;
+                          return (
+                            <div key={c} style={ovl(c, ovlFont)}>
+                              {lines.map((t, i) => <div key={i}>{t}</div>)}
+                            </div>
+                          );
+                        })}
+                      </>
+                    );
+                  })()}
                 </>
                 );
               })() : p.series ? null : (
