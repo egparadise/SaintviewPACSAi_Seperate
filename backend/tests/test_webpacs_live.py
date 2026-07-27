@@ -442,3 +442,44 @@ def test_viewer_open_skips_slow_patient_search(client, auth_headers, live_ready,
     r = client.get(f"/api/webpacs/live/studies/{vid}", headers=auth_headers)
     assert r.status_code == 200
     assert "related_exams" in r.json()
+
+
+def test_live_sr_matches_frontend_contract(client, auth_headers, live_ready):
+    """Live 판독 SR 이 프론트 SrJson 계약과 **키·모양**이 같아야 한다.
+
+    실제로 깨졌던 계약: 백엔드가 단수 `recommendation`(항목 {text})을 내는데 프론트는
+    복수 `recommendations`(항목 {action, timeframe})를 필수로 읽었다. T-View 워크리스트의
+    판독 패널이 `draft.recommendations.length` 에서 TypeError 를 던졌고, ErrorBoundary 가
+    없어 **앱 전체가 백지**가 됐다(새로고침하면 선택이 풀려 살아나므로 '간헐'처럼 보였다).
+    """
+    vid = VID_BASE + 1
+    sr = client.get(f"/api/webpacs/live/studies/{vid}/reports",
+                    headers=auth_headers).json()["items"][0]["sr_json"]
+
+    # 로컬(비-Live) 판독이 내는 것과 같은 키 집합이어야 한다
+    for key in ("exam", "comparison", "findings", "impression", "recommendations"):
+        assert key in sr, f"SR 에 '{key}' 가 없다 — 프론트가 그대로 읽다가 죽는다: {sorted(sr)}"
+    assert "recommendation" not in sr, "구 단수 키가 남아 있다"
+
+    assert isinstance(sr["findings"], list) and isinstance(sr["impression"], list)
+    assert isinstance(sr["recommendations"], list)
+    for r in sr["recommendations"]:
+        assert set(r) >= {"action", "timeframe"}, f"권고 항목 모양이 계약과 다르다: {r}"
+
+    # 역방향(SR → A 평문) 도 새 계약을 읽어야 한다 — 저장 시 권고가 소실되면 안 된다.
+    # (A 선점 상태에 의존하지 않도록 매핑 함수를 직접 검증)
+    from app.services.webpacs_live import _reading_from_sr
+
+    reading, conclusion = _reading_from_sr({
+        "comparison": {"summary": ""},
+        "findings": [{"organ": "폐", "observation": "결절 의심", "severity": ""}],
+        "impression": [{"statement": "추적 필요"}],
+        "recommendations": [{"action": "3개월 후 CT 추적", "timeframe": "3m"}],
+    })
+    assert "결절 의심" in reading
+    assert "3개월 후 CT 추적" in reading, f"권고가 A 평문에서 소실됐다: {reading!r}"
+    assert conclusion == "추적 필요"
+
+    # 구 형식(단수 recommendation/{text})도 계속 받아준다 — 이미 저장된 판독 호환
+    old_reading, _ = _reading_from_sr({"recommendation": [{"text": "구형식 권고"}]})
+    assert "구형식 권고" in old_reading

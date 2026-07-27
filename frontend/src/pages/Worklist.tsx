@@ -1549,8 +1549,8 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
         `<div><b>${escHtml(f.organ)}</b>: ${escHtml(f.observation)} ${f.severity === "critical" ? '<span class="crit">[CRITICAL]</span>' : ""}</div>`),
       `<div class="sec">IMPRESSION</div>`,
       ...sr.impression.map((i) => `<div>${i.rank}. ${escHtml(i.statement)} <i>(${i.confidence})</i></div>`),
-      ...(sr.recommendations.length ? [`<div class="sec">RECOMMEND</div>`,
-        ...sr.recommendations.map((r) => `<div>- ${escHtml(r.action)} (${escHtml(r.timeframe)})</div>`)] : []),
+      ...((sr.recommendations ?? []).length ? [`<div class="sec">RECOMMEND</div>`,
+        ...(sr.recommendations ?? []).map((r) => `<div>- ${escHtml(r.action)} (${escHtml(r.timeframe)})</div>`)] : []),
     ].join("");
     w.document.write(`<!doctype html><html><head><meta charset="utf-8">
 <title>AI Report — ${escHtml(detail.patient_key)}</title>
@@ -1658,7 +1658,7 @@ ${rows}
                         <div key={i}>{imp.rank}. {imp.statement} <i style={{ color: "var(--text-secondary)" }}>({imp.confidence})</i></div>
                       ))}
                     </div>
-                    {aiDraft.sr_json.recommendations.map((r, i) => (
+                    {(aiDraft.sr_json.recommendations ?? []).map((r, i) => (
                       <div key={i} style={{ color: "var(--text-secondary)" }}>- {r.action} ({r.timeframe})</div>
                     ))}
                   </div>
@@ -1694,10 +1694,10 @@ ${rows}
                 ) : (<>
                 <SectionTitle>READING</SectionTitle>
                 <div style={{ fontSize: 12 }}>
-                  {draft.comparison.summary && (
-                    <div style={{ color: "var(--text-secondary)", marginBottom: 3 }}>[비교] {draft.comparison.summary}</div>
+                  {draft.comparison?.summary && (
+                    <div style={{ color: "var(--text-secondary)", marginBottom: 3 }}>[비교] {draft.comparison?.summary}</div>
                   )}
-                  {draft.findings.map((f, i) => (
+                  {(draft.findings ?? []).map((f, i) => (
                     <div key={i}>
                       <b>{f.organ}</b>: {f.observation}{" "}
                       {f.severity === "critical" && <span className="badge critical">CRITICAL</span>}
@@ -1705,7 +1705,7 @@ ${rows}
                   ))}
                 </div>
                 <SectionTitle>CONCLUSION</SectionTitle>
-                {draft.impression.map((imp, i) => (
+                {(draft.impression ?? []).map((imp, i) => (
                   <textarea key={i} value={imp.statement} disabled={finalized} readOnly={!canWrite}
                             title={canWrite ? undefined : PERM_DENIED_TIP}
                             onChange={(e) => setDraft((d) => {
@@ -1717,10 +1717,10 @@ ${rows}
                               fontFamily: "inherit", fontSize: 12.5, resize: "vertical", minHeight: 44,
                             }} />
                 ))}
-                {draft.recommendations.length > 0 && (
+                {(draft.recommendations ?? []).length > 0 && (
                   <>
                     <SectionTitle>RECOMMEND</SectionTitle>
-                    {draft.recommendations.map((r, i) => (
+                    {(draft.recommendations ?? []).map((r, i) => (
                       <div key={i} style={{ fontSize: 12 }}>- {r.action} ({r.timeframe})</div>
                     ))}
                   </>

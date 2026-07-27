@@ -828,7 +828,12 @@ def _sr_from_remote(reading: str, conclusion: str, remote: dict | None = None) -
         "comparison": {},
         "findings": findings,
         "impression": [{"rank": 1, "statement": conclusion or "", "confidence": "high", "codes": []}],
-        "recommendation": [{"text": recommendation}] if recommendation else [],
+        # ⚠ 키는 **복수 recommendations**, 항목은 {action, timeframe} — 프론트 SrJson 계약이다
+        #    (api.ts SrJson / 로컬 report_service 와 동일). 예전엔 단수 "recommendation" 에
+        #    {text:...} 를 담아, 이 SR 을 파고드는 화면(T-View 워크리스트 판독 패널)이
+        #    `draft.recommendations.length` 에서 TypeError 로 죽어 **앱 전체가 백지**가 됐다.
+        "recommendations": ([{"action": recommendation, "timeframe": ""}]
+                           if recommendation else []),
         "critical": [],
         # A 왕복 코멘트(요구6) — 판독 도크·창이 표시·편집
         "refer_comment": str((remote or {}).get("report_refer_comment") or ""),
@@ -858,7 +863,10 @@ def _reading_from_sr(sr: dict) -> tuple[str, str]:
         obs = str(f.get("observation") or "")
         sev = " [CRITICAL]" if f.get("severity") == "critical" and "[CRITICAL]" not in obs.upper() else ""
         lines.append(f"{organ + ': ' if organ and organ != '판독' else ''}{obs}{sev}")
-    recos = [str(r.get("text") or r) for r in (sr.get("recommendation") or []) if r]
+    # 신규 계약(recommendations/{action}) 우선, 구 형식(recommendation/{text})도 계속 수용
+    _raw = sr.get("recommendations") or sr.get("recommendation") or []
+    recos = [str((r.get("action") or r.get("text") or "") if isinstance(r, dict) else r)
+             for r in _raw if r]
     reading = "\n".join(lines)
     reco_txt = "\n".join(x for x in recos if x)
     if reco_txt:
