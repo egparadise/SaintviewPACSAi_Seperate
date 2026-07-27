@@ -188,6 +188,39 @@ Live 픽셀은 `A 원본 다운로드 → 서버측 디코드 → 윈도잉 → 
 > 회선에서는 설정>병원별 영상 형식에서 **JPEG(품질 80~90)** 로 바꾸면 DR 전송량이 크게 준다
 > (실측 2048²: PNG 4.1MB/200ms → JPEG q80 2.5MB/77ms, 합성 랜덤 노이즈 기준·실제 X-ray 는 이득이 더 큼).
 
+## 2.10 실시간 동기 — A SSE 구독 (폴링 대체)
+
+A 서버에는 **이미 SSE 가 구현돼 있다**(`GET /see/stream`, `app/router/SeeEvent.py`, 1초 주기):
+- `message`(id=`link_update`) — 검사 상태·응급 변경(pacs_study_link 트리거 기반)
+- `report_update` — 판독이 변경된 검사 행
+
+> **A 서버 수정 불필요.** 우리가 구독만 하면 된다.
+
+**구현**: `backend/app/services/webpacs_sse.py` 가 백엔드에서 **한 번만** 구독하고 변경 리비전(`rev`)을
+메모리에 기록 → 프론트는 `GET /api/webpacs/live/sse-status` 로 rev 만 확인하고
+**바뀐 경우에만** 워크리스트를 재조회한다.
+
+| | 기존 | SSE 적용 |
+|---|---|---|
+| 변경 반영 지연 | 최대 5초 | **≤1초** |
+| 무변경 시 A 부하 | 5초마다 전체 목록 조회 | **0**(rev 확인만) |
+
+- 연결 끊김·A 구버전(엔드포인트 없음)이면 `connected=false` → **기존 5초 폴링으로 자동 폴백**(이중 안전)
+- SSE 끊기면 1→2→4…30초 백오프 재연결
+
+## 2.11 저대역 자동 대응 — JPEG 자동 선택
+
+원격 저대역에서 DR(2048²) PNG 1장은 2~4MB 라 첫 표시가 1초를 넘긴다.
+`frontend/src/lib/imageFormat.ts` 가 **Network Information API** 로 회선을 보고 자동 전환한다.
+
+| 조건 | 동작 |
+|---|---|
+| 관리자가 형식 명시(png/jpeg) | **그 설정이 항상 우선**(진단 품질 정책 존중) |
+| 기본값(`default`) + `saveData` 또는 `effectiveType∈{slow-2g,2g,3g}` 또는 `downlink<25Mbps` | **JPEG q90 자동** |
+| 그 외 | 서버 기본 |
+
+실측 효과(20Mbps): DR **1.70s → 0.68s**.
+
 ## 3. 운용 가이드 (실서버 연결)
 
 1. **원격 계정 준비**: 인계 PACS 에 `user_type` 에 `P` 가 포함된 계정(브리지 전용 계정 권장).

@@ -314,3 +314,13 @@ def test_live_memo_priority_bookmark_pdf(client, auth_headers, live_ready):
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "application/pdf"
     assert r.content[:4] == b"%PDF"
+
+
+def test_live_sse_status_endpoint(client, auth_headers, live_ready):
+    """A SSE 구독 상태 — 모의 A 에는 /see/stream 이 없으므로 connected=false(폴링 폴백)."""
+    r = client.get("/api/webpacs/live/sse-status", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["enabled"] is True          # 브리지 활성
+    assert "connected" in s and "rev" in s
+    # 미연결이어도 프론트가 폴링으로 폴백하므로 기능 손실 없음

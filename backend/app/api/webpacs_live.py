@@ -137,6 +137,17 @@ def finalize_with(vid: int, body: FinalizeBody, db: Session = Depends(get_db),
         approve=True, cvr=body.cvr, user=user))
 
 
+@router.get("/sse-status")
+def sse_status(db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    """A SSE(`/see/stream`) 구독 상태 + 변경 리비전.
+
+    프론트는 이 값(rev)이 바뀔 때만 워크리스트를 재조회한다 → 5초 고정 폴링 대체.
+    connected=false 면 프론트가 기존 폴링으로 자동 폴백(A 구버전·연결 실패 대비)."""
+    from app.services.webpacs_sse import ensure_sse
+
+    return ensure_sse(db)
+
+
 @router.get("/studies/{vid}/state")
 def state(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
     return _wrap(lambda: live.live_state(db, vid, me=user.get("sub", ""), user=user))

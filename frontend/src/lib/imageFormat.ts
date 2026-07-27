@@ -21,10 +21,30 @@ export function setImageFormat(f: { format?: string; quality?: number; wado_ts?:
 export function getWadoTs(): string { return IMG_FMT.wado_ts ?? ""; }
 
 /** rendered URL 뒤에 붙일 형식 파라미터 — hasQuery: 이미 ?window= 등이 있는지 */
+/** ⚡ 대역 자동 판정 — 저대역/느린 회선에서 대형 매트릭스(DR/CR/DX)를 PNG 로 보내면
+ *  1장이 2~4MB 라 첫 표시가 1초를 넘긴다(실측: 20Mbps 에서 PNG 1.70s vs JPEG q90 0.68s).
+ *  Network Information API 로 회선을 보고, 느리면 자동으로 JPEG q90 을 쓴다.
+ *  ⚠ 관리자가 형식을 명시(png/jpeg)했으면 그 설정이 항상 우선한다(진단 품질 정책 존중).
+ *  자동 전환은 기본값('default')일 때만 개입한다. */
+function autoJpegForSlowLink(): boolean {
+  try {
+    const c = (navigator as Navigator & {
+      connection?: { effectiveType?: string; downlink?: number; saveData?: boolean };
+    }).connection;
+    if (!c) return false;                       // 지원 안 하면 개입하지 않음
+    if (c.saveData) return true;                // 데이터 절약 모드
+    if (c.effectiveType && ["slow-2g", "2g", "3g"].includes(c.effectiveType)) return true;
+    // downlink(Mbps 추정) — 25Mbps 미만이면 DR PNG 가 1초를 넘긴다
+    return typeof c.downlink === "number" && c.downlink > 0 && c.downlink < 25;
+  } catch { return false; }
+}
+
 export function renderedParams(hasQuery: boolean): string {
   const sep = hasQuery ? "&" : "?";
   if (IMG_FMT.format === "png") return sep + "accept=image/png";
   if (IMG_FMT.format === "jpeg") return sep + "accept=image/jpeg&quality=" + IMG_FMT.quality;
+  // format === "default" — 회선이 느리면 JPEG q90 자동 적용(관리자 미지정 시에만)
+  if (autoJpegForSlowLink()) return sep + "accept=image/jpeg&quality=90";
   return "";
 }
 

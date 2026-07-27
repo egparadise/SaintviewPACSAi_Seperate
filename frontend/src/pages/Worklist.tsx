@@ -2794,6 +2794,26 @@ export function Worklist() {
     return () => clearInterval(t);
   }, [refreshSec, liveMode]);
 
+  // ⚡ LIVE — A SSE(`/see/stream`) 변경 감지. A 서버에 이미 있는 SSE 를 백엔드가 구독하고,
+  // 여기서는 그 리비전(rev)만 가볍게 확인해 **바뀌었을 때만** 목록을 재조회한다.
+  // (위 5초 폴링은 SSE 미연결·구버전 A 를 위한 폴백으로 그대로 둔다 — 이중 안전)
+  const sseRevRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!liveMode) { sseRevRef.current = null; return; }
+    let stop = false;
+    const tick = () => api.liveSseStatus().then((s) => {
+      if (stop || !s.connected) return;                  // 미연결 → 폴링 폴백에 맡김
+      if (sseRevRef.current === null) { sseRevRef.current = s.rev; return; }
+      if (s.rev !== sseRevRef.current) {                  // 원격 변경 발생 → 즉시 반영
+        sseRevRef.current = s.rev;
+        setRefreshKey((k) => k + 1);
+      }
+    }).catch(() => { /* 상태 조회 실패는 무시 — 폴링이 커버 */ });
+    tick();
+    const t = window.setInterval(tick, 1200);
+    return () => { stop = true; window.clearInterval(t); };
+  }, [liveMode]);
+
   // 판독 창 항상 열기(설정>판독) — 워크리스트 옆 별도 웹창(?report=1), 선택 동기(sync) 연동
   const readingWinRef = useRef<Window | null>(null);
   const alwaysReadingRef = useRef(false);
