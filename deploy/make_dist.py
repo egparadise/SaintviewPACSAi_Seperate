@@ -64,6 +64,10 @@ INCLUDE_FILES = [
     # server 블록을 편집하지 않고 conf.d 드롭인 한 장만 쓰므로 되돌리기가 파일 삭제 하나다.
     "deploy/patch_nginx.sh",
     "deploy/apply_nginx.ps1",   # Windows nginx 용(셸 스크립트가 안 도는 환경)
+    # 실서버 갱신기 — 이 패키지 자신을 서버에 적용한다(프론트 dist·백엔드 app·의존성·nginx·재시작·검증).
+    # **반드시 패키지 안에 있어야 한다.** 빠지면 "패키지 하나만 서버에 올리면 된다"가 거짓이 되고,
+    # 스크립트가 옆에서 patch_nginx.sh 를 찾는 전제(SELF_DIR)도 깨진다.
+    "deploy/update_server.sh",
 ]
 # 시크릿·개인키 — 패키지에 절대 포함 금지(포함 시 빌드 실패)
 FORBIDDEN = ["backend/.env", "frontend/certs/dev.key", "frontend/certs/dev.crt"]

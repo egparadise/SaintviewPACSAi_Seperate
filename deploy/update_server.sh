@@ -1,0 +1,1961 @@
+#!/bin/sh
+# Saintview Viewer Suite — 실서버 갱신 (프론트 dist + 백엔드 app + nginx 최적화)
+#
+# 이 파일과 배포 패키지만 서버에 있으면 된다(저장소 체크아웃 불필요).
+#
+# 무엇을 하나
+#   [1] 사전 점검 → [2] 설치 경로 발견 → [3] 백업 → [4] 파일 교체 →
+#   [5] 파이썬 신규 의존성 → [6] nginx 드롭인(patch_nginx.sh 위임) →
+#   [7] 백엔드 재시작 → [8] 검증
+#
+# 불변식(이 스크립트의 핵심 규약)
+#   [3] 백업 집합 == [4] 쓰기 집합 == [롤백] 복구 집합 == 지문 검증 범위.
+#   네 개가 어긋나면 롤백이 되돌리지 못한 파일을 남긴 채 '복구 완료' 를 찍는다.
+#   → 백엔드 대상 목록은 아래 BK_FILES / BK_DIRS **한 곳에만** 둔다.
+#
+# 절대 건드리지 않는 것 (배포 패키지에 애초에 들어 있지 않다 — 삭제형 동기화만 막으면 된다)
+#   backend/.env, backend/dev.db, frontend/certs/, /etc/nginx/certs/*,
+#   deploy/generated/**(병원별 Orthanc SQLite 인덱스), deploy/orthanc-generated.json,
+#   deploy/scp-policy.env, deploy/worklists/*.wl, Docker 명명 볼륨(pgdata/orthanc)
+#   → 그래서 이 스크립트는 **어디에도 rm -rf / rsync --delete 를 쓰지 않는다**(덮어쓰기 전용).
+#
+# 사용법
+#   적용(서버에서, root 권한):
+#       sudo sh update_server.sh --apply /경로/SaintviewViewerSuite-dist-YYYYMMDD-해시
+#   경로 자동발견이 실패하면 직접 지정:
+#       sudo sh update_server.sh --apply <패키지> --prefix /opt/saintview-viewer
+#       ※ --prefix 를 주면 nginx 추론이 그 값을 **덮지 않는다**(명시가 추론을 이긴다).
+#         종료코드: 0=적용·검증 모두 통과 / 2=적용은 끝났으나 검증 미완료(curl 없음) / 1=실패
+#   미리보기 / 원격 진단 / 되돌리기:
+#       sh   update_server.sh --dry-run  <패키지>
+#       sh   update_server.sh --check    https://sv70.cloudcare.life
+#       sudo sh update_server.sh --rollback [타임스탬프]
+#         종료코드: 0=쓰기 집합 전부 복구 / 2=부분 복구(옛 포맷 백업 — 아래 불변식 참고) / 1=실패
+#
+#   옵션:  --prefix <설치루트>  --port <백엔드포트(기본 8010)>  --url <검증용 공개주소>
+#          --pybin <백엔드가 쓰는 파이썬>   (venv 자동판정이 어긋날 때만)
+#          --skip-nginx  --skip-restart
+#
+#   환경변수:  SV_BACKUP_DIR  SV_BACKEND_LOG
+#              SV_KEEP_BACKUPS=<개수> (기본 5 — 갱신 1회당 백업이 10MB 를 넘는다)
+#              SV_FORCE_KILL=1  (종료 대기 초과 시 kill -9 를 허용 — 기본은 하지 않는다)
+#              SV_TERM_WAIT=<초> (기본 30)
+set -eu
+
+PORT=8010
+PREFIX=""
+PKG=""
+URL=""
+MODE=""
+STAMP=""
+SKIP_NGINX=0
+SKIP_RESTART=0
+PYBIN_SET=""      # --pybin 으로 사람이 명시한 값(추론이 덮지 않는다)
+PYDEPS_FAIL=0     # [5] 의 실패를 [8]·최종 배너까지 전파한다
+BACKUP_ROOT="${SV_BACKUP_DIR:-/var/backups/saintview-viewer}"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+TS="$(date +%Y%m%d%H%M%S)"
+
+# ── 백엔드 '쓰기 집합' 단일 정의 ────────────────────────────────────────────
+# 이 두 목록이 [3] 백업 · [4] 교체 · [롤백] 복구 · 지문 계산의 **유일한** 근거다.
+# 왜 이렇게 묶는가: 예전에는 세 곳이 각자 목록을 손으로 들고 있었고, [4] 에
+# alembic.ini · migrations/ · tools/ · .env.example 이 추가될 때 [3]/[롤백] 이
+# 따라오지 않았다. 그 결과 롤백이 app/ 만 되돌리고도 '✅ 파일 복구 완료' 를 찍어,
+# 운영자는 v48 로 돌아갔다고 믿지만 마이그레이션 리비전은 v50 인 혼합 트리가 남았다.
+# → 목록을 한 곳에만 두어 다음에 대상이 늘어도 세 단계가 자동으로 함께 움직인다.
+#   (app/ 과 frontend dist 는 취급이 특수해 — 정확 교체 / 복사 순서 — 따로 다룬다)
+BK_FILES="requirements.txt alembic.ini .env.example"
+BK_DIRS="migrations tools"
+
+# ── 출력 도우미 ────────────────────────────────────────────────────────────
+# ⚠ echo 를 쓰지 않는다. Debian/Ubuntu 의 /bin/sh 는 dash 이고 dash 의 내장 echo 는
+#   XSI 방식으로 **백슬래시 이스케이프를 해석**한다. 그래서 `say "tr '\\0' ' ' < ..."`
+#   같은 안내문이 NUL 바이트로 깨져 나가고(터미널은 NUL 을 버리므로 운영자가 복사하면
+#   `tr '' ' '` 이 되어 exit 0 으로 조용히 잘못 동작한다), 경로·에러문자열처럼 백슬래시가
+#   섞일 수 있는 값도 전부 같은 위험을 진다.
+#   POSIX printf 의 %s 는 인자 안의 이스케이프를 해석하지 않는다 → 셸별 차이가 사라진다.
+# ※ 이 블록은 인자 파싱보다 **위에** 있어야 한다. 파싱에서 die 를 쓸 수 있어야
+#   값 빠진 옵션에 셸 원시 에러 대신 사람이 읽는 안내가 나간다.
+STEP_N=0
+step() { STEP_N=$((STEP_N + 1)); printf '\n[%d/8] %s\n' "$STEP_N" "$*"; }
+say()  { printf '    %s\n' "$*"; }
+ok()   { printf '  ✅ %s\n' "$*"; }
+warn() { printf '  ⚠  %s\n' "$*"; }
+die()  { printf '  ❌ %s\n\n' "$*"; exit 1; }
+outln() { printf '%s\n' "$*"; }   # 들여쓰기 없는 한 줄(변수 값을 담아도 안전하다)
+
+# 검증 결과 누적(마지막에 한꺼번에 판정한다 — 첫 실패에서 죽으면 원인 파악이 어렵다)
+V_FAIL=0
+vok()   { printf '  ✅ %s\n' "$*"; }
+vng()   { printf '  ❌ %s\n' "$*"; V_FAIL=$((V_FAIL + 1)); }
+
+curl_ok() { command -v curl >/dev/null 2>&1; }
+
+# ── 인자 파싱 ──────────────────────────────────────────────────────────────
+# ⚠ 값을 받는 옵션은 **값이 있는지 확인한 뒤에만** shift 한다. 무조건 shift 하면
+#   값이 빠졌을 때($#=1) 안쪽 shift 가 $# 을 0 으로 만들고, 루프 끝의 shift 가 실패해
+#   set -e 가 usage 도 '알 수 없는 인자' 도 못 찍은 채 셸을 죽인다
+#   (dash: "shift: can't shift that many" / bash: 아무 출력 없이 exit 1).
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apply)    MODE=apply;    PKG="${2:-}";  case "$PKG" in -*|"") PKG="" ;; *) shift ;; esac ;;
+    --dry-run)  MODE=dryrun;   PKG="${2:-}";  case "$PKG" in -*|"") PKG="" ;; *) shift ;; esac ;;
+    --check)    MODE=check;    URL="${2:-}";  case "$URL" in -*|"") URL="" ;; *) shift ;; esac ;;
+    --rollback) MODE=rollback; STAMP="${2:-}";case "$STAMP" in -*|"") STAMP="" ;; *) shift ;; esac ;;
+    --prefix)   PREFIX="${2:-}"
+                case "$PREFIX" in -*|"") die "--prefix 에 설치 루트 경로가 필요합니다 (예: --prefix /opt/saintview-viewer)" ;; *) shift ;; esac ;;
+    --port)     PORT="${2:-}"
+                case "$PORT" in ''|*[!0-9]*) die "--port 에 숫자 포트가 필요합니다 (예: --port 8010)" ;; *) shift ;; esac
+                # printf '%04X' "$PORT"(port_busy/find_backend_pid)가 깨지지 않도록 범위까지 본다.
+                if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then die "--port 는 1..65535 여야 합니다: $PORT"; fi ;;
+    --url)      URL="${2:-}"
+                case "$URL" in -*|"") die "--url 에 주소가 필요합니다 (예: --url https://sv70.cloudcare.life)" ;; *) shift ;; esac ;;
+    --pybin)    PYBIN_SET="${2:-}"
+                case "$PYBIN_SET" in -*|"") die "--pybin 에 파이썬 실행파일 경로가 필요합니다" ;; *) shift ;; esac ;;
+    --skip-nginx)   SKIP_NGINX=1 ;;
+    --skip-restart) SKIP_RESTART=1 ;;
+    -h|--help)  MODE=help ;;
+    *)          outln "알 수 없는 인자: $1"; MODE=help ;;
+  esac
+  shift
+done
+[ -n "$MODE" ] || MODE=help
+# --prefix 를 '사람이 줬는지' 는 PREFIX 자체로는 알 수 없다(detect_paths 가 재대입한다).
+# 추론이 명시값을 덮지 못하게 하려면 이 사실을 따로 보관해야 한다.
+PREFIX_SET=""
+if [ -n "$PREFIX" ]; then PREFIX_SET=1; fi
+
+# 상태코드만 뽑는다. curl 은 연결 실패 시 -w 로 이미 '000' 을 찍고 나서 비-0 으로 끝나므로
+# `|| echo 000` 을 붙이면 '000000' 이 된다 → 종료상태만 삼키고 값은 그대로 쓴다.
+hcode() {
+  HC="$(curl -sS -o /dev/null -w '%{http_code}' "$@" 2>/dev/null || true)"
+  case "$HC" in ''|*[!0-9]*) HC=000 ;; esac
+  printf '%s' "$HC"
+}
+
+# ── 배포 지문(fingerprint) ────────────────────────────────────────────────
+# 왜 필요한가: 백업/롤백이 '무엇을' 담고 있는지 기계가 알아야 한다. 타임스탬프만으로는
+# '이미 신버전이 백업된 디렉터리' 를 되돌리면서 성공을 보고하는 거짓 롤백을 막을 수 없다.
+HASHER=""
+pick_hasher() {
+  for h in sha256sum sha1sum md5sum cksum; do
+    if command -v "$h" >/dev/null 2>&1; then HASHER="$h"; return 0; fi
+  done
+  return 1
+}
+# 디렉터리의 *.py 내용을 경로 순서대로 이어 해시한다(파일명이 아니라 내용+순서를 본다 —
+# 백업본과 실서버는 경로 접두사가 다르므로 경로 자체는 비교 대상이 될 수 없다).
+tree_hash() {
+  if [ ! -d "$1" ]; then printf 'none'; return 0; fi
+  if [ -z "$HASHER" ]; then pick_hasher || { printf 'nohasher'; return 0; }; fi
+  find "$1" -type f -name '*.py' 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do
+    "$HASHER" "$f" 2>/dev/null | awk '{print $1}'
+  done | "$HASHER" 2>/dev/null | awk '{print $1}'
+}
+asset_of() {  # $1 = index.html 이 들어 있는 디렉터리
+  grep -o 'assets/index-[A-Za-z0-9_-]*\.js' "$1/index.html" 2>/dev/null | sort -u | head -1
+}
+
+# app/ 밖의 백엔드 쓰기 집합(BK_FILES · BK_DIRS)의 지문.
+# tree_hash 와 두 가지가 다르다:
+#   · 확장자를 가리지 않는다 — alembic.ini 와 tools/*.mjs 는 *.py 필터에 안 걸린다.
+#   · **상대경로까지** 해싱한다 — 파일이 통째로 사라진 것과 내용이 바뀐 것을 모두 잡아야
+#     '롤백했는데 migrations/ 만 신버전' 같은 혼합 상태를 감지할 수 있다.
+# 설치 트리($BACKEND_DIR)와 백업 디렉터리($BDIR)는 같은 상대구조를 쓰므로 값이 직접 비교된다.
+# $1 = 루트(설치 트리 또는 백업 디렉터리)
+extra_hash() {
+  if [ -z "$HASHER" ]; then pick_hasher || { printf 'nohasher'; return 0; }; fi
+  XR="$1"
+  {
+    for p in $BK_FILES; do
+      if [ -f "$XR/$p" ]; then
+        printf '%s ' "$p"; "$HASHER" "$XR/$p" 2>/dev/null | awk '{print $1}'
+      fi
+    done
+    for d in $BK_DIRS; do
+      if [ -d "$XR/$d" ]; then
+        # __pycache__ 는 실행 중에 생겼다 사라지므로 지문에서 뺀다(안 그러면 백업본과
+        # 설치 트리가 영원히 불일치한다).
+        find "$XR/$d" -type f ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort \
+        | while IFS= read -r f; do
+            printf '%s ' "${f#"$XR"/}"; "$HASHER" "$f" 2>/dev/null | awk '{print $1}'
+          done
+      fi
+    done
+  } | "$HASHER" 2>/dev/null | awk '{print $1}'
+}
+# 지문 비교. 0=같음 1=다름 2=비교불가(해시 도구 없음)
+fp_same() {  # $1=assetA $2=hashA $3=assetB $4=hashB
+  case "$2$4" in *nohasher*)
+    if [ -n "$1" ] && [ "$1" = "$3" ]; then return 2; fi
+    return 1 ;;
+  esac
+  if [ "$1" = "$3" ] && [ "$2" = "$4" ]; then return 0; fi
+  return 1
+}
+
+# manifest.env 값 읽기. `.` 로 source 하면 PORT·PKG 같은 현재 변수까지 덮어써 버리므로
+# 필요한 키만 뽑아 쓴다. 따옴표 유무 양쪽(구 버전 백업 호환)을 모두 받는다.
+mval() {  # $1=파일 $2=키
+  sed -n "s/^$2=['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}\$/\1/p" "$1" 2>/dev/null | head -1
+}
+# 경로를 manifest 키로 쓸 수 있게 정규화한다(requirements.txt → requirements_txt).
+# mval 의 sed 는 키를 정규식으로 쓰므로 '.' 같은 메타문자가 그대로 들어가면 안 된다.
+mkey() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
+
+# ── 소유권 보존 ────────────────────────────────────────────────────────────
+# cp -a 는 **패키지(root 소유)의 소유권까지 복사**한다. 비-root 서비스 계정으로 도는
+# 배포에서는 이것만으로 backend/app 과 frontend/dist 가 root:root 로 바뀌어
+# __pycache__ 생성·앱의 임시파일 쓰기가 EACCES 로 깨진다. 복사 후 되돌린다.
+own_of() {  # $1=경로 → "user:group" (실패 시 빈 문자열)
+  stat -c '%U:%G' "$1" 2>/dev/null || true
+}
+
+# ── 마지막 방어선: 시스템 최상위에는 절대 쓰지 않는다 ──────────────────────
+# 경로 계산이 어디서 어떻게 틀리든(manifest 파싱 실패로 빈 문자열, nginx 추론 오판 등)
+# root 로 `cp -a <dist>/. /` · `mv /app ...` · `chown -R <계정> /` 를 실행하는 일만은
+# 막아야 한다. 값을 만든 쪽이 아니라 **쓰는 쪽**에서 한 번 더 본다.
+#   0 = 위험(쓰면 안 됨)   1 = 안전
+unsafe_target() {
+  case "${1:-}" in
+    ''|/|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var) return 0 ;;
+  esac
+  case "$1" in /*) ;; *) return 0 ;; esac   # 절대경로가 아니면 위험(상대경로 쓰기 금지)
+  return 1
+}
+
+# 심볼릭 링크·`..` 를 푼 실물 경로. 문자열만 다른 같은 디렉터리를 '불일치' 로 오판하지 않기 위해.
+realdir() {
+  [ -n "${1:-}" ] || { printf ''; return 0; }
+  ( cd "$1" 2>/dev/null && pwd -P ) 2>/dev/null || printf '%s' "$1"
+}
+
+chown_back() {  # $1=경로 $2="user:group"
+  if unsafe_target "${1:-}"; then
+    warn "시스템 경로에는 소유권을 바꾸지 않습니다(경로 계산 오류로 보입니다): '${1:-}'"
+    return 0
+  fi
+  [ -n "${2:-}" ] || return 0
+  case "$2" in *:*) ;; *) return 0 ;; esac
+  case "$2" in *UNKNOWN*|*:) return 0 ;; esac
+  [ "$2" = "root:root" ] && return 0
+  [ -e "$1" ] || return 0
+  chown -R "$2" "$1" 2>/dev/null || warn "소유권 복원 실패: $1 → $2 (수동: chown -R $2 $1)"
+}
+
+# ── 포트/프로세스 생사 판정 ────────────────────────────────────────────────
+# 재시작에서 '구 프로세스가 죽었나' 를 kill -0 으로 보면 안 된다: 좀비(Z)에도 성공한다.
+# 우리가 실제로 알고 싶은 것은 **포트가 풀렸는가**(= 새 프로세스를 띄울 수 있는가)다.
+port_busy() {  # 0=리스너 있음 1=없음 2=판정불가
+  if command -v ss >/dev/null 2>&1; then
+    if ss -lntH "sport = :$PORT" 2>/dev/null | grep -q .; then return 0; else return 1; fi
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then return 0; else return 1; fi
+  fi
+  if [ -r /proc/net/tcp ]; then
+    HEXP="$(printf '%04X' "$PORT")"
+    for f in /proc/net/tcp /proc/net/tcp6; do
+      [ -r "$f" ] || continue
+      if awk -v h=":$HEXP\$" '$4=="0A" && $2 ~ h {found=1} END{exit found?0:1}' "$f" 2>/dev/null; then
+        return 0
+      fi
+    done
+    return 1
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    if netstat -lntn 2>/dev/null | awk -v p=":$PORT\$" '$4 ~ p {found=1} END{exit found?0:1}'; then
+      return 0
+    else return 1; fi
+  fi
+  return 2
+}
+
+# 0=종료됨(좀비 포함) 1=아직 살아있음
+# ※ /proc/PID/stat 의 상태문자는 comm 에 공백·괄호가 들어갈 수 있어 $3 로 못 뽑는다.
+#   마지막 ')' 뒤부터 잘라야 한다.
+proc_gone() {
+  [ -n "${1:-}" ] || return 0
+  if [ -d "/proc/$1" ]; then
+    PS_="$(sed -n 's/.*) //p' "/proc/$1/stat" 2>/dev/null | awk '{print $1}')"
+    [ "$PS_" = "Z" ] && return 0
+    [ -n "$PS_" ] && return 1
+  fi
+  kill -0 "$1" 2>/dev/null || return 0
+  return 1
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [1] 사전 점검
+# ═══════════════════════════════════════════════════════════════════════════
+precheck() {
+  step "사전 점검"
+
+  if [ "$MODE" = "apply" ] || [ "$MODE" = "rollback" ]; then
+    [ "$(id -u)" = "0" ] || die "root 권한이 필요합니다.  sudo sh $(basename "$0") ... 로 다시 실행하세요"
+    ok "root 권한"
+  fi
+
+  if [ "$MODE" = "apply" ] || [ "$MODE" = "dryrun" ]; then
+    [ -n "$PKG" ] || die "패키지 경로가 없습니다.  --apply /경로/SaintviewViewerSuite-dist-YYYYMMDD-해시"
+    [ -d "$PKG" ] || die "패키지 디렉터리가 아닙니다: $PKG  (zip 이라면 먼저 unzip 하세요)"
+    PKG="$(cd "$PKG" && pwd)"
+    # make_dist.py 가 만드는 3대 산출물이 모두 있어야 정상 패키지다.
+    for f in VERSION.txt frontend/dist/index.html backend/app/main.py backend/requirements.txt; do
+      [ -e "$PKG/$f" ] || die "패키지에 $f 가 없습니다 — 잘못된 경로이거나 손상된 패키지입니다"
+    done
+    ok "패키지: $PKG"
+    say "버전: $(head -1 "$PKG/VERSION.txt" 2>/dev/null || echo '?')"
+    # 프론트 참조 자산을 미리 뽑아 둔다([8] 검증의 기준선).
+    PKG_ASSET="$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' "$PKG/frontend/dist/index.html" | sort -u | head -1)"
+    [ -n "$PKG_ASSET" ] || die "패키지 index.html 에서 assets/index-*.js 참조를 찾지 못했습니다"
+    say "참조 자산: $PKG_ASSET"
+  fi
+
+  if [ "$MODE" = "apply" ] || [ "$MODE" = "dryrun" ]; then
+    NGINX="$(command -v nginx || true)"
+    if [ -n "$NGINX" ]; then ok "nginx: $NGINX"
+    else warn "nginx 를 PATH 에서 찾지 못했습니다 — 프론트 경로 자동발견과 [6] 단계가 제한됩니다"; fi
+    curl_ok && ok "curl 사용 가능" \
+            || warn "curl 이 없습니다 — HTTP 검증을 건너뜁니다(디스크 검증은 그대로 수행하고, 최종 판정은 '검증 미완료'가 됩니다)"
+    # 과거 실행이 중단돼 /etc/nginx/conf.d 에 남았을 수 있는 brotli 탐침 파일을 회수한다.
+    # (파일을 쓰는 실행이므로 apply 에서만. 그리고 root 여야 지울 수 있다)
+    if [ "$MODE" = "apply" ] && [ "$(id -u)" = "0" ]; then probe_reap_stale; fi
+  fi
+
+  # 백엔드 생존 확인. 살아 있어야 [2] 에서 PID→cwd 로 설치 경로를 역추적할 수 있다.
+  BACKEND_ALIVE=0
+  if curl_ok; then
+    if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+      BACKEND_ALIVE=1; ok "백엔드 살아있음 (127.0.0.1:$PORT)"
+    else
+      warn "백엔드가 127.0.0.1:$PORT/api/health 에 응답하지 않습니다"
+      warn "  → 이미 죽어 있을 수 있습니다. --prefix 로 설치 경로를 직접 지정하세요"
+    fi
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [2] 설치 경로 자동 발견
+#     원칙: 추측하지 않는다. 두 개의 독립 근거(백엔드 PID 의 cwd / nginx root)를
+#           각각 구해 **대조**하고, 어긋나면 멈춘다.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 포트 점유 PID 찾기 — 서버에 무엇이 깔려 있는지 모르므로 사다리로 내려간다.
+# ss(iproute2) → lsof → fuser → netstat → procfs 직접 스캔.
+# ※ 패키지를 설치해서 도구를 확보하려 들지 않는다(운영 서버 변경 금지).
+# ※ 타 사용자 PID 를 보려면 root 가 필요하다. 비root 면 조용히 빈 결과가 나오므로
+#    '없음' 과 '못 봄' 을 구분해 표시한다.
+find_backend_pid() {
+  BPID=""
+  if command -v ss >/dev/null 2>&1; then
+    BPID="$(ss -lptnH "sport = :$PORT" 2>/dev/null \
+            | sed -n 's/.*pid=\([0-9]\{1,\}\).*/\1/p' | head -1)"
+  fi
+  if [ -z "$BPID" ] && command -v lsof >/dev/null 2>&1; then
+    BPID="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  fi
+  if [ -z "$BPID" ] && command -v fuser >/dev/null 2>&1; then
+    BPID="$(fuser -n tcp "$PORT" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' | head -1)"
+  fi
+  if [ -z "$BPID" ] && command -v netstat >/dev/null 2>&1; then
+    BPID="$(netstat -lptn 2>/dev/null | awk -v p=":$PORT\$" '$4 ~ p {print $7}' \
+            | cut -d/ -f1 | grep -E '^[0-9]+$' | head -1)"
+  fi
+  if [ -z "$BPID" ] && [ -r /proc/net/tcp ]; then
+    # 최종 폴백 — 리눅스면 무조건 통한다. /proc/net/tcp 는 포트가 16진수다.
+    HEX="$(printf '%04X' "$PORT")"
+    INO="$(awk -v h=":$HEX" '$4=="0A" && $2 ~ h {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | head -1)"
+    if [ -n "$INO" ]; then
+      for p in /proc/[0-9]*; do
+        if ls -l "$p/fd" 2>/dev/null | grep -q "socket:\[$INO\]"; then BPID="${p##*/}"; break; fi
+      done
+    fi
+  fi
+  [ -n "$BPID" ] && return 0 || return 1
+}
+
+# ── 백엔드가 **실제로 실행 중인** 파이썬 찾기 ──────────────────────────────
+# ⚠ /proc/PID/exe 를 쓰면 안 된다. venv 는 기본(심볼릭 링크) 생성이라
+#   venv/bin/python → /usr/bin/python3.x 이고, exe 는 링크를 다 푼 **베이스
+#   인터프리터**를 가리킨다. 그 파이썬에 pip install 하면
+#     · 백엔드(venv)에는 패키지가 그대로 없어 ISO 반출이 계속 501 이고
+#     · requirements 전량이 시스템 파이썬에 설치돼 OS 를 오염시킨다.
+#   → 실행된 경로 그 자체인 **argv[0]** 을 쓴다(심볼릭 링크를 풀지 않는다).
+#   그리고 VIRTUAL_ENV / 파일시스템의 venv / sys.prefix 로 **교차검증**한다.
+resolve_pybin() {
+  PYBIN=""; PYBIN_SRC=""
+
+  if [ -n "$PYBIN_SET" ]; then
+    [ -x "$PYBIN_SET" ] || die "--pybin 이 실행 가능한 파일이 아닙니다: $PYBIN_SET"
+    PYBIN="$PYBIN_SET"; PYBIN_SRC="--pybin(사용자 지정)"
+  fi
+
+  # (a) argv[0] — 가장 직접적인 근거
+  A0=""
+  if [ -z "$PYBIN" ] && [ -n "${BPID:-}" ] && [ -r "/proc/$BPID/cmdline" ]; then
+    A0="$(tr '\0' '\n' < "/proc/$BPID/cmdline" 2>/dev/null | head -1)"
+    case "$A0" in
+      /*) ;;
+      */*) A0="${CWD:-.}/$A0" ;;                       # 상대경로 → 프로세스 cwd 기준 절대화
+      "") ;;
+      *)  A0="$(command -v "$A0" 2>/dev/null || true)" ;;  # PATH 로 실행된 이름뿐
+    esac
+    if [ -n "$A0" ]; then
+      # dirname 만 정규화한다. readlink -f 로 마지막 성분까지 풀면 venv 링크가
+      # 베이스 인터프리터로 되돌아가 버린다(이 버그의 원인 그 자체).
+      A0D="$(dirname "$A0")"; A0B="$(basename "$A0")"
+      if [ -d "$A0D" ]; then A0="$(cd "$A0D" && pwd)/$A0B"; A0D="$(cd "$A0D" && pwd)"; fi
+      case "$A0B" in
+        python|python[0-9]*|pypy*)
+          PYBIN="$A0"; PYBIN_SRC="argv[0]" ;;
+        *)
+          # uvicorn/gunicorn 같은 콘솔 스크립트로 떴다면 같은 bin/ 의 python 이 그 환경이다.
+          if   [ -x "$A0D/python" ];  then PYBIN="$A0D/python";  PYBIN_SRC="argv[0] 스크립트의 bin/python"
+          elif [ -x "$A0D/python3" ]; then PYBIN="$A0D/python3"; PYBIN_SRC="argv[0] 스크립트의 bin/python3"
+          else
+            SB="$(sed -n '1s/^#![[:space:]]*//p' "$A0" 2>/dev/null | awk '{print $1}')"
+            if [ -n "$SB" ] && [ -x "$SB" ]; then PYBIN="$SB"; PYBIN_SRC="argv[0] 스크립트의 shebang"; fi
+          fi ;;
+      esac
+    fi
+  fi
+
+  # (b) 파일시스템의 venv — 프로세스가 이미 죽어 있을 때의 폴백이자, (a) 의 대조군
+  FS_VENV_PY=""
+  for c in "$BACKEND_DIR/venv/bin/python" "$BACKEND_DIR/.venv/bin/python" \
+           "${PREFIX:-}/venv/bin/python" "${PREFIX:-}/.venv/bin/python"; do
+    case "$c" in /venv/*|/.venv/*) continue ;; esac   # PREFIX 가 비었을 때의 잘못된 경로 방지
+    if [ -x "$c" ]; then FS_VENV_PY="$c"; break; fi
+  done
+  if [ -z "$PYBIN" ] && [ -n "$FS_VENV_PY" ]; then
+    PYBIN="$FS_VENV_PY"; PYBIN_SRC="파일시스템 venv(프로세스 미발견 폴백)"
+  fi
+
+  if [ -z "$PYBIN" ]; then
+    warn "백엔드가 쓰는 파이썬을 특정하지 못했습니다"
+    return 0
+  fi
+  [ -x "$PYBIN" ] || { warn "인터프리터가 실행 가능하지 않습니다: $PYBIN"; PYBIN=""; return 0; }
+
+  say "인터프리터: $PYBIN   (근거: $PYBIN_SRC)"
+  PYPREFIX="$("$PYBIN" -c 'import sys; print(sys.prefix)' 2>/dev/null || true)"
+  if [ -n "$PYPREFIX" ]; then say "sys.prefix: $PYPREFIX"; fi
+
+  # ── 교차검증. 사람이 --pybin 으로 못 박았으면 검증하지 않는다(명시가 추론을 이긴다).
+  [ -n "$PYBIN_SET" ] && return 0
+
+  # (c) 프로세스 환경의 VIRTUAL_ENV
+  VENV_ENV=""
+  if [ -n "${BPID:-}" ] && [ -r "/proc/$BPID/environ" ]; then
+    VENV_ENV="$(tr '\0' '\n' < "/proc/$BPID/environ" 2>/dev/null | sed -n 's/^VIRTUAL_ENV=//p' | head -1)"
+  fi
+  if [ -n "$VENV_ENV" ] && [ -n "$PYPREFIX" ] && [ "$VENV_ENV" != "$PYPREFIX" ]; then
+    warn "인터프리터 근거가 어긋납니다:"
+    warn "  VIRTUAL_ENV = $VENV_ENV"
+    warn "  sys.prefix  = $PYPREFIX  ($PYBIN)"
+    die "어느 파이썬에 설치할지 확정할 수 없습니다.  --pybin '$VENV_ENV/bin/python' 으로 지정하세요"
+  fi
+
+  # (d) 설치 트리에 venv 가 있는데 그 밖의 파이썬을 골랐다면 거의 확실히 오판이다.
+  if [ -n "$FS_VENV_PY" ] && [ -n "$PYPREFIX" ]; then
+    FSP="$("$FS_VENV_PY" -c 'import sys; print(sys.prefix)' 2>/dev/null || true)"
+    if [ -n "$FSP" ] && [ "$FSP" != "$PYPREFIX" ]; then
+      warn "인터프리터 근거가 어긋납니다:"
+      warn "  설치 트리의 venv = $FS_VENV_PY  (prefix=$FSP)"
+      warn "  프로세스 기준     = $PYBIN  (prefix=$PYPREFIX)"
+      die "venv 를 두고 시스템 파이썬에 설치하면 백엔드에는 반영되지 않습니다.  --pybin 으로 지정하세요"
+    fi
+  fi
+}
+
+detect_paths() {
+  step "설치 경로 발견"
+
+  BPID=""; BACKEND_DIR=""; FRONT_DIR=""; PYBIN=""; RUN_USER=""; CWD=""
+  RC=0; find_backend_pid || RC=$?
+  if [ -n "$BPID" ]; then
+    say "포트 $PORT 점유 PID: $BPID"
+    if [ -r "/proc/$BPID/cmdline" ]; then
+      say "cmdline: $(tr '\0' ' ' < "/proc/$BPID/cmdline")"
+    fi
+    # 저장소 계약상 uvicorn 은 반드시 <설치루트>/backend 에서 뜬다
+    # (config.py 의 load_dotenv() 가 CWD 기준으로 .env 를 읽기 때문. cwd 가 틀리면
+    #  SAINTVIEW_DATABASE_URL 을 못 읽고 sqlite:///./dev.db 로 조용히 떨어진다.)
+    CWD="$(readlink -f "/proc/$BPID/cwd" 2>/dev/null || true)"
+    if [ -n "$CWD" ] && [ -f "$CWD/app/main.py" ]; then
+      BACKEND_DIR="$CWD"
+      ok "백엔드 디렉터리: $BACKEND_DIR  (프로세스 cwd)"
+    elif [ -n "$CWD" ]; then
+      warn "PID $BPID 의 cwd 가 백엔드처럼 보이지 않습니다: $CWD"
+    else
+      warn "/proc/$BPID/cwd 를 읽지 못했습니다(root 권한 필요)"
+    fi
+    RUN_USER="$(stat -c %U "/proc/$BPID" 2>/dev/null || true)"
+    # ※ 아래를 `[ -n "$X" ] && say ...` 로 쓰면 조건이 거짓일 때 목록 전체가 1 을 반환해
+    #    set -e 가 셸을 그 자리에서 죽인다(dash 에서 실제로 확인). 반드시 if 로 쓴다.
+    if [ -n "$RUN_USER" ]; then say "실행 사용자: $RUN_USER"; fi
+    # 컨테이너/서비스 소속을 원문 그대로 남긴다(파싱은 [7] 에서).
+    if [ -r "/proc/$BPID/cgroup" ]; then
+      say "cgroup: $(head -1 "/proc/$BPID/cgroup")"
+    fi
+  else
+    warn "포트 $PORT 점유 프로세스를 찾지 못했습니다(도구 부재·비root·컨테이너 NAT 가능)"
+    if command -v docker >/dev/null 2>&1; then
+      say "docker 확인: $(docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep "$PORT" || echo '해당 없음')"
+    fi
+  fi
+
+  # --prefix 가 있으면 그것이 최우선(사람이 명시한 값을 추론이 덮지 않는다)
+  if [ -n "$PREFIX" ]; then
+    PREFIX="$(cd "$PREFIX" 2>/dev/null && pwd || printf '%s\n' "$PREFIX")"
+    [ -d "$PREFIX" ] || die "--prefix 경로가 없습니다: $PREFIX"
+    BACKEND_DIR="$PREFIX/backend"
+    FRONT_DIR="$PREFIX/frontend/dist"
+    ok "사용자 지정 설치 루트: $PREFIX"
+  elif [ -n "$BACKEND_DIR" ]; then
+    PREFIX="$(dirname "$BACKEND_DIR")"
+    if [ -d "$PREFIX/frontend/dist" ]; then FRONT_DIR="$PREFIX/frontend/dist"; fi
+  fi
+
+  # 프론트 root 를 nginx 설정에서도 뽑아 대조한다.
+  # ※ nginx -T 는 include 를 평탄화해 준다. 다만 server_name 우선순위·location 의
+  #   root/alias 재정의까지 정확히 해석하려면 상태기계가 필요하다 — 여기서는
+  #   후보만 모으고 **실제 파일 존재 여부로 확정**한다(파일이 이긴다).
+  NGX_ROOTS=""
+  if [ -n "${NGINX:-}" ] && [ "$(id -u)" = "0" ]; then
+    NGX_ROOTS="$("$NGINX" -T 2>/dev/null \
+      | sed 's/#.*//' \
+      | sed -n 's/^[[:space:]]*root[[:space:]]\{1,\}\([^;]*\);.*/\1/p' \
+      | sed 's/[[:space:]]*$//' | sort -u)"
+  fi
+  # ⚠ 이 루프에는 break 가 없다 → 조건을 만족하는 **사전순 마지막** root 가 남는다.
+  #   조건(`index.html` 에 `assets/index-` 포함)은 Vite 로 빌드한 아무 SPA 나 통과하므로,
+  #   같은 nginx 가 다른 SPA 도 서빙하면 그 사이트가 이길 수 있다
+  #   (기본 템플릿의 `/opt/saintview-viewer/...` 는 `/srv`·`/var/www` 에 항상 진다).
+  #   → 마지막을 임의로 고르지 않는다. 후보를 세어 2개 이상이면 사람에게 넘긴다.
+  NGX_PICK=""; NGX_N=0; NGX_CANDS=""
+  for r in $NGX_ROOTS; do
+    case "$r" in *'$'*) warn "nginx root 에 변수가 있어 정적 해석 불가: $r"; continue ;; esac
+    if [ -f "$r/index.html" ] && grep -q 'assets/index-' "$r/index.html" 2>/dev/null; then
+      NGX_PICK="$r"; NGX_N=$((NGX_N + 1)); NGX_CANDS="$NGX_CANDS $r"
+    fi
+  done
+  if [ "$NGX_N" -gt 1 ]; then
+    warn "nginx 가 서빙하는 SPA docroot 후보가 여러 개입니다:$NGX_CANDS"
+    if [ -n "$PREFIX_SET" ]; then
+      warn "  → --prefix 가 명시돼 있으므로 nginx 추론은 쓰지 않습니다"
+      NGX_PICK=""
+    else
+      die "어느 것이 우리 사이트인지 확정할 수 없습니다 — --prefix <설치루트> 로 명시하세요 (후보:$NGX_CANDS)"
+    fi
+  fi
+  if [ -n "$NGX_PICK" ]; then say "nginx root 후보: $NGX_PICK"; fi
+
+  if [ -z "$FRONT_DIR" ] && [ -n "$NGX_PICK" ]; then
+    FRONT_DIR="$NGX_PICK"
+  elif [ -n "$FRONT_DIR" ] && [ -n "$NGX_PICK" ] && [ "$FRONT_DIR" != "$NGX_PICK" ]; then
+    # 백엔드와 프론트가 서로 다른 디렉터리에서 서빙되고 있다는 뜻이다.
+    # 잘못된 쪽에 덮어쓰면 아무 일도 일어나지 않거나(무반영) 엉뚱한 사이트를 깨뜨린다.
+    if [ "$(realdir "$FRONT_DIR")" = "$(realdir "$NGX_PICK")" ]; then
+      # 심볼릭 링크라 문자열만 다를 뿐 같은 실물 디렉터리다 — 불일치가 아니다.
+      say "nginx root 와 표기만 다르고 같은 실물 디렉터리입니다: $NGX_PICK ≡ $FRONT_DIR"
+    elif [ -n "$PREFIX_SET" ]; then
+      # 위 455 줄 규약: **사람이 명시한 값을 추론이 덮지 않는다**.
+      # 덮으면 --prefix 를 정확히 줘도 dist 가 남의 사이트 docroot 로 들어가고(그 사이트
+      # index.html 이 우리 것으로 교체돼 즉시 죽는다), 백엔드만 --prefix 대로 갱신되는
+      # 부분 적용이 되며, 백업도 남의 docroot 스냅샷이라 롤백이 우리 프론트를 못 되돌린다.
+      warn "프론트 경로 불일치:  --prefix기준=$FRONT_DIR  nginx기준=$NGX_PICK"
+      warn "  → --prefix 를 명시했으므로 명시값을 씁니다(추론이 덮지 않습니다): $FRONT_DIR"
+      say  "  nginx 가 정말 다른 곳을 서빙 중이라면 nginx 설정을 고치거나 --prefix 를 그쪽으로 주세요."
+    else
+      warn "프론트 경로 불일치:  cwd기준=$FRONT_DIR  nginx기준=$NGX_PICK"
+      die "어디에 배포할지 확정할 수 없습니다 — --prefix <설치루트> 로 명시하세요 (잘못 고르면 남의 사이트를 덮어씁니다)"
+    fi
+  fi
+
+  [ -n "$BACKEND_DIR" ] || die "백엔드 경로를 찾지 못했습니다.  --prefix <설치루트> 로 지정하세요"
+  [ -n "$FRONT_DIR" ]   || die "프론트 dist 경로를 찾지 못했습니다.  --prefix <설치루트> 로 지정하세요"
+  if unsafe_target "$FRONT_DIR";   then die "프론트 경로가 시스템 최상위입니다 — 중단합니다: $FRONT_DIR"; fi
+  if unsafe_target "$BACKEND_DIR"; then die "백엔드 경로가 시스템 최상위입니다 — 중단합니다: $BACKEND_DIR"; fi
+  [ -f "$BACKEND_DIR/app/main.py" ] || die "백엔드 경로가 이상합니다(app/main.py 없음): $BACKEND_DIR"
+  [ -f "$FRONT_DIR/index.html" ]    || die "프론트 경로가 이상합니다(index.html 없음): $FRONT_DIR"
+
+  ok "백엔드: $BACKEND_DIR"
+  ok "프론트: $FRONT_DIR"
+
+  # 인터프리터는 **파일을 건드리기 전인 지금** 확정한다. 교차검증이 어긋나면 여기서
+  # 멈춰야 안전하다([3] 백업 이후에 죽으면 반쯤 적용된 상태가 남는다).
+  resolve_pybin
+
+  # 소유권 기준선도 지금 잡는다([4] 의 cp -a 가 root:root 로 덮어쓰기 전 값이어야 한다).
+  FOWN="$(own_of "$FRONT_DIR")"
+  BOWN="$(own_of "$BACKEND_DIR/app")"
+  [ -n "$FOWN" ] || FOWN="${RUN_USER:+$RUN_USER:$RUN_USER}"
+  [ -n "$BOWN" ] || BOWN="${RUN_USER:+$RUN_USER:$RUN_USER}"
+  if [ -n "$FOWN" ] || [ -n "$BOWN" ]; then
+    say "소유권 기준선: 프론트=${FOWN:-?}  백엔드app=${BOWN:-?}"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [3] 백업
+# ═══════════════════════════════════════════════════════════════════════════
+do_backup() {
+  step "백업"
+  BDIR="$BACKUP_ROOT/$TS"
+  mkdir -p "$BDIR"
+
+  # 지금 서버에 올라가 있는 것의 지문(= 이 백업의 내용물 지문).
+  CUR_ASSET="$(asset_of "$FRONT_DIR")"
+  CUR_APP="$(tree_hash "$BACKEND_DIR/app")"
+  CUR_EXTRA="$(extra_hash "$BACKEND_DIR")"
+  PKG_APP="$(tree_hash "$PKG/backend/app")"
+  say "현재 지문: asset=${CUR_ASSET:-?} app=${CUR_APP} extra=${CUR_EXTRA}"
+  say "패키지 지문: asset=${PKG_ASSET:-?} app=${PKG_APP}"
+
+  cp -a "$FRONT_DIR"          "$BDIR/frontend-dist"
+  cp -a "$BACKEND_DIR/app"    "$BDIR/backend-app"
+  # [4] do_copy 가 덮어쓰는 것은 **전부** 백업한다. 하나라도 빠지면 롤백이 그 경로를
+  # 신버전 그대로 남긴 채 '복구 완료' 를 찍는다(이 스크립트의 실제 사고 사례).
+  for p in $BK_FILES; do
+    if [ -f "$BACKEND_DIR/$p" ]; then cp -a "$BACKEND_DIR/$p" "$BDIR/$p"; fi
+  done
+  for d in $BK_DIRS; do
+    if [ -d "$BACKEND_DIR/$d" ]; then cp -a "$BACKEND_DIR/$d" "$BDIR/$d"; fi
+  done
+
+  # 롤백 대상을 기계가 읽을 수 있게 기록해 둔다(사람이 경로를 기억할 필요가 없게).
+  # FP_* 가 핵심이다: 롤백이 '되돌릴 것이 있는지' 를 판단하는 유일한 근거다.
+  # ABSENT_* 도 마찬가지로 필수다: '백업 당시 그 경로가 없었다' 는 사실을 남겨야
+  # 롤백이 '백업에 없음 = 백업이 부실함' 과 '백업에 없음 = 원래 없었음' 을 구분해
+  # 후자에서만 신버전 산출물을 옆으로 치울 수 있다.
+  # BK_FORMAT 은 백업 포맷 세대다. 1(=이 필드가 없음)은 부수 트리를 담지 않은 옛 백업이라
+  # 롤백이 app/ 만 되돌릴 수 있다는 사실을 사람에게 알려야 한다.
+  {
+    outln "BK_FORMAT='2'"
+    outln "TS='$TS'"
+    outln "FRONT_DIR='$FRONT_DIR'"
+    outln "BACKEND_DIR='$BACKEND_DIR'"
+    outln "PORT='$PORT'"
+    outln "PKG='${PKG:-}'"
+    outln "FP_ASSET='${CUR_ASSET}'"
+    outln "FP_APP='${CUR_APP}'"
+    outln "FP_EXTRA='${CUR_EXTRA}'"
+    outln "FOWN='${FOWN:-}'"
+    outln "BOWN='${BOWN:-}'"
+    for p in $BK_FILES; do
+      if [ ! -f "$BACKEND_DIR/$p" ]; then outln "ABSENT_$(mkey "$p")='1'"; fi
+    done
+    for d in $BK_DIRS; do
+      if [ ! -d "$BACKEND_DIR/$d" ]; then outln "ABSENT_$(mkey "$d")='1'"; fi
+    done
+  } > "$BDIR/manifest.env"
+
+  # ⚠ 이미 패키지와 같은 버전이 올라가 있으면 이 백업은 '신버전 스냅샷' 이다.
+  #   그런 백업으로 롤백하면 신버전을 신버전으로 덮으면서 '복구 완료' 를 찍는
+  #   거짓 성공이 된다.
+  #   예전에는 이것을 $BACKUP_ROOT/LATEST 파일로 막는다고 적어 뒀지만, do_rollback 은
+  #   LATEST 를 **한 번도 읽지 않았다**(쓰기만 하는 죽은 파일이었다). 주석과 코드가
+  #   어긋난 채 '보호되고 있다' 고 믿게 만들었으므로 파일 자체를 없앤다.
+  #   실제 보호는 [4] 끝에서 덧붙이는 **적용 후 지문(FP_*_AFTER)** 이 담당한다:
+  #   FP_* == FP_*_AFTER 인 백업 = '아무것도 바꾸지 않은 적용(no-op)' 이고,
+  #   do_rollback 이 이런 백업을 자동 선택에서 제외한다.
+  SAMERC=0; fp_same "$CUR_ASSET" "$CUR_APP" "$PKG_ASSET" "$PKG_APP" || SAMERC=$?
+  if [ "$SAMERC" = "0" ]; then
+    warn "이미 패키지와 같은 버전이 배포돼 있습니다 — 이 백업은 롤백 자동 선택에서 제외됩니다"
+    say "  (되돌릴 수 있는 것은 '패키지 이전' 상태를 담은 더 오래된 백업입니다)"
+  fi
+  rm -f "$BACKUP_ROOT/LATEST" 2>/dev/null || true
+  # 의존성 롤백 기준선(pycdlib 하나만 넣었다면 되돌리기는 pip uninstall 한 줄이다)
+  if [ -n "${PYBIN:-}" ] && [ -x "$PYBIN" ]; then
+    "$PYBIN" -m pip freeze > "$BDIR/pip-freeze.txt" 2>/dev/null || true
+  fi
+  prune_backups
+  ok "백업 위치: $BDIR"
+  say "되돌리기:  sudo sh $(basename "$0") --rollback $TS"
+}
+
+# 오래된 백업 정리 — 갱신 1회당 프론트 dist 전체를 복사하므로 백업 하나가 10MB 를 넘는다.
+# 상한이 없으면 배포를 거듭할수록 /var 가 조용히 찬다(실측: 3회 적용에 34MB).
+# 되돌리기는 사실상 직전 몇 세대만 쓰므로 최근 N개만 남긴다(SV_KEEP_BACKUPS, 기본 5).
+# ⚠ 방금 만든 백업($TS)은 어떤 경우에도 지우지 않는다 — 그러면 이번 적용이 되돌릴 수 없어진다.
+prune_backups() {
+  KEEP="${SV_KEEP_BACKUPS:-5}"
+  case "$KEEP" in
+    ''|*[!0-9]*) return 0 ;;    # 숫자가 아니면 정리하지 않는다(사고 방지)
+  esac
+  [ "$KEEP" -ge 1 ] || return 0
+  N=0
+  # 이름이 14자리 타임스탬프라 역순 정렬 = 최신순. manifest.env 가 있는 것만 우리 백업으로 본다.
+  for d in $(ls -1 "$BACKUP_ROOT" 2>/dev/null | sort -r); do
+    B="$BACKUP_ROOT/$d"
+    if [ ! -f "$B/manifest.env" ]; then continue; fi
+    N=$((N + 1))
+    if [ "$N" -le "$KEEP" ]; then continue; fi
+    if [ "$d" = "$TS" ]; then continue; fi
+    rm -rf "$B" && say "· 오래된 백업 정리: $d" || warn "백업 정리 실패(무시): $d"
+  done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [4] 파일 교체 — 덮어쓰기 전용(additive). 어디에도 rm -rf / --delete 를 쓰지 않는다.
+# ═══════════════════════════════════════════════════════════════════════════
+do_copy() {
+  step "파일 교체"
+
+  # ── 프론트 ───────────────────────────────────────────────────────────────
+  # 순서가 중요하다: assets → 루트 아이콘 → **index.html 마지막**.
+  # index.html 은 no-cache 라 즉시 보이는데, 그 시점에 청크가 디스크에 없으면
+  # 새로 접속한 사용자가 흰 화면을 본다.
+  #
+  # 구 자산을 지우지 않는 이유: 번들의 vite preload 헬퍼가 'vite:preloadError' 를
+  # dispatch 한 뒤 그대로 rethrow 하는데, 앱 어디에도 그 리스너가 없다. 열려 있는
+  # 탭이 삭제된 지연로드 청크를 요청하면 판독 중 화면이 그대로 죽는다.
+  # 파일명이 콘텐츠 해시라 신·구가 충돌하지 않으므로 비용은 디스크뿐이다.
+  say "프론트: assets → 루트파일 → index.html 순서로 덮어씁니다(구 자산은 남깁니다)"
+  mkdir -p "$FRONT_DIR/assets"
+  # .gz/.br 사전압축본이 함께 복사돼야 gzip_static/brotli_static 이 동작한다.
+  # 확장자 필터를 걸지 말 것 — 통째로 복사한다.
+  cp -a "$PKG/frontend/dist/assets/." "$FRONT_DIR/assets/"
+  ok "assets 복사 완료 ($(ls -1 "$PKG/frontend/dist/assets" | wc -l) 개)"
+
+  for f in "$PKG/frontend/dist"/*; do
+    b="$(basename "$f")"
+    case "$b" in
+      assets|index.html) continue ;;   # ※ [ ] && continue 는 set -e 에서 셸을 죽인다 → case 사용
+    esac
+    cp -a "$f" "$FRONT_DIR/"
+  done
+  ok "루트 자산 복사 완료"
+
+  cp -a "$PKG/frontend/dist/index.html" "$FRONT_DIR/index.html"
+  ok "index.html 교체 (참조: $PKG_ASSET)"
+
+  # ── 백엔드 ───────────────────────────────────────────────────────────────
+  # app/ 만 덮는다. .env·dev.db·certs 는 패키지에 없으므로 덮일 수 없고,
+  # 삭제도 하지 않으므로 안전하다.
+  # tests/ 와 harness/ 는 운영에 불필요해 일부러 복사하지 않는다(공격면 축소).
+  # ⚠ 여기서 덮어쓰는 대상은 **반드시** BK_FILES/BK_DIRS 안에 있어야 한다.
+  #   그래야 [3] 이 백업하고 [롤백] 이 되돌린다. 목록 밖의 경로를 여기에 직접
+  #   추가하면 '롤백해도 신버전이 남는' 사고가 그대로 재현된다.
+  say "백엔드: app/ · $BK_FILES · $BK_DIRS 를 덮어씁니다"
+  cp -a "$PKG/backend/app/." "$BACKEND_DIR/app/"
+  for p in $BK_FILES; do
+    # .env.example 은 파일만 갱신한다. **절대 .env 로 복사하지 않는다** —
+    # 실서버 JWT 시크릿·DB URL·WebPACS 계정이 dev 기본값으로 통째로 덮인다.
+    if [ -f "$PKG/backend/$p" ]; then cp -a "$PKG/backend/$p" "$BACKEND_DIR/$p"; fi
+  done
+  for d in $BK_DIRS; do
+    if [ -d "$PKG/backend/$d" ]; then
+      mkdir -p "$BACKEND_DIR/$d"; cp -a "$PKG/backend/$d/." "$BACKEND_DIR/$d/"
+    fi
+  done
+  ok "백엔드 코드 교체 완료 (.env / DB / 인증서 미접촉)"
+
+  # 스테일 .pyc 는 소스보다 mtime 이 앞서면 무시되지만, 삭제된 모듈의 캐시가
+  # 남아 import 가 성공해 버리는 경우가 있어 캐시만 비운다(소스는 안 지운다).
+  find "$BACKEND_DIR/app" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+  # ── 소유권 원복 ──────────────────────────────────────────────────────────
+  # cp -a 가 패키지(root:root)의 소유권까지 복사해 서비스 계정 소유였던 트리가
+  # root:root 로 바뀐다. 읽기는 되지만 __pycache__ 생성이 막혀 기동이 느려지고,
+  # 앱이 그 경로에 파일을 만드는 기능은 EACCES 로 깨진다. 기준선으로 되돌린다.
+  if [ -n "${FOWN:-}" ] || [ -n "${BOWN:-}" ]; then
+    say "소유권 원복: 프론트=${FOWN:-건너뜀}  백엔드=${BOWN:-건너뜀}"
+  fi
+  chown_back "$FRONT_DIR" "${FOWN:-}"
+  chown_back "$BACKEND_DIR/app" "${BOWN:-}"
+  # app/ 밖에 새로 떨군 파일들도 같은 소유권으로 맞춘다(백엔드 트리 기준).
+  for p in $BK_FILES $BK_DIRS; do
+    # ※ `[ -e ] && ...` 로 쓰면 마지막 반복이 거짓일 때 루프가 1 을 반환하고
+    #   set -e 가 셸을 죽인다(이 파일의 다른 주석과 같은 이유). 반드시 if 로 쓴다.
+    if [ -e "$BACKEND_DIR/$p" ]; then chown_back "$BACKEND_DIR/$p" "${BOWN:-}"; fi
+  done
+
+  # ── 적용 후 지문 기록 ────────────────────────────────────────────────────
+  # manifest.env 의 FP_* 는 '이 백업이 담고 있는 = 적용 **전**' 상태다.
+  # 여기서 적용 **후** 상태를 FP_*_AFTER 로 덧붙인다. 이 두 값이 같으면 그 적용은
+  # 아무것도 바꾸지 않았다는 뜻이고(= 백업이 신버전 스냅샷), 롤백이 그런 백업을
+  # 골라 장애 원인인 신버전을 다시 배포하는 사고를 막을 수 있는 유일한 근거다.
+  # (mval 은 `^FP_APP=` 로 앵커되므로 FP_APP_AFTER 와 섞이지 않는다.)
+  if [ -f "$BACKUP_ROOT/$TS/manifest.env" ]; then
+    {
+      outln "FP_ASSET_AFTER='$(asset_of "$FRONT_DIR")'"
+      outln "FP_APP_AFTER='$(tree_hash "$BACKEND_DIR/app")'"
+      outln "FP_EXTRA_AFTER='$(extra_hash "$BACKEND_DIR")'"
+    } >> "$BACKUP_ROOT/$TS/manifest.env"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [5] 파이썬 의존성 — **신규 항목만** 설치한다
+# ═══════════════════════════════════════════════════════════════════════════
+do_pydeps() {
+  step "파이썬 의존성"
+
+  if [ -z "${PYBIN:-}" ] || [ ! -x "${PYBIN:-}" ]; then
+    # 인터프리터를 못 찾으면 설치하지 않는다. 엉뚱한 파이썬에 넣으면
+    # '설치했는데도 계속 501' 이 되어 진단이 더 어려워진다.
+    # ※ 건너뛰었다는 사실을 [8]·최종 배너까지 끌고 간다(조용한 성공 금지).
+    PYDEPS_FAIL=1
+    warn "백엔드가 쓰는 파이썬을 특정하지 못했습니다 — 설치를 건너뜁니다"
+    say "수동:  tr '\\0' ' ' < /proc/<백엔드PID>/cmdline   # argv[0] 이 그 파이썬이다"
+    say "       <그 파이썬> -m pip install 'pycdlib>=1.14'"
+    say "또는:  --pybin /경로/venv/bin/python 으로 다시 실행"
+    return 0
+  fi
+  say "대상 인터프리터: $PYBIN"
+
+  # requirements.txt 는 전 항목이 상한 없는 '>=' 다.
+  # 여기서 `pip install -r`(특히 -U)을 돌리면 fastapi·sqlalchemy·pydantic·numpy 가
+  # 한꺼번에 최신 메이저로 올라간다. 이번 갱신에 필요한 신규 패키지는 극소수이므로
+  # **미설치 항목만 골라 그것만** 설치한다(블라스트 반경 최소화).
+  MISSING=""; MISSING_NAMES=""
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*|'-'*) continue ;; esac
+    name="$(printf '%s' "$line" | sed 's/[[:space:]]*#.*//; s/\[.*//; s/[<>=!~;].*//; s/[[:space:]]*$//')"
+    [ -n "$name" ] || continue
+    if ! "$PYBIN" -m pip show "$name" >/dev/null 2>&1; then
+      MISSING="$MISSING $(printf '%s' "$line" | sed 's/[[:space:]]*#.*//')"
+      MISSING_NAMES="$MISSING_NAMES $name"
+    fi
+  done < "$BACKEND_DIR/requirements.txt"
+
+  if [ -z "$MISSING" ]; then
+    ok "신규 의존성 없음 (전부 설치돼 있음)"
+    return 0
+  fi
+  say "신규 설치 대상:$MISSING"
+  # 대상이 requirements 전량이면 인터프리터를 잘못 골랐다는 신호다(정상 서버라면
+  # fastapi·uvicorn 이 이미 있다). 계속하면 엉뚱한 파이썬을 오염시킨다.
+  CORE_MISS=0
+  for n in $MISSING_NAMES; do
+    case "$n" in fastapi|uvicorn) CORE_MISS=1 ;; esac   # 부분일치 금지(fastapi-utils 등)
+  done
+  if [ "$CORE_MISS" = "1" ]; then
+    warn "fastapi/uvicorn 까지 '미설치' 로 나옵니다 — 이 파이썬은 백엔드가 쓰는 환경이 아닐 가능성이 큽니다"
+    warn "  대상: $PYBIN (prefix=$("$PYBIN" -c 'import sys;print(sys.prefix)' 2>/dev/null || echo '?'))"
+    PYDEPS_FAIL=1
+    say "설치를 건너뜁니다.  --pybin <백엔드 venv 의 python> 으로 다시 실행하세요"
+    return 0
+  fi
+
+  # -U / --upgrade 를 절대 붙이지 않는다(위 주석의 이유).
+  RC=0
+  POUT="$(mktemp)"
+  # shellcheck disable=SC2086
+  "$PYBIN" -m pip install --no-input $MISSING > "$POUT" 2>&1 || RC=$?
+  cat "$POUT"
+
+  if [ "$RC" != "0" ]; then
+    PYDEPS_FAIL=1
+    warn "pip 설치 실패(exit $RC)"
+    # PEP 668(Debian 12 / Ubuntu 24.04+): 시스템 파이썬은 pip 설치를 거부한다.
+    # --break-system-packages 를 **자동으로 붙이지 않는다** — OS 패키지 관리자와
+    # 충돌해 서버 전체를 망가뜨릴 수 있는 결정은 사람이 해야 한다.
+    if grep -q 'externally-managed-environment' "$POUT" 2>/dev/null; then
+      echo
+      warn "PEP 668 로 보호된 시스템 파이썬입니다(externally-managed-environment)"
+      say "  이 서버의 백엔드는 venv 없이 시스템 파이썬으로 도는 것으로 보입니다."
+      say "  택일하세요(자동으로 고르지 않습니다):"
+      say "   1) 권장 — venv 를 만들어 백엔드를 그 venv 로 기동"
+      say "        python3 -m venv $BACKEND_DIR/venv"
+      say "        $BACKEND_DIR/venv/bin/pip install -r $BACKEND_DIR/requirements.txt"
+      say "        (기동 명령의 python 을 $BACKEND_DIR/venv/bin/python 으로 교체)"
+      say "   2) OS 패키지로 설치      apt-get install python3-pycdlib   (있는 배포판에 한함)"
+      say "   3) 위험을 감수하고 강제  $PYBIN -m pip install --break-system-packages$MISSING"
+      echo
+    fi
+    say "수동:  $PYBIN -m pip install$MISSING"
+    rm -f "$POUT"
+    return 0
+  fi
+  rm -f "$POUT"
+
+  # 'pip 이 exit 0' 과 '실제로 임포트된다' 는 다른 명제다. 반드시 되물어 확인한다.
+  STILL=""
+  for n in $MISSING_NAMES; do
+    if ! "$PYBIN" -m pip show "$n" >/dev/null 2>&1; then STILL="$STILL $n"; fi
+  done
+  if [ -n "$STILL" ]; then
+    PYDEPS_FAIL=1
+    warn "pip 은 성공했다는데 여전히 없습니다:$STILL"
+    say "  (다른 환경에 설치됐을 수 있습니다 — $PYBIN 을 확인하세요)"
+  else
+    ok "설치 완료 (설치 후 재확인 통과)"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [6] nginx 최적화 — patch_nginx.sh 에 위임한다(드롭인 로직을 중복 구현하지 않는다)
+#     다만 brotli **모듈 설치**는 patch_nginx.sh 가 하지 않으므로 여기서 먼저 한다.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# brotli 능력 판정을 사다리에서 **분리해 단독으로** 수행한다.
+# patch_nginx.sh 처럼 gzip 지시어들과 섞어 돌리면 '이미 설정됨(duplicate)' 과
+# '모듈 없음(unknown)' 이 같은 메시지로 뭉개진다. 단독 테스트에서는 두 에러가
+# 서로 배타적이라 오진이 원천 차단된다.
+#   반환: 0=모듈 있음  1=모듈 없음  2=판정 불가
+# 탐침 파일 경로를 계산한다(0=구했음, 1=못 구함). brotli_probe 와 '잔재 회수' 가
+# **같은 경로**를 봐야 하므로 한 곳에 둔다.
+probe_path() {
+  PROBE=""
+  [ -n "${NGINX:-}" ] || return 1
+  CONF="$("$NGINX" -V 2>&1 | tr ' ' '\n' | sed -n 's/^--conf-path=//p' | head -1)"
+  [ -n "$CONF" ] && [ -f "$CONF" ] || CONF=/etc/nginx/nginx.conf
+  [ -f "$CONF" ] || return 1
+  CONFDIR="$(dirname "$CONF")/conf.d"
+  [ -d "$CONFDIR" ] || return 1
+  PROBE="$CONFDIR/zz-saintview-brotli-probe.conf"
+  return 0
+}
+
+# 이전 실행이 중단돼 남았을 수 있는 탐침 파일을 선제 회수한다.
+# (남아 있으면 모듈 없는 서버에서 nginx -t / reload / **부팅**이 전부 실패한다)
+probe_reap_stale() {
+  probe_path || return 0
+  if [ -f "$PROBE" ]; then
+    warn "이전 실행이 남긴 brotli 탐침 파일을 제거합니다: $PROBE"
+    warn "  (이 파일이 남아 있으면 모듈 없는 서버는 다음 재부팅에서 nginx 가 뜨지 않습니다)"
+    rm -f "$PROBE" 2>/dev/null || warn "  제거 실패 — 직접 지우세요: rm -f $PROBE"
+  fi
+}
+
+brotli_probe() {
+  [ -n "${NGINX:-}" ] || return 2
+  probe_path || return 2
+  # ⚠ 여기서 쓰는 곳은 **실서버가 실제로 include 하는 경로**다. 파일을 만든 뒤 지우기
+  #   전에 프로세스가 죽으면(Ctrl-C, SSH 끊김=HUP, 배포창 타임아웃, OOM killer) 파일이
+  #   그대로 남고, brotli 모듈이 없는 서버에서는 `unknown directive "brotli_static"` 로
+  #   이후 모든 nginx -t / nginx -s reload 가 실패한다. 실행 중인 nginx 는 계속 정상
+  #   서비스하므로 아무도 눈치채지 못하다가 **무관한 재부팅에서 사이트 전체가 죽는다**.
+  #   (모듈이 있는 서버에서도 드롭인의 brotli_static 과 겹쳐 duplicate [emerg] 가 된다)
+  #   → 파일을 만들기 **전에** 트랩을 걸고, 정상 경로에서 지운 뒤 트랩을 푼다.
+  trap 'rm -f "$PROBE"' EXIT
+  trap 'rm -f "$PROBE"; exit 130' INT
+  trap 'rm -f "$PROBE"; exit 143' TERM
+  trap 'rm -f "$PROBE"; exit 129' HUP
+  printf 'brotli_static on;\n' > "$PROBE"
+  PRC=0; PERR="$("$NGINX" -t 2>&1)" || PRC=$?
+  rm -f "$PROBE"
+  trap - EXIT INT TERM HUP
+  if [ "$PRC" = "0" ]; then return 0; fi
+  case "$PERR" in
+    *'"brotli_static" directive is duplicate'*) return 0 ;;  # 이미 설정됨 = 모듈은 있다
+    *'unknown directive "brotli_static"'*)      return 1 ;;  # 모듈 없음 확정
+    *) printf '%s\n' "$PERR"; return 2 ;;                    # 우리와 무관한 기존 설정 오류
+  esac
+}
+
+brotli_install() {
+  # 패키지 이름 주의: `libnginx-mod-http-brotli` 는 **존재하지 않는 이름**이다.
+  # 실제로는 -filter(런타임 압축) / -static(.br 서빙) 두 개로 쪼개져 있고,
+  # 우리에게 필요한 것은 **-static 하나뿐**이다(filter 는 CPU 만 쓴다).
+  ID=""; VER=""
+  if [ -r /etc/os-release ]; then
+    ID="$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"' | head -1)"
+    VER="$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"' | head -1)"
+    LIKE="$(sed -n 's/^ID_LIKE=//p' /etc/os-release | tr -d '"' | head -1)"
+  fi
+  say "배포판: ${ID:-unknown} ${VER:-} (like: ${LIKE:-none})"
+  case "$ID $LIKE" in
+    *debian*|*ubuntu*)
+      # Debian 12 = main, Ubuntu 24.04 = universe 에 있다. Ubuntu 22.04(jammy) 에는 **없다**.
+      DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true
+      if apt-cache policy libnginx-mod-http-brotli-static 2>/dev/null | grep -q 'Candidate: [^(]'; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y libnginx-mod-http-brotli-static
+        return $?
+      fi
+      warn "apt 에 libnginx-mod-http-brotli-static 후보가 없습니다"
+      return 1 ;;
+    *rhel*|*centos*|*rocky*|*almalinux*|*fedora*)
+      # RHEL 계열은 EPEL 의 nginx-mod-brotli 하나가 filter+static 을 둘 다 담고 있다.
+      dnf install -y epel-release >/dev/null 2>&1 || true
+      dnf install -y nginx-mod-brotli
+      return $? ;;
+    *)
+      warn "지원하지 않는 배포판입니다: ${ID:-unknown}"
+      return 1 ;;
+  esac
+}
+
+brotli_manual_help() {
+  cat <<'HOWTO'
+  ❌ brotli 모듈 없음 — .br 파일이 서버에 있는데도 전송되지 않습니다
+     (빌드가 이미 .br 을 만들어 함께 배포했지만, nginx 가 협상을 못 합니다)
+
+     자동 설치가 불가능한 대표 사례: Ubuntu 22.04(jammy).
+       · 배포판 저장소(main/universe/backports)에 nginx brotli 모듈이 없다
+       · ppa:ondrej/nginx 는 존재하지 않는다(Launchpad 404)
+       · nginx.org 공식 저장소도 brotli 모듈을 제공하지 않는다
+       · 다른 버전용 .so 반입은 `version 1024000 instead of 1018000` 로 거부된다
+     → **설치된 nginx 와 정확히 같은 버전의 소스**로 동적 모듈을 빌드하는 수밖에 없다:
+
+       apt-get install -y build-essential git cmake libpcre3-dev zlib1g-dev libssl-dev
+       NGV=$(nginx -v 2>&1 | sed 's#.*nginx/\([0-9.]*\).*#\1#')
+       wget https://nginx.org/download/nginx-$NGV.tar.gz && tar xf nginx-$NGV.tar.gz
+       git clone --recurse-submodules https://github.com/google/ngx_brotli
+       cd nginx-$NGV && ./configure --with-compat --add-dynamic-module=../ngx_brotli && make modules
+       cp objs/ngx_http_brotli_static_module.so "$(nginx -V 2>&1 | tr ' ' '\n' \
+            | sed -n 's/^--modules-path=//p')/"
+       echo 'load_module modules/ngx_http_brotli_static_module.so;' \
+            > /etc/nginx/modules-enabled/50-mod-http-brotli-static.conf
+       nginx -t && systemctl reload nginx
+
+     ⚠ 운영 서버에 컴파일러를 설치하는 결정은 사람이 해야 하므로 이 스크립트는
+       자동 빌드를 하지 않습니다. 또 이후 nginx 를 업그레이드하면 .so 버전 체크에
+       걸려 기동에 실패할 수 있으니, nginx 를 올릴 때 모듈도 함께 다시 빌드하세요.
+HOWTO
+}
+
+do_nginx() {
+  step "nginx 전송 최적화"
+  if [ "$SKIP_NGINX" = "1" ]; then say "--skip-nginx 지정 — 건너뜁니다"; return 0; fi
+  if [ -z "${NGINX:-}" ]; then warn "nginx 를 찾지 못해 건너뜁니다"; return 0; fi
+
+  # 1) 모듈 먼저, 드롭인은 그 다음. 순서를 반대로 하면 모듈이 나중에 깔려도
+  #    이미 brotli_static 이 빠진 드롭인이 확정돼 버린다.
+  BR_OK=0
+  RC=0; brotli_probe || RC=$?
+  case "$RC" in
+    0) ok "brotli 모듈 있음"; BR_OK=1 ;;
+    1) warn "brotli 모듈 없음 — 설치를 시도합니다"
+       IRC=0; brotli_install || IRC=$?
+       RC2=0; brotli_probe || RC2=$?
+       if [ "$RC2" = "0" ]; then ok "brotli 모듈 설치 성공"; BR_OK=1
+       else
+         echo
+         brotli_manual_help
+         say "감지: nginx=$("$NGINX" -v 2>&1 | tr -d '\n')  설치시도 exit=$IRC"
+         echo
+       fi ;;
+    *) warn "brotli 능력 판정 불가 — 기존 nginx 설정에 다른 문제가 있을 수 있습니다" ;;
+  esac
+
+  # 2) 드롭인은 patch_nginx.sh 에 위임한다(WANT 목록·duplicate 사다리·원복이
+  #    이미 거기 있다. 여기서 다시 구현하면 두 곳이 어긋난다).
+  PATCH=""
+  for c in "$SELF_DIR/patch_nginx.sh" "$PKG/deploy/patch_nginx.sh"; do
+    if [ -f "$c" ]; then PATCH="$c"; break; fi
+  done
+  if [ -n "$PATCH" ]; then
+    say "위임: sh $PATCH --apply"
+    PRC=0; sh "$PATCH" --apply || PRC=$?
+    # patch_nginx.sh 의 종료코드는 `nginx -s reload` 실패(nginx 미기동 등)로도 1 이 된다.
+    # 종료코드만 보고 '실패' 라고 쓰면 오보가 되므로, **실제 결과물**로 다시 판정한다.
+    DCHK="$(find /etc/nginx -name 'zz-saintview-perf.conf' 2>/dev/null | head -1)"
+    if [ -n "$DCHK" ]; then
+      if grep -q '^brotli_static' "$DCHK"; then ok "드롭인에 brotli_static 포함 ($DCHK)"
+      else warn "드롭인에 brotli_static 이 없습니다 ($DCHK) — .br 이 서빙되지 않습니다"; fi
+      if "$NGINX" -t >/dev/null 2>&1; then ok "nginx -t 통과"
+      else warn "nginx -t 실패 — 즉시 확인하세요:  nginx -t"; fi
+    elif [ "$PRC" != "0" ]; then
+      warn "patch_nginx.sh 가 exit $PRC 로 끝났고 드롭인도 없습니다 — 위 출력을 확인하세요"
+    fi
+  else
+    warn "patch_nginx.sh 를 찾지 못했습니다 (찾은 곳: $SELF_DIR/, $PKG/deploy/)"
+    say "  → nginx 드롭인(gzip_static/brotli_static)은 적용되지 않았습니다."
+    say "     패키지의 deploy/patch_nginx.sh 를 이 스크립트와 같은 폴더에 두고 다시 실행하거나,"
+    say "     sudo sh deploy/patch_nginx.sh --apply 를 직접 실행하세요."
+  fi
+
+  if [ "$BR_OK" = "0" ]; then
+    # 조용히 성공한 척 하지 않는다. 여기서 부분 적용임을 분명히 남긴다.
+    warn "부분 적용(gzip 만) — brotli 는 비활성 상태입니다"
+  fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [7] 백엔드 재시작 — 발견한 방식대로만. 추측으로 죽이지 않는다.
+# ═══════════════════════════════════════════════════════════════════════════
+wait_health() {   # $1 = 최대 대기(초)
+  W=0
+  while [ "$W" -lt "${1:-60}" ]; do
+    if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then return 0; fi
+    sleep 2; W=$((W + 2))
+  done
+  return 1
+}
+
+# 구 프로세스가 물러났는지를 **포트 해제**로 판정한다(kill -0 은 좀비에도 성공한다).
+# 포트를 볼 수단이 아예 없는 환경에서만 PID(좀비 포함)로 폴백한다.
+# $1 = 최대 대기(초).  0=해제됨 1=아직 점유
+WPF_ELAPSED=0
+wait_port_free() {
+  WPF_ELAPSED=0
+  while :; do
+    PB=0; port_busy || PB=$?
+    if [ "$PB" = "1" ]; then return 0; fi
+    if [ "$PB" = "2" ] && proc_gone "${BPID:-}"; then return 0; fi
+    [ "$WPF_ELAPSED" -lt "${1:-30}" ] || return 1
+    sleep 1; WPF_ELAPSED=$((WPF_ELAPSED + 1))
+  done
+}
+
+# 재기동을 실제로 한 번이라도 시도했는지. 메시지를 사실과 맞추는 데 쓴다.
+RESTART_TRIED=0
+
+manual_restart_help() {
+  # 머리말은 **관측한 사실**로 갈라 쓴다. 포트가 비어 있는데 '구 프로세스가 그대로
+  # 돌고 있습니다' 라고 쓰면 운영자를 정반대 진단으로 몰아넣는다(서비스는 이미 중단).
+  PBH=0; port_busy || PBH=$?
+  if [ "$PBH" = "1" ]; then
+    cat <<EOF
+  ❌ 백엔드가 **내려가 있습니다** — 포트 $PORT 에 리스너가 없습니다(서비스 중단 중).
+     코드는 교체됐고 구 프로세스도 종료됐지만, 새 프로세스가 뜨지 못했습니다.
+     ※ 지금 즉시 아래 4) 의 수동 기동을 하거나, 롤백 후 기동하세요.
+EOF
+  elif [ "$RESTART_TRIED" = "1" ]; then
+    cat <<EOF
+  ❌ 재기동은 했지만 백엔드가 health 에 응답하지 않습니다(포트 $PORT 는 점유 중).
+     새 프로세스가 떴다가 기동 중 실패했거나, 아직 부팅 중일 수 있습니다.
+     ※ 먼저 로그를 보세요. 구 코드로 돌아가 있는 상태가 아닙니다.
+EOF
+  else
+    cat <<EOF
+  ❌ 백엔드를 자동으로 재시작하지 못했습니다.
+     **코드는 이미 교체됐지만 구 프로세스가 그대로 돌고 있습니다**(포트 $PORT 점유 중)
+     (uvicorn 에 --reload 가 없으므로 재시작 전에는 신규 라우트가 계속 404 입니다).
+EOF
+  fi
+  cat <<EOF
+
+     서버에서 아래를 순서대로 확인하고 직접 재시작하세요:
+       1) 무엇이 $PORT 을 잡고 있나
+            ss -lptn 'sport = :$PORT'      # 또는  lsof -nP -iTCP:$PORT -sTCP:LISTEN
+       2) 그 PID 가 systemd 서비스인가
+            cat /proc/<PID>/cgroup ; systemctl status <PID>
+            → 서비스면:  systemctl restart <유닛>
+       3) 도커인가
+            docker ps --format '{{.Names}} {{.Ports}}' | grep $PORT
+            → 컨테이너면:  docker restart <이름>
+              ⚠ 소스가 bind mount 가 아니면 restart 로는 코드가 안 바뀝니다(재빌드 필요)
+       4) 맨 프로세스면 (cgroup 이 / 또는 /init.scope)
+            kill -TERM <PID>        # lifespan shutdown 을 돌게 둔다. -9 를 먼저 쓰지 말 것
+            # 포트가 풀릴 때까지 기다린 뒤(즉시 재기동하면 Address already in use)
+            cd "$BACKEND_DIR" && setsid nohup <원래 cmdline> >> /var/log/saintview-backend.log 2>&1 &
+          ※ **cd 를 반드시 $BACKEND_DIR 로** 해야 합니다. config.py 의 load_dotenv() 가
+            CWD 기준으로 .env 를 읽으므로, cwd 가 틀리면 sqlite:///./dev.db 로 조용히
+            떨어져 **빈 DB 로 기동**됩니다.
+     되돌리려면:  sudo sh $(basename "$0") --rollback $TS
+EOF
+}
+
+do_restart() {
+  step "백엔드 재시작"
+  # ⚠⚠ **이 함수 안에서는 errexit(set -e)이 꺼져 있다.**
+  #   호출부가 `RRC=0; do_restart || RRC=$?` 형태인데, POSIX 는 `||` 왼쪽 명령에서
+  #   errexit 를 무시하도록 규정하고 그 억제가 **함수 본문 전체로 전파된다**(dash·bash
+  #   모두 확인). 즉 여기서는 어떤 명령이 실패해도 셸이 멈추지 않는다.
+  #   → 되돌릴 수 없는 행위(kill, mv, rm) 앞의 전제조건은 반드시 **손으로** 검사한다.
+  if [ "$SKIP_RESTART" = "1" ]; then warn "--skip-restart 지정 — 구 코드가 계속 돕니다"; return 0; fi
+
+  UNIT=""; CID=""
+  if [ -n "${BPID:-}" ] && [ -r "/proc/$BPID/cgroup" ]; then
+    CG="$(cat "/proc/$BPID/cgroup")"
+    # cgroup v1/v2, 시스템/사용자 유닛, docker/k8s 로 형태가 제각각이라
+    # 단일 정규식으로는 반드시 어딘가 틀린다 → 두 패턴을 각각 시도한다.
+    UNIT="$(printf '%s' "$CG" | sed -n 's#.*[:/]\([A-Za-z0-9@._-]\{1,\}\.service\).*#\1#p' | head -1)"
+    CID="$(printf '%s' "$CG" | sed -n 's#.*/docker[-/]\([0-9a-f]\{12,64\}\).*#\1#p' | head -1)"
+  fi
+
+  if [ -n "$CID" ]; then
+    warn "백엔드가 도커 컨테이너에서 돕니다 (id=$CID)"
+    say "  restart 는 같은 이미지를 다시 돌릴 뿐입니다. 소스가 bind mount 가 아니면"
+    say "  코드 갱신이 반영되지 않으므로 자동 재시작을 하지 않습니다."
+    say "  확인:  docker inspect -f '{{json .Mounts}}' $CID"
+    say "  반영:  docker restart $CID   (bind mount 인 경우)"
+    return 1
+  fi
+
+  if [ -n "$UNIT" ] && command -v systemctl >/dev/null 2>&1; then
+    say "systemd 유닛: $UNIT"
+    systemctl show -p FragmentPath -p ExecStart -p User -p WorkingDirectory --value "$UNIT" 2>/dev/null || true
+    RC=0; systemctl restart "$UNIT" || RC=$?
+    if [ "$RC" != "0" ]; then warn "systemctl restart 실패(exit $RC)"; manual_restart_help; return 1; fi
+    if wait_health 60; then ok "재시작 완료 ($UNIT)"; return 0; fi
+    warn "재시작했으나 60초 내 health 응답 없음"
+    journalctl -u "$UNIT" -n 60 --no-pager 2>/dev/null || true
+    return 1
+  fi
+
+  if [ -n "${BPID:-}" ] && [ -r "/proc/$BPID/cmdline" ]; then
+    say "맨 프로세스로 판단 — TERM 후 원래 인자·cwd 로 다시 띄웁니다"
+    CMDF="$BACKUP_ROOT/$TS/cmdline.bin"
+    # ⚠ 재기동의 **유일한** 근거가 이 파일이다(1105 행의 `xargs -0 < "$CMDF"`).
+    #   errexit 이 꺼져 있으므로(위 주석) 이 복사가 실패해도 스크립트는 그대로 진행해
+    #   kill -TERM 으로 백엔드를 죽인 뒤, 없는 파일을 xargs 에 먹이려다 재기동에
+    #   실패한다 — 백엔드만 내려간 채 끝난다. 죽이기 **전에** 확보를 확인한다.
+    if ! mkdir -p "$(dirname "$CMDF")" 2>/dev/null; then
+      warn "재기동 명령을 보관할 디렉터리를 만들지 못했습니다: $(dirname "$CMDF")"
+      say  "  근거 없이 프로세스를 죽이지 않습니다 — 구 프로세스는 그대로 둡니다."
+      manual_restart_help; return 1
+    fi
+    if ! cp "/proc/$BPID/cmdline" "$CMDF" 2>/dev/null || [ ! -s "$CMDF" ]; then
+      warn "원래 기동 명령(cmdline)을 보존하지 못했습니다: /proc/$BPID/cmdline → $CMDF"
+      say  "  지금 종료 신호를 보내면 다시 띄울 근거가 사라집니다 — 죽이지 않고 멈춥니다."
+      manual_restart_help; return 1
+    fi
+    LOG="${SV_BACKEND_LOG:-/var/log/saintview-backend.log}"
+    kill -TERM "$BPID" 2>/dev/null || true
+
+    # 종료 판정을 **포트 해제**로 한다.
+    #  · kill -0 은 좀비(Z)에도 성공한다 → 이미 죽은 프로세스를 '살아 있음' 으로 오인해
+    #    영원히 대기하다 타임아웃으로 빠져나가고, 그 사이 서비스는 내려가 있다.
+    #  · 우리가 실제로 알아야 하는 것은 '새 프로세스가 bind 할 수 있는가' 다.
+    TWAIT="${SV_TERM_WAIT:-30}"
+    FREED=0
+    if wait_port_free "$TWAIT"; then FREED=1; fi
+
+    if [ "$FREED" = "1" ]; then
+      say "포트 $PORT 해제 확인 (${WPF_ELAPSED}초)"
+    else
+      # 여기서 그냥 return 하면 **새 프로세스를 한 번도 띄우지 않은 채** 끝나
+      # 백엔드가 죽은 상태로 방치된다(과거 버그). 관측값으로 갈라서 처리한다.
+      if proc_gone "$BPID"; then
+        warn "${TWAIT}초 경과 — 구 프로세스는 이미 종료됐는데 포트 $PORT 가 다른 것에 잡혀 있습니다"
+        say "  확인:  ss -lptn 'sport = :$PORT'"
+        manual_restart_help; return 1
+      fi
+      warn "${TWAIT}초 내에 종료되지 않았습니다 (SSE/스트리밍 정리 중일 수 있습니다)"
+      DOKILL=0
+      if [ "${SV_FORCE_KILL:-0}" = "1" ]; then
+        warn "SV_FORCE_KILL=1 — kill -9 로 강제 종료합니다"
+        DOKILL=1
+      elif ( : > /dev/tty ) 2>/dev/null; then
+        # ⚠ `[ -r /dev/tty ]` 로 판정하면 안 된다. 제어터미널이 없는 비대화 실행
+        #   (`ssh server "sudo sh update_server.sh --apply ..."`, cron, CI)에서도
+        #   /dev/tty **노드 자체는 존재**해 -r 이 참이 되고, 실제 open 만 ENXIO 로
+        #   실패한다. 그러면 셸 원시 에러("cannot create /dev/tty: No such device or
+        #   address") 2줄만 뱉고, 정작 필요한 안내(else 분기의 SV_FORCE_KILL 문구)는
+        #   끝내 출력되지 않는다.
+        #   → **실제로 열어 보고** 성공했을 때만 물어본다. 열기 시도는 서브셸에서 한다:
+        #     `exec` 는 특수 내장이라 리다이렉션 실패가 비대화 셸을 통째로 죽인다.
+        # 강제 종료는 진행 중인 판독/스트림을 끊는다 → 사람이 결정해야 한다.
+        printf '  ❓ kill -9 로 강제 종료할까요? (yes 를 입력하면 진행) : ' > /dev/tty
+        ANS=""; read -r ANS < /dev/tty || ANS=""
+        if [ "$ANS" = "yes" ]; then DOKILL=1; fi
+      else
+        say "  (비대화 실행 — 강제 종료를 원하면 SV_FORCE_KILL=1 로 다시 실행하세요)"
+      fi
+      if [ "$DOKILL" = "1" ]; then
+        kill -9 "$BPID" 2>/dev/null || true
+        if wait_port_free 15; then FREED=1; fi
+      fi
+      if [ "$FREED" != "1" ]; then
+        warn "포트 $PORT 가 여전히 점유돼 있어 새 프로세스를 띄우지 않습니다"
+        say "  (지금 띄우면 Address already in use 로 즉사하고, 구 코드가 계속 서비스합니다)"
+        manual_restart_help; return 1
+      fi
+      say "포트 $PORT 해제 확인 (강제 종료 후)"
+    fi
+
+    # 포트가 비었으면 **무조건 한 번은 띄운다**. 여기까지 와서 안 띄우면 서비스 중단이다.
+    RESTART_TRIED=1
+    RUN_USER="${RUN_USER:-root}"
+    # 원래 argv 를 NUL 그대로 xargs 에 먹여 재구성한다(따옴표 재조립 오류 회피).
+    if [ "$RUN_USER" = "root" ] || [ "$RUN_USER" = "$(id -un)" ]; then
+      ( cd "$BACKEND_DIR" && setsid xargs -0 nohup < "$CMDF" >> "$LOG" 2>&1 & )
+    else
+      su -s /bin/sh "$RUN_USER" -c "cd '$BACKEND_DIR' && exec setsid xargs -0 nohup" \
+         < "$CMDF" >> "$LOG" 2>&1 &
+    fi
+    if wait_health 60; then ok "재시작 완료 (로그: $LOG)"; return 0; fi
+    warn "재기동했으나 60초 내 health 응답 없음 — 로그: $LOG"
+    tail -n 40 "$LOG" 2>/dev/null || true
+    manual_restart_help
+    return 1
+  fi
+
+  manual_restart_help
+  return 1
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# [8] 검증
+# ═══════════════════════════════════════════════════════════════════════════
+verify_backend_local() {
+  # 백엔드를 nginx 를 거치지 않고 직접 찌른다 → 프록시 문제와 코드 문제가 섞이지 않는다.
+  B="http://127.0.0.1:$PORT"
+  code="$(hcode --max-time 10 "$B/api/health")"
+  [ "$code" = "200" ] && vok "백엔드 /api/health 200" || vng "백엔드 /api/health = $code"
+
+  # 가장 강한 증거: openapi 의 라우트 표 자체. (무인증 공개)
+  TMPO="$(mktemp)"
+  ocode="$(curl -sS -o "$TMPO" -w '%{http_code}' --max-time 20 "$B/openapi.json" 2>/dev/null || true)"
+  if [ "$ocode" = "200" ] && grep -q '"/api/export/manifest"' "$TMPO"; then
+    vok "openapi 에 /api/export/manifest 존재 → 신규 코드 반영됨"
+  elif [ "$ocode" = "200" ]; then
+    vng "openapi 200 이지만 /api/export/manifest 없음 → 백엔드가 여전히 구버전"
+  else
+    warn "openapi.json = $ocode — 상태코드 지문으로만 판정합니다"
+  fi
+  rm -f "$TMPO"
+
+  # 상태코드 지문. 무인증 GET 은 **401** 이 정답이다(422 아님) —
+  # FastAPI 는 sub-dependency(current_user)를 먼저 풀고 거기서 401 이 터지면
+  # 필수 Query(study_ids)의 422 검증에 도달하지 않는다.
+  # ※ HEAD(curl -I)를 쓰면 405 가 나온다. 반드시 GET.
+  mcode="$(hcode --max-time 10 "$B/api/export/manifest")"
+  case "$mcode" in
+    401) vok "GET /api/export/manifest = 401 (라우트 존재)" ;;
+    404) vng "GET /api/export/manifest = 404 → 백엔드 구버전(재시작 누락 의심)" ;;
+    200) vng "GET /api/export/manifest = 200 → /api 프록시 붕괴(SPA 폴백) 또는 인증 우회" ;;
+    *)   vng "GET /api/export/manifest = $mcode (401 기대)" ;;
+  esac
+  # 대조군: 401 이 전 경로에 뭉텅이로 붙는 구성이 아님을 증명해야 위 401 에 증거력이 생긴다.
+  ncode="$(hcode --max-time 10 "$B/api/export/__nope__")"
+  [ "$ncode" = "404" ] && vok "대조군(없는 경로)=404 → 401 판정 유효" \
+                       || vng "대조군(없는 경로)=$ncode → 위 401 은 증거력이 없습니다"
+}
+
+verify_frontend_disk() {
+  dep="$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' "$FRONT_DIR/index.html" | sort -u | head -1)"
+  if [ "$dep" = "$PKG_ASSET" ]; then vok "배포된 index.html 참조 = $dep"
+  else vng "index.html 참조 불일치: 배포=$dep 패키지=$PKG_ASSET"; return; fi
+  # index.html 만 올라가고 자산이 누락된 '부분 배포' 를 잡는다(흰 화면의 원인).
+  [ -f "$FRONT_DIR/$dep" ] && vok "참조 자산 존재" || vng "참조 자산 없음: $FRONT_DIR/$dep"
+  if [ -f "$PKG/frontend/dist/$dep.br" ]; then
+    [ -f "$FRONT_DIR/$dep.br" ] && vok "사전압축 .br 함께 배포됨" \
+                               || vng ".br 누락 — brotli_static 이 있어도 압축본이 안 나갑니다"
+  fi
+  if [ -f "$PKG/frontend/dist/$dep.gz" ]; then
+    [ -f "$FRONT_DIR/$dep.gz" ] && vok "사전압축 .gz 함께 배포됨" || vng ".gz 누락"
+  fi
+}
+
+# 원격 진단(로그인 불필요). --check 단독으로도, 갱신 후 마무리로도 쓴다.
+do_check() {
+  [ -n "$URL" ] || die "--check 에는 주소가 필요합니다 (예: --check https://sv70.cloudcare.life)"
+  curl_ok || die "curl 이 필요합니다"
+  U="${URL%/}"
+  outln "  대상: $U"
+  hdr() { curl -sk -o /dev/null -D - --max-time 20 "$@" | tr -d '\r'; }
+  # 헤더만 보는 hdr 로는 상태줄(200/403/404)을 알 수 없다 → 코드와 타입을 따로 받는다.
+  # 출력 형식: "<http_code> <content_type>"
+  hmeta() { curl -sk -o /dev/null -w '%{http_code} %{content_type}' --max-time 20 "$@" 2>/dev/null || true; }
+
+  RMETA="$(hmeta "$U/")"; RCODE="${RMETA%% *}"
+  case "$RCODE" in
+    200) ;;
+    *) vng "루트 $U/ 응답 = ${RCODE:-000} (200 기대) — 사이트가 서빙되지 않습니다"; return ;;
+  esac
+  ASSET="$(curl -sk --max-time 20 "$U/" | grep -o '/assets/index-[A-Za-z0-9_-]*\.js' | head -1 || true)"
+  [ -n "$ASSET" ] || { vng "/assets/index-*.js 를 찾지 못했습니다"; return; }
+  outln "  자산: $ASSET"
+  if [ -n "${PKG_ASSET:-}" ]; then
+    case "$ASSET" in
+      */"${PKG_ASSET##*/}") vok "원격 참조 = 패키지 빌드와 일치" ;;
+      *) vng "원격 참조가 패키지와 다릅니다(배포 미반영 또는 캐시): $ASSET vs $PKG_ASSET" ;;
+    esac
+  fi
+
+  # ── 압축 판정보다 **먼저** 자산 응답 자체가 정상인지 단언한다 ─────────────
+  # 이것이 없으면 `location /assets/ { try_files $uri =404; }` 가 없는 서버(=이 저장소의
+  # gen_prod_conf.py 가 만드는 기본 conf 가 그렇다)에서 assets/ 가 통째로 빠져도
+  # /assets/index-XXX.js 가 SPA 폴백(index.html)으로 200 을 주고, 그 HTML 이 gzip/brotli
+  # 로 나가므로 gzip·brotli·304 가 전부 ✅ 로 통과한다. 브라우저는 type=module 스크립트에
+  # text/html 이 오면 거부하므로 사용자는 전원 흰 화면인데 스크립트는 exit 0 을 준다.
+  # 403(소유권·퍼미션 사고)·404 도 같은 이유로 통과했다(에러페이지도 gzip 된다).
+  AMETA="$(hmeta -H 'Accept-Encoding: identity' "$U$ASSET")"
+  ACODE="${AMETA%% *}"; ACTYPE="${AMETA#* }"
+  case "$ACODE" in
+    200) ;;
+    403) vng "자산 $ASSET = 403 — 파일은 있으나 nginx 가 읽지 못합니다(소유권/퍼미션)"; return ;;
+    404) vng "자산 $ASSET = 404 — 자산이 배포되지 않았습니다(index.html 만 올라간 부분 배포)"; return ;;
+    *)   vng "자산 $ASSET = ${ACODE:-000} (200 기대)"; return ;;
+  esac
+  case "$ACTYPE" in
+    *javascript*|*ecmascript*) vok "자산 응답 200 / Content-Type=$ACTYPE" ;;
+    *)
+      vng "자산 자리에 JS 가 아닌 것이 옵니다 (Content-Type=${ACTYPE:-?}) — SPA 폴백입니다(assets 미배포)"
+      say "  브라우저는 type=module 스크립트에 text/html 이 오면 실행을 거부합니다 → 전원 흰 화면."
+      say "  nginx 에  location /assets/ { try_files \$uri =404; }  를 넣으면 이 상태가 404 로 드러납니다."
+      return ;;
+  esac
+
+  RAW="$(hdr -H 'Accept-Encoding: identity' "$U$ASSET" | sed -n 's/^[Cc]ontent-[Ll]ength: //p')"
+  # 크기 대조 — 폴백 HTML(수 KB)과 실제 번들(수백 KB)은 두 자릿수 차이가 난다.
+  # 로컬에 같은 파일이 있으면 바이트 수까지 맞춰 본다(구버전 캐시도 여기서 드러난다).
+  LOCAL_ASSET=""
+  if   [ -n "${PKG:-}" ]       && [ -f "$PKG/frontend/dist$ASSET" ]; then LOCAL_ASSET="$PKG/frontend/dist$ASSET"
+  elif [ -n "${FRONT_DIR:-}" ] && [ -f "$FRONT_DIR$ASSET" ];         then LOCAL_ASSET="$FRONT_DIR$ASSET"
+  fi
+  if [ -n "$LOCAL_ASSET" ]; then
+    LSZ="$(wc -c < "$LOCAL_ASSET" 2>/dev/null | tr -d ' ')"
+    if [ -n "${RAW:-}" ] && [ -n "${LSZ:-}" ]; then
+      if [ "$RAW" != "$LSZ" ]; then
+        vng "자산 크기 불일치: 원격 ${RAW}B / 로컬 ${LSZ}B ($LOCAL_ASSET) — 폴백·구버전 캐시 의심"
+      else
+        vok "자산 크기 일치 (${RAW}B)"
+      fi
+    fi
+  fi
+  GZ="$(hdr  -H 'Accept-Encoding: gzip'     "$U$ASSET")"
+  BR="$(hdr  -H 'Accept-Encoding: br'       "$U$ASSET")"
+  gzenc="$(printf '%s' "$GZ" | sed -n 's/^[Cc]ontent-[Ee]ncoding: //p')"
+  gzlen="$(printf '%s' "$GZ" | sed -n 's/^[Cc]ontent-[Ll]ength: //p')"
+  brenc="$(printf '%s' "$BR" | sed -n 's/^[Cc]ontent-[Ee]ncoding: //p')"
+  brlen="$(printf '%s' "$BR" | sed -n 's/^[Cc]ontent-[Ll]ength: //p')"
+  case "$gzenc" in gzip) vok "gzip 적용됨   ${RAW:-?}B → ${gzlen:-?}B" ;;
+                   *)    vng "gzip 미적용   ${RAW:-?}B 를 그대로 전송" ;; esac
+  # brotli 는 **성능 항목**이라 배포 성공 여부와 분리해 경고로만 남긴다.
+  case "$brenc" in br)   vok "brotli 적용됨 ${RAW:-?}B → ${brlen:-?}B" ;;
+                   *)    warn "brotli 미적용 (모듈 미설치 가능 — [6] 출력을 확인하세요)" ;; esac
+
+  # ⚠ 인코딩 변형마다 서빙되는 실체 파일이 다르다(index.js 와 index.js.br 은 별개 파일).
+  #   → Last-Modified/ETag 도 다르다. **같은 Accept-Encoding 으로** 되물어야 한다.
+  LM="$(printf '%s' "$GZ" | sed -n 's/^[Ll]ast-[Mm]odified: //p')"
+  if [ -n "$LM" ]; then
+    c="$(hcode -k --max-time 20 -H 'Accept-Encoding: gzip' -H "If-Modified-Since: $LM" "$U$ASSET")"
+    [ "$c" = "304" ] && vok "조건부요청 304 동작" || warn "조건부요청 $c (304 미동작)"
+  fi
+
+  ec="$(hcode -k --max-time 20 "$U/api/export/manifest")"
+  case "$ec" in
+    401) vok "원격 /api/export/manifest = 401 (신규 백엔드)" ;;
+    404) vng "원격 /api/export/manifest = 404 → 백엔드 구버전" ;;
+    *)   vng "원격 /api/export/manifest = $ec" ;;
+  esac
+}
+
+# requirements.txt 에 그 패키지가 실제로 들어 있는지(= 이번 배포가 요구하는지) 확인.
+req_has() {
+  [ -f "$BACKEND_DIR/requirements.txt" ] || return 1
+  RH=1
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*|'-'*) continue ;; esac
+    n="$(printf '%s' "$line" | sed 's/[[:space:]]*#.*//; s/\[.*//; s/[<>=!~;].*//; s/[[:space:]]*$//' \
+         | tr 'A-Z_' 'a-z-')"
+    if [ "$n" = "$1" ]; then RH=0; fi
+  done < "$BACKEND_DIR/requirements.txt"
+  return "$RH"
+}
+
+# [5] 가 '설치 완료' 를 출력했는지와 무관하게, **임포트되는지**를 직접 확인한다.
+# 이것이 없으면 pip 이 통째로 실패한 서버에서도 8개 항목이 전부 ✅ 로 나오고
+# '갱신 완료 / exit 0' 가 찍힌다(ISO 반출은 501 인 채로).
+verify_pydeps() {
+  if [ -z "${PYBIN:-}" ] || [ ! -x "${PYBIN:-}" ]; then
+    vng "백엔드 파이썬을 특정하지 못해 의존성을 확인할 수 없습니다 (--pybin 으로 지정)"
+    return 0
+  fi
+  # requirements 에 있는 항목 중 '없으면 기능이 죽는' 것을 실제 import 로 확인한다.
+  # 패키지명과 모듈명이 다른 경우가 있어 매핑을 명시한다(pkg:module).
+  for pair in 'pycdlib:pycdlib' 'qrcode:qrcode'; do
+    pkg="${pair%%:*}"; mod="${pair##*:}"
+    if ! req_has "$pkg"; then continue; fi
+    if "$PYBIN" -c "import $mod" >/dev/null 2>&1; then
+      vok "의존성 import 확인: $mod ($PYBIN)"
+    else
+      case "$pkg" in
+        pycdlib) vng "pycdlib 미설치 — ISO 반출이 501 로 응답합니다 ($PYBIN)" ;;
+        *)       vng "$pkg 미설치 — 관련 기능이 501/500 로 응답합니다 ($PYBIN)" ;;
+      esac
+    fi
+  done
+  if [ "$PYDEPS_FAIL" != "0" ]; then
+    vng "[5] 파이썬 의존성 단계가 정상 완료되지 않았습니다 — 위 [5] 출력의 수동 절차를 따르세요"
+  fi
+}
+
+# curl 부재로 HTTP 검증을 건너뛴 사실을 최종 배너까지 전파한다(조용한 성공 금지).
+VERIFY_SKIPPED=0
+
+do_verify() {
+  step "검증"
+  verify_pydeps
+  # ⚠ 디스크 검증은 curl 이 전혀 필요 없다(grep · [ -f ] 뿐). 그러므로 curl 게이트
+  #   **앞**에 둔다. 예전에는 curl 게이트 하나가 이것까지 함께 건너뛰어,
+  #   '배포된 index.html 이 패키지와 다름' · '참조 자산 없음' · '.gz/.br 누락' 이라는
+  #   확정적 실패를 한 건도 잡지 못한 채 V_FAIL=0 으로 '✅ 갱신 완료 / exit 0' 이 나갔다.
+  verify_frontend_disk
+  if ! curl_ok; then
+    VERIFY_SKIPPED=1
+    warn "curl 이 없어 HTTP 검증(백엔드 health·openapi·원격 진단)을 건너뜁니다"
+    say  "  → 이 실행은 '검증 미완료' 로 판정합니다(exit 2). 아래를 직접 확인하세요:"
+    say  "     wget -qO- http://127.0.0.1:$PORT/api/health   또는 브라우저로 접속"
+    return 0
+  fi
+  verify_backend_local
+  if [ -n "$URL" ]; then echo; do_check; fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 롤백
+# ═══════════════════════════════════════════════════════════════════════════
+list_backups() {   # 최신 → 오래된 순
+  ls -1 "$BACKUP_ROOT" 2>/dev/null | grep -E '^[0-9]{14}$' | LC_ALL=C sort -r
+}
+
+# manifest 에서 읽은 설치 경로를 **쓰기 전에** 검증한다.
+# mval 은 키가 없거나(손편집·옛 manifest) 값 뒤에 공백/탭이 하나만 있어도 조용히 빈
+# 문자열을 돌려준다. 빈 값을 그대로 쓰면 이 아래 모든 경로가 '/' 로 뭉개져,
+# root 권한으로 `cp -a <백업>/frontend-dist/. /` (dist 를 파일시스템 루트에 쏟음),
+# `mv /app /app.pre-rollback.<TS>`, `rm -rf /.app.rollback.<pid>` 를 실행하게 된다.
+# $1=라벨(어느 백업인지) — 실패하면 die 로 멈춘다.
+validate_install_paths() {
+  VP_WHO="${1:-manifest}"
+  [ -n "$FRONT_DIR" ]   || die "$VP_WHO 에서 FRONT_DIR 을 읽지 못했습니다(키 없음·값 뒤 공백 등)"
+  [ -n "$BACKEND_DIR" ] || die "$VP_WHO 에서 BACKEND_DIR 을 읽지 못했습니다(키 없음·값 뒤 공백 등)"
+  case "$FRONT_DIR"   in /?*) ;; *) die "$VP_WHO 의 FRONT_DIR 이 절대경로가 아닙니다: '$FRONT_DIR'" ;; esac
+  case "$BACKEND_DIR" in /?*) ;; *) die "$VP_WHO 의 BACKEND_DIR 이 절대경로가 아닙니다: '$BACKEND_DIR'" ;; esac
+  if unsafe_target "$FRONT_DIR";   then die "$VP_WHO 의 FRONT_DIR 이 시스템 최상위입니다 — 중단합니다: '$FRONT_DIR'"; fi
+  if unsafe_target "$BACKEND_DIR"; then die "$VP_WHO 의 BACKEND_DIR 이 시스템 최상위입니다 — 중단합니다: '$BACKEND_DIR'"; fi
+  [ -d "$FRONT_DIR" ]   || die "$VP_WHO 의 FRONT_DIR 이 존재하지 않습니다: $FRONT_DIR"
+  [ -d "$BACKEND_DIR" ] || die "$VP_WHO 의 BACKEND_DIR 이 존재하지 않습니다: $BACKEND_DIR"
+  [ -f "$FRONT_DIR/index.html" ] \
+    || die "$VP_WHO 의 FRONT_DIR 이 dist 처럼 보이지 않습니다(index.html 없음): $FRONT_DIR
+     (manifest.env 의 FRONT_DIR 을 바로잡거나 다른 백업을 고르세요)"
+  # app/ 이 통째로 없을 수도 있다(과거 사고 복구). 그 경우에도 되돌릴 수 있어야 하므로
+  # 백엔드 트리 판정은 세 근거 중 하나로 하고, app/ 부재는 경고로만 알린다.
+  if [ ! -f "$BACKEND_DIR/app/main.py" ] && [ ! -f "$BACKEND_DIR/requirements.txt" ] \
+     && [ ! -f "$BACKEND_DIR/alembic.ini" ]; then
+    die "$VP_WHO 의 BACKEND_DIR 이 백엔드 트리처럼 보이지 않습니다: $BACKEND_DIR
+     (app/main.py · requirements.txt · alembic.ini 가 모두 없습니다)"
+  fi
+  if [ ! -d "$BACKEND_DIR/app" ]; then
+    warn "$BACKEND_DIR/app 이 없습니다 — 백업에서 통째로 복구합니다"
+  fi
+}
+
+do_rollback() {
+  outln "== 되돌리기 =="
+  # ⚠⚠ **이 함수 안에서는 errexit(set -e)이 꺼져 있다.**
+  #   호출부가 `RBRC=0; do_rollback || RBRC=$?` 인데, POSIX 는 `||` 왼쪽 명령에서
+  #   errexit 를 무시하도록 규정하고 그 억제가 **함수 본문 전체로 전파된다**
+  #   (dash·bash 모두 확인). 아래 어떤 cp/mv 가 실패해도 스크립트는 멈추지 않는다.
+  #   → 파괴적인 mv/rm 앞에는 반드시 `|| die` 로 **복사 성공을 손으로 확인**한다.
+  #     이 규약을 어기면(예: 백업 복사 실패를 무시한 채 살아 있는 app/ 을 치우면)
+  #     backend/app 이 사라져 다음 재시작·리부트에서 ModuleNotFoundError 로 기동
+  #     불능이 된다 — 뒤늦은 지문 검증은 '탐지' 일 뿐 방어가 아니다.
+  [ "$(id -u)" = "0" ] || die "root 권한이 필요합니다"
+  [ -d "$BACKUP_ROOT" ] || die "백업 디렉터리가 없습니다: $BACKUP_ROOT"
+
+  CANDS="$(list_backups)"
+  [ -n "$CANDS" ] || die "백업이 하나도 없습니다: $BACKUP_ROOT"
+
+  # 후보 선별용 기준 경로는 가장 최신 백업에서 읽는다(대개 모든 백업이 같은 경로다).
+  # ※ '어느 백업에서 읽어도 같다' 고 가정하지 않는다 — --prefix 를 바꿔 재설치한
+  #   서버에서는 다르다. 선택된 백업의 경로가 다르면 아래에서 지문을 다시 계산한다.
+  NEWEST="$(printf '%s\n' "$CANDS" | head -1)"
+  [ -f "$BACKUP_ROOT/$NEWEST/manifest.env" ] || die "백업이 손상됐습니다(manifest.env 없음): $BACKUP_ROOT/$NEWEST"
+  FRONT_DIR="$(mval "$BACKUP_ROOT/$NEWEST/manifest.env" FRONT_DIR)"
+  BACKEND_DIR="$(mval "$BACKUP_ROOT/$NEWEST/manifest.env" BACKEND_DIR)"
+  validate_install_paths "최신 백업 $NEWEST 의 manifest.env"
+  NEWEST_FRONT="$FRONT_DIR"; NEWEST_BACKEND="$BACKEND_DIR"
+
+  # 지금 서버에 올라가 있는 것의 지문.
+  NOW_ASSET="$(asset_of "$FRONT_DIR")"
+  NOW_APP="$(tree_hash "$BACKEND_DIR/app")"
+  NOW_EXTRA="$(extra_hash "$BACKEND_DIR")"
+  outln "  현재 배포: asset=${NOW_ASSET:-?} app=${NOW_APP} extra=${NOW_EXTRA}"
+
+  # 백업의 부수 트리(BK_DIRS·BK_FILES)가 현재와 다른가.
+  # app/ 만 보면 'app/ 은 같은데 migrations/ 만 신버전' 인 트리를 '되돌릴 것 없음' 으로
+  # 오판한다 — 그 상태가 바로 이 스크립트가 만들어 낸 혼합 트리다.
+  # 0=다름(되돌릴 것 있음) 1=같음 2=판정 불가(옛 포맷 백업이라 근거가 없음)
+  extra_differs() {  # $1 = manifest.env
+    XB="$(mval "$1" FP_EXTRA)"
+    [ "$(mval "$1" BK_FORMAT)" = "2" ] && [ -n "$XB" ] || return 2
+    case "$XB$NOW_EXTRA" in *nohasher*) return 2 ;; esac
+    [ "$XB" != "$NOW_EXTRA" ] && return 0 || return 1
+  }
+
+  if [ -z "$STAMP" ]; then
+    # ⚠ '현재와 지문이 다른 가장 최근 백업' 만으로는 부족하다: --apply 를 두 번 하면
+    #   두 번째 백업의 내용물은 이미 신버전이라, 구버전으로 되돌린 뒤 한 번 더
+    #   --rollback 하면 그 신버전 스냅샷이 뽑혀 **장애 원인인 신버전을 다시 배포**하고도
+    #   '✅ 파일 복구 완료 / exit 0' 을 찍는다(앞으로 가는 롤백).
+    #   → FP_* == FP_*_AFTER 인 백업(= 아무것도 바꾸지 않은 적용의 스냅샷)은
+    #     자동 선택에서 제외한다. 장애 중에 추측으로 앞으로 가지 않는다.
+    outln "  후보(최신순):"
+    for s in $CANDS; do
+      m="$BACKUP_ROOT/$s/manifest.env"
+      [ -f "$m" ] || continue
+      a="$(mval "$m" FP_ASSET)";        h="$(mval "$m" FP_APP)"
+      aa="$(mval "$m" FP_ASSET_AFTER)"; ha="$(mval "$m" FP_APP_AFTER)"
+      x="$(mval "$m" FP_EXTRA)";        xa="$(mval "$m" FP_EXTRA_AFTER)"
+      RS=0; fp_same "$a" "$h" "$NOW_ASSET" "$NOW_APP" || RS=$?
+      XD=2; extra_differs "$m" || XD=$?
+      # app/·프론트가 같아도 부수 트리가 다르면 되돌릴 것이 남아 있다.
+      if [ "$RS" = "0" ] && [ "$XD" = "0" ]; then RS=1; XONLY=1; else XONLY=0; fi
+      NOOP=0
+      if [ -n "$ha" ]; then
+        NR=0; fp_same "$a" "$h" "$aa" "$ha" || NR=$?
+        # 부수 트리가 바뀐 적용은 no-op 이 아니다(app/ 이 그대로여도 migrations 가 갈렸다).
+        if [ -n "$xa" ] && [ "$x" != "$xa" ]; then NR=1; fi
+        if [ "$NR" = "0" ]; then NOOP=1; fi
+      fi
+      case "$RS" in
+        0) mark="= 현재와 동일(되돌릴 것 없음)" ;;
+        2) mark="? 지문 비교 불가" ;;
+        *) if [ "$NOOP" = "1" ]; then
+             mark="↑ 신버전 스냅샷(아무것도 바꾸지 않은 적용) — 자동 선택 제외"
+           elif [ "$XONLY" = "1" ]; then
+             mark="→ 되돌릴 수 있음 (app/·프론트는 동일, 부수 트리만 다름)"
+           elif [ "$(mval "$m" BK_FORMAT)" != "2" ]; then
+             mark="→ 되돌릴 수 있음 (옛 포맷 백업: app/·dist·requirements.txt 만 담김)"
+           elif [ -z "$ha" ]; then
+             mark="→ 되돌릴 수 있음 (적용 후 지문 없음)"
+           else
+             mark="→ 되돌릴 수 있음"
+           fi ;;
+      esac
+      outln "    $s  asset=${a:-?}  $mark"
+      if [ -z "$STAMP" ] && [ "$RS" != "0" ] && [ "$NOOP" != "1" ]; then STAMP="$s"; fi
+    done
+    [ -n "$STAMP" ] || die "되돌릴 수 있는 백업이 없습니다.
+     (현재 배포와 지문이 같거나, 남은 것이 '신버전 스냅샷' 뿐입니다 — 그것으로 되돌리면
+      장애 원인인 신버전을 다시 배포하게 되므로 자동으로 고르지 않습니다.
+      정말 그렇게 하려면:  SV_ROLLBACK_FORCE=1 sh $(basename "$0") --rollback <타임스탬프>)"
+    outln "  선택: $STAMP  (명시하려면: --rollback <타임스탬프>)"
+  fi
+
+  BDIR="$BACKUP_ROOT/$STAMP"
+  [ -d "$BDIR" ] || die "그런 백업이 없습니다: $BDIR"
+  [ -f "$BDIR/manifest.env" ] || die "백업이 손상됐습니다(manifest.env 없음): $BDIR"
+  FRONT_DIR="$(mval "$BDIR/manifest.env" FRONT_DIR)"
+  BACKEND_DIR="$(mval "$BDIR/manifest.env" BACKEND_DIR)"
+  # ⚠ **실제 복구 대상 백업**의 경로에도 최신 백업과 똑같은 검사를 건다.
+  #   예전에는 이 두 줄이 검사 없이 덮어써서, 값이 비면 모든 경로가 '/' 로 뭉개졌다.
+  validate_install_paths "백업 $STAMP 의 manifest.env"
+  # 백업 내용물도 **파괴적 조작 전에** 확인한다. (errexit 이 꺼져 있으므로 cp 실패는
+  #  스스로 멈추지 않는다 — 없는 것을 복사하려다 실패한 뒤 살아 있는 app/ 을 치운다)
+  [ -d "$BDIR/frontend-dist" ] || die "백업에 frontend-dist 가 없습니다: $BDIR (이 백업으로는 되돌릴 수 없습니다)"
+  [ -d "$BDIR/backend-app" ]   || die "백업에 backend-app 이 없습니다: $BDIR (이 백업으로는 되돌릴 수 없습니다)"
+  [ -f "$BDIR/backend-app/main.py" ] || die "백업의 backend-app 이 백엔드 트리처럼 보이지 않습니다(main.py 없음): $BDIR/backend-app"
+  [ -f "$BDIR/frontend-dist/index.html" ] || die "백업의 frontend-dist 가 dist 처럼 보이지 않습니다(index.html 없음): $BDIR/frontend-dist"
+
+  # 선택된 백업의 설치 경로가 후보 선별에 쓴 경로와 다르면(--prefix 를 바꿔 재설치한
+  # 서버), 지금까지의 '현재 배포 지문' 은 엉뚱한 트리를 본 값이다 → 다시 계산한다.
+  if [ "$FRONT_DIR" != "$NEWEST_FRONT" ] || [ "$BACKEND_DIR" != "$NEWEST_BACKEND" ]; then
+    warn "백업 $STAMP 의 설치 경로가 최신 백업과 다릅니다 — 지문을 이 경로 기준으로 다시 계산합니다"
+    say  "  프론트: $NEWEST_FRONT → $FRONT_DIR"
+    say  "  백엔드: $NEWEST_BACKEND → $BACKEND_DIR"
+    NOW_ASSET="$(asset_of "$FRONT_DIR")"
+    NOW_APP="$(tree_hash "$BACKEND_DIR/app")"
+    NOW_EXTRA="$(extra_hash "$BACKEND_DIR")"
+    outln "  현재 배포(재계산): asset=${NOW_ASSET:-?} app=${NOW_APP} extra=${NOW_EXTRA}"
+  fi
+
+  BK_ASSET="$(mval "$BDIR/manifest.env" FP_ASSET)"
+  BK_APP="$(mval "$BDIR/manifest.env" FP_APP)"
+  BK_EXTRA="$(mval "$BDIR/manifest.env" FP_EXTRA)"
+  BK_FMT="$(mval "$BDIR/manifest.env" BK_FORMAT)"
+  R_FOWN="$(mval "$BDIR/manifest.env" FOWN)"
+  R_BOWN="$(mval "$BDIR/manifest.env" BOWN)"
+
+  # 이 백업이 부수 트리(migrations/ tools/ alembic.ini .env.example)를 담고 있는가.
+  # 옛 포맷(BK_FORMAT 없음)은 담고 있지 않다 → 그 사실을 **끝까지 숨기지 않는다**.
+  EXTRA_CAP=0
+  if [ "$BK_FMT" = "2" ]; then EXTRA_CAP=1; fi
+
+  # 사용자가 타임스탬프를 직접 준 경우에도 같은 검사를 한다 — '복구 완료' 만 찍히고
+  # 실제로는 아무것도 바뀌지 않는 거짓 성공을 만들지 않는다.
+  RS=0; fp_same "$BK_ASSET" "$BK_APP" "$NOW_ASSET" "$NOW_APP" || RS=$?
+  XD=2; extra_differs "$BDIR/manifest.env" || XD=$?
+  if [ "$RS" = "0" ] && [ "$XD" = "0" ]; then
+    say "app/ · 프론트는 이미 백업과 같습니다 — 부수 트리($BK_DIRS $BK_FILES)만 되돌립니다"
+    RS=1
+  fi
+  if [ "$RS" = "0" ]; then
+    outln "  백업 지문: asset=${BK_ASSET:-?} app=${BK_APP} extra=${BK_EXTRA:-없음}"
+    die "되돌릴 것이 없습니다 — 백업 $STAMP 은 지금 배포된 것과 같은 버전입니다.
+     (다른 백업을 고르세요:  ls $BACKUP_ROOT)"
+  fi
+  if [ "$RS" = "2" ]; then
+    warn "지문을 비교할 수 없어(해시 도구 없음) 확인 없이 진행합니다"
+  fi
+
+  # 사람이 타임스탬프를 직접 준 경우에도 '앞으로 가는 롤백' 은 막는다.
+  # (FP_* == FP_*_AFTER = 아무것도 바꾸지 않은 적용의 스냅샷 = 신버전 그 자체)
+  BK_ASSET_AFTER="$(mval "$BDIR/manifest.env" FP_ASSET_AFTER)"
+  BK_APP_AFTER="$(mval "$BDIR/manifest.env" FP_APP_AFTER)"
+  BK_EXTRA_AFTER="$(mval "$BDIR/manifest.env" FP_EXTRA_AFTER)"
+  if [ -n "$BK_APP_AFTER" ] && [ "${SV_ROLLBACK_FORCE:-0}" != "1" ]; then
+    NR=0; fp_same "$BK_ASSET" "$BK_APP" "$BK_ASSET_AFTER" "$BK_APP_AFTER" || NR=$?
+    # 부수 트리가 바뀐 적용은 no-op 이 아니다 — 되돌릴 것이 실제로 있다.
+    if [ -n "$BK_EXTRA_AFTER" ] && [ "$BK_EXTRA" != "$BK_EXTRA_AFTER" ]; then NR=1; fi
+    if [ "$NR" = "0" ]; then
+      die "백업 $STAMP 은 '아무것도 바꾸지 않은 적용' 의 스냅샷입니다(= 패키지와 같은 신버전).
+     이것으로 되돌리면 장애 원인인 신버전을 그대로 다시 배포하게 됩니다.
+     되돌릴 수 있는 후보 목록:  sh $(basename "$0") --rollback   (인자 없이)
+     그래도 강행하려면:  SV_ROLLBACK_FORCE=1 sh $(basename "$0") --rollback $STAMP"
+    fi
+  fi
+
+  outln "  복구 대상: $STAMP  (asset=${BK_ASSET:-?})"
+  outln "    프론트 → $FRONT_DIR"
+  if [ "$EXTRA_CAP" = "1" ]; then
+    outln "    백엔드 → $BACKEND_DIR/{app, $(echo $BK_FILES $BK_DIRS | tr ' ' ',')}"
+  else
+    outln "    백엔드 → $BACKEND_DIR/app  (+ requirements.txt)"
+    warn "이 백업은 옛 포맷(BK_FORMAT 없음)이라 부수 트리를 담고 있지 않습니다"
+    say "  → $BK_DIRS · alembic.ini · .env.example 은 **신버전 그대로 남습니다**"
+    say "     롤백 후 'alembic upgrade head' 를 돌리면 구 코드 위에 신 스키마가 적용됩니다."
+  fi
+
+  # ── 프론트: 덮어쓰기로 충분하다 ──────────────────────────────────────────
+  # 구 파일을 되돌려 놓기만 하면 index.html 이 옛 자산을 가리키게 되고, 새 자산은
+  # 남아 있어도 무해하다(콘텐츠 해시 파일명). 지우면 열려 있는 탭이 지연로드 청크를
+  # 요청하다 화면이 죽는다.
+  # (errexit 이 꺼져 있으므로 실패를 여기서 직접 잡는다 — 프론트가 안 되돌아간 채
+  #  백엔드만 되돌리면 '프론트 신버전 + 백엔드 구버전' 혼합 상태가 된다)
+  cp -a "$BDIR/frontend-dist/." "$FRONT_DIR/" \
+    || die "프론트 복구 실패(복사 오류) — 백엔드는 건드리지 않고 중단합니다: $BDIR/frontend-dist → $FRONT_DIR"
+
+  # ── 백엔드 app/: **정확 교체** ───────────────────────────────────────────
+  # 과거에는 여기서도 `cp -a "$BDIR/backend-app/." "$BACKEND_DIR/app/"` 로 덮어쓰기만
+  # 했다(additive). 신버전이 **추가**한 모듈은 그대로 남으므로 트리가 '구+신 혼합' 이
+  # 되고, 두 가지 실패가 100% 재현된다:
+  #   ① 아래 지문 검증은 트리 전체 해시를 백업과 일치시키라고 요구하는데 잔재 때문에
+  #      절대 일치할 수 없다 → 파일은 실제로 되돌아갔는데도 매번 '❌ 복구 후 지문이
+  #      백업과 다릅니다' + exit 1. 장애 중인 운영자가 '롤백 실패' 로 오판한다.
+  #   ② 그 혼합 지문은 어느 백업과도 같지 않으므로, 다시 --rollback 하면 후보 선택이
+  #      '신버전 스냅샷' 을 집어 장애 원인인 신버전을 재배포하고 ✅/exit 0 을 찍는다.
+  # → 증상(검증 문구)을 무르게 하는 대신 **원인(혼합 상태)** 을 없앤다.
+  #   '삭제하지 않는다' 는 정책은 지우는 대신 **옆으로 치워 두는 것**으로 지킨다.
+  # ⚠ 아래 mv 두 줄은 되돌릴 수 없다. errexit 이 꺼져 있으므로(함수 첫머리 주석)
+  #   **복사가 실제로 성공했는지 손으로 확인한 뒤에만** 살아 있는 app/ 을 치운다.
+  #   확인 없이 진행하면(과거 동작) 백업의 backend-app 이 없거나 /var 가 가득 차
+  #   cp 가 죽은 경우, app/ 을 옆으로 옮겨 놓고 넣을 것이 없어 **app/ 자체가
+  #   사라진다**(다음 재시작·리부트에서 ModuleNotFoundError → 서비스 완전 중단).
+  TMPAPP="$BACKEND_DIR/.app.rollback.$$"
+  rm -rf "$TMPAPP"
+  cp -a "$BDIR/backend-app" "$TMPAPP" \
+    || { rm -rf "$TMPAPP"
+         die "백업 복사 실패 — 살아 있는 app/ 은 건드리지 않고 중단합니다: $BDIR/backend-app → $TMPAPP"; }
+  [ -d "$TMPAPP" ] || die "복사본이 만들어지지 않았습니다 — app/ 은 그대로 둡니다: $TMPAPP"
+  # ENOSPC 등으로 '중간까지만' 복사된 트리를 설치하면 잘린 app/ 이 올라간다.
+  [ -f "$TMPAPP/main.py" ] \
+    || { rm -rf "$TMPAPP"
+         die "복사본이 백엔드 트리처럼 보이지 않습니다(main.py 없음) — app/ 은 그대로 둡니다: $TMPAPP"; }
+  find "$TMPAPP" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  chown_back "$TMPAPP" "$R_BOWN"
+  PREV_APP="$BACKEND_DIR/app.pre-rollback.$TS"
+  rm -rf "$PREV_APP"
+  # 같은 파일시스템 안이라 mv 는 rename(2) — 교체 순간에 app/ 이 사라지는 창이 없다.
+  # (이 논거는 **넣을 원본이 실제로 존재할 때만** 성립한다 → 위 검사가 그 전제다)
+  if [ -d "$BACKEND_DIR/app" ]; then
+    mv "$BACKEND_DIR/app" "$PREV_APP" \
+      || { rm -rf "$TMPAPP"; die "이전 app/ 을 옮기지 못했습니다 — app/ 은 그대로입니다: $BACKEND_DIR/app"; }
+    say "이전 app/ 은 지우지 않고 옮겨 뒀습니다: $PREV_APP"
+  fi
+  if ! mv "$TMPAPP" "$BACKEND_DIR/app"; then
+    # 여기서 실패하면 app/ 이 없는 상태다 → 즉시 원상복구해 서비스 중단을 막는다.
+    if [ -d "$PREV_APP" ] && [ ! -d "$BACKEND_DIR/app" ]; then
+      mv "$PREV_APP" "$BACKEND_DIR/app" 2>/dev/null || true
+    fi
+    die "app/ 교체 실패 — 원래 app/ 을 되돌려 놓았습니다: $BACKEND_DIR/app"
+  fi
+
+  find "$BACKEND_DIR/app" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+
+  # ── 백엔드 부수 트리: app/ 과 **같은 방식**으로 정확 교체 ──────────────────
+  # [4] 가 덮어쓴 것을 [3] 이 백업했으므로 여기서 전부 되돌릴 수 있다.
+  # 세 가지 경우를 구분한다(이 구분이 없으면 혼합 트리가 남는다):
+  #   ① 백업에 있음        → 정확 교체(기존 것은 지우지 않고 옆으로 치운다)
+  #   ② 백업에 없음 + ABSENT_* → 백업 당시 **원래 없던** 경로다. 신버전이 새로 떨군
+  #      산출물이므로 옆으로 치운다(치우지 않으면 v50 migrations 가 v48 위에 남는다).
+  #   ③ 백업에 없음 + 마커도 없음 → 옛 포맷 백업. 근거가 없으므로 **건드리지 않고**
+  #      사실대로 보고한다(추측으로 지우지 않는다).
+  MOVED=""; EXTRA_LEFT=""
+  for d in $BK_DIRS; do
+    if [ -d "$BDIR/$d" ]; then
+      # app/ 과 **같은 규약**: 복사 성공을 확인하기 전에는 기존 트리를 치우지 않는다.
+      TMPX="$BACKEND_DIR/.$d.rollback.$$"
+      rm -rf "$TMPX"
+      cp -a "$BDIR/$d" "$TMPX" \
+        || { rm -rf "$TMPX"; die "백업 복사 실패 — $d 는 건드리지 않고 중단합니다: $BDIR/$d → $TMPX"; }
+      [ -d "$TMPX" ] || die "복사본이 만들어지지 않았습니다 — $d 는 그대로 둡니다: $TMPX"
+      find "$TMPX" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+      chown_back "$TMPX" "$R_BOWN"
+      if [ -d "$BACKEND_DIR/$d" ]; then
+        rm -rf "$BACKEND_DIR/$d.pre-rollback.$TS"
+        mv "$BACKEND_DIR/$d" "$BACKEND_DIR/$d.pre-rollback.$TS" \
+          || { rm -rf "$TMPX"; die "$d 를 옮기지 못했습니다 — $d 는 그대로입니다: $BACKEND_DIR/$d"; }
+        MOVED="$MOVED $BACKEND_DIR/$d.pre-rollback.$TS"
+      fi
+      if ! mv "$TMPX" "$BACKEND_DIR/$d"; then
+        if [ -d "$BACKEND_DIR/$d.pre-rollback.$TS" ] && [ ! -e "$BACKEND_DIR/$d" ]; then
+          mv "$BACKEND_DIR/$d.pre-rollback.$TS" "$BACKEND_DIR/$d" 2>/dev/null || true
+        fi
+        die "$d 교체 실패 — 원래 트리를 되돌려 놓았습니다: $BACKEND_DIR/$d"
+      fi
+    elif [ "$(mval "$BDIR/manifest.env" "ABSENT_$(mkey "$d")")" = "1" ]; then
+      if [ -d "$BACKEND_DIR/$d" ]; then
+        rm -rf "$BACKEND_DIR/$d.pre-rollback.$TS"
+        mv "$BACKEND_DIR/$d" "$BACKEND_DIR/$d.pre-rollback.$TS"
+        MOVED="$MOVED $BACKEND_DIR/$d.pre-rollback.$TS"
+        say "백업 당시 없던 트리라 치워 뒀습니다: $d → $d.pre-rollback.$TS"
+      fi
+    elif [ -e "$BACKEND_DIR/$d" ]; then
+      EXTRA_LEFT="$EXTRA_LEFT $d"
+    fi
+  done
+  for p in $BK_FILES; do
+    if [ -f "$BDIR/$p" ]; then
+      cp -a "$BDIR/$p" "$BACKEND_DIR/$p" || die "백업 복사 실패 — 중단합니다: $BDIR/$p → $BACKEND_DIR/$p"
+      chown_back "$BACKEND_DIR/$p" "$R_BOWN"
+    elif [ "$(mval "$BDIR/manifest.env" "ABSENT_$(mkey "$p")")" = "1" ]; then
+      if [ -f "$BACKEND_DIR/$p" ]; then
+        rm -f "$BACKEND_DIR/$p.pre-rollback.$TS"
+        mv "$BACKEND_DIR/$p" "$BACKEND_DIR/$p.pre-rollback.$TS"
+        MOVED="$MOVED $BACKEND_DIR/$p.pre-rollback.$TS"
+        say "백업 당시 없던 파일이라 치워 뒀습니다: $p → $p.pre-rollback.$TS"
+      fi
+    elif [ -e "$BACKEND_DIR/$p" ]; then
+      EXTRA_LEFT="$EXTRA_LEFT $p"
+    fi
+  done
+
+  # 백업본은 root 소유로 만들어졌을 수 있다(cp -a) → 적용 때와 같은 소유권 원복이 필요하다.
+  chown_back "$FRONT_DIR" "$R_FOWN"
+  chown_back "$BACKEND_DIR/app" "$R_BOWN"
+
+  # 되돌아갔는지 지문으로 확인한다(복사가 조용히 실패하는 경우가 있다).
+  # 검증 범위는 **복구 범위와 같아야** 한다. 예전에는 app/*.py 와 index.html 자산만 봤기
+  # 때문에, migrations/·tools/·alembic.ini 가 신버전 그대로 남아 있어도 '지문 확인' 을
+  # 통과하고 exit 0 을 찍었다 — 거짓 안심의 직접적 원인이었다.
+  AF_ASSET="$(asset_of "$FRONT_DIR")"
+  AF_APP="$(tree_hash "$BACKEND_DIR/app")"
+  AF_EXTRA="$(extra_hash "$BACKEND_DIR")"
+  RS2=0; fp_same "$AF_ASSET" "$AF_APP" "$BK_ASSET" "$BK_APP" || RS2=$?
+  if [ "$RS2" = "1" ]; then
+    outln "  ❌ 복구 후 지문이 백업과 다릅니다: 현재 asset=${AF_ASSET:-?} app=${AF_APP}"
+    outln "     기대: asset=${BK_ASSET:-?} app=${BK_APP}"
+    outln "     app/ 은 정확 교체되므로 이 값이 어긋나면 복사가 실제로 실패한 것입니다"
+    outln "     (직전 app/ 은 여기 있습니다: ${PREV_APP:-없음})"
+    exit 1
+  fi
+  if [ "$EXTRA_CAP" = "1" ] && [ -n "$BK_EXTRA" ]; then
+    case "$BK_EXTRA$AF_EXTRA" in
+      *nohasher*) warn "해시 도구가 없어 부수 트리 복구를 검증하지 못했습니다" ;;
+      *) if [ "$AF_EXTRA" != "$BK_EXTRA" ]; then
+           outln "  ❌ 부수 트리($BK_DIRS $BK_FILES)가 백업 상태로 돌아가지 않았습니다"
+           outln "     현재 extra=$AF_EXTRA / 기대 extra=$BK_EXTRA"
+           outln "     → 백엔드 트리가 '구버전 app/ + 신버전 부수 트리' 혼합 상태일 수 있습니다."
+           outln "        alembic upgrade head 를 돌리지 마세요(구 코드 위에 신 스키마가 적용됩니다)."
+           exit 1
+         fi ;;
+    esac
+  fi
+
+  # 완료 문구는 **실제로 복구한 범위**만 말한다. 종료코드도 마찬가지다:
+  # 부분 복구에 0 을 주면 감싸는 스크립트·운영자가 '완전히 되돌아갔다' 로 읽는다.
+  RB_RC=0
+  if [ "$EXTRA_CAP" = "1" ] && [ -z "$EXTRA_LEFT" ]; then
+    outln "  ✅ 파일 복구 완료 — frontend dist · app/ · $BK_FILES · $BK_DIRS"
+    outln "     (지문 확인: asset=${AF_ASSET:-?} app=${AF_APP} extra=${AF_EXTRA})"
+  else
+    RB_RC=2
+    outln "  ℹ 부분 복구 — frontend dist · app/ 은 되돌렸습니다 (지문 확인: asset=${AF_ASSET:-?})"
+    if [ "$EXTRA_CAP" != "1" ]; then
+      outln "     ⚠ 이 백업은 옛 포맷이라 부수 트리를 담고 있지 않습니다."
+      outln "        $BK_DIRS · alembic.ini · .env.example 은 **신버전 그대로입니다**."
+    else
+      outln "     ⚠ 근거가 없어 손대지 않은 경로:$EXTRA_LEFT (신버전 그대로입니다)"
+    fi
+    outln "     → 지금 'alembic upgrade head' 를 돌리면 구 코드 위에 신 스키마 리비전이 적용됩니다."
+    outln "        마이그레이션까지 되돌리려면 패키지 이전 소스에서 migrations/ 를 직접 복원하세요."
+  fi
+  echo
+  outln "  ⚠ 백엔드를 반드시 재시작하세요(코드만 되돌아갔을 뿐 프로세스는 구 코드를 메모리에 들고 있습니다)"
+  outln "     systemctl restart <유닛>   또는   [7] 단계의 수동 절차"
+  outln "  · 롤백 직전 app/ 은 지우지 않고 남겨 뒀습니다: ${PREV_APP:-없음}"
+  if [ -n "$MOVED" ]; then
+    outln "  · 함께 치워 둔 신버전 산출물:$MOVED"
+  fi
+  outln "     (확인이 끝나면 지우세요:  rm -rf ${PREV_APP:-<경로>}$MOVED)"
+  outln "  · 의존성까지 되돌리려면:  $BDIR/pip-freeze.txt 참고 (보통은 pip uninstall pycdlib 한 줄)"
+  return "$RB_RC"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 드라이런
+# ═══════════════════════════════════════════════════════════════════════════
+do_dryrun() {
+  echo
+  outln "== 미리보기(아무것도 바꾸지 않습니다) =="
+  outln "  패키지     : $PKG"
+  outln "  프론트     : $FRONT_DIR   ← dist/assets(.gz/.br 포함) → 루트자산 → index.html 순서로 덮어씀"
+  outln "  백엔드     : $BACKEND_DIR ← app/ $BK_FILES $BK_DIRS"
+  outln "  롤백 범위  : 위와 **동일**(백업 집합 = 쓰기 집합). 지문도 같은 범위로 검증"
+  outln "  백업       : $BACKUP_ROOT/$TS"
+  outln "  파이썬     : ${PYBIN:-미발견}  (근거: ${PYBIN_SRC:-없음} / 미설치 항목만 설치, -U 사용 안 함)"
+  outln "  소유권     : 프론트=${FOWN:-?}  백엔드app=${BOWN:-?}  (복사 후 이 값으로 원복)"
+  outln "  nginx      : ${NGINX:-미발견}  (patch_nginx.sh 위임 + brotli 모듈 자동 설치)"
+  outln "  재시작     : PID=${BPID:-미발견}"
+  echo
+  outln "  건드리지 않는 것: backend/.env, dev.db, certs/, deploy/generated/**,"
+  outln "                    orthanc-generated.json, scp-policy.env, worklists/*.wl, 도커 볼륨"
+  outln "  삭제하지 않는 것: 기존 frontend/dist 자산(열려 있는 탭이 구 청크를 요청한다)"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 헤더 주석 블록을 그대로 도움말로 쓴다. 줄 번호를 박아 두면 헤더를 고칠 때마다
+# 조용히 어긋나므로 `set -eu` 를 종점으로 삼는다.
+usage() { sed -n '2,/^set -eu/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+case "$MODE" in
+  check)
+    outln "== Saintview Viewer Suite — 원격 진단 =="
+    do_check
+    echo
+    if [ "$V_FAIL" -eq 0 ]; then outln "✅ 이상 없음"; else
+      outln "❌ 실패 $V_FAIL 건 — 서버에서:  sudo sh $(basename "$0") --apply <패키지>"; exit 1; fi
+    ;;
+
+  dryrun)
+    outln "== Saintview Viewer Suite — 서버 갱신(미리보기) =="
+    precheck; detect_paths; do_dryrun
+    ;;
+
+  apply)
+    outln "== Saintview Viewer Suite — 서버 갱신 =="
+    outln "   시작: $(date '+%Y-%m-%d %H:%M:%S')   타임스탬프: $TS"
+    precheck            # [1]
+    detect_paths        # [2]
+    do_backup           # [3]
+    do_copy             # [4]
+    do_pydeps           # [5]
+    do_nginx            # [6]
+    # ※ set -eu 아래에서 `f; RC=$?` 는 함수가 0 이 아닌 값을 반환하는 순간 셸이 즉사한다
+    #   (dash 에서 확인). 반드시 `RC=0; f || RC=$?` 형태로 써야 뒤 분기가 살아 있다.
+    RRC=0; do_restart || RRC=$?   # [7]
+    do_verify           # [8]
+
+    echo
+    # PYDEPS_FAIL 을 판정에 포함한다. 과거에는 pip 이 통째로 실패해도 '✅ 갱신 완료
+    # / exit 0' 가 나와, ISO 반출이 501 인 서버를 정상이라고 보고했다.
+    if [ "$V_FAIL" -eq 0 ] && [ "$RRC" = "0" ] && [ "$PYDEPS_FAIL" = "0" ]; then
+      # 검증을 실제로 다 돌린 경우에만 '완료' 라고 말한다. curl 이 없어 HTTP 검증을
+      # 건너뛴 실행에 exit 0 을 주면 '미검증' 이 '정상' 으로 둔갑한다(--skip-restart 와
+      # 겹치면 실제로 아무 HTTP 검증도 하지 않은 채 ✅ 가 나갔다).
+      if [ "$VERIFY_SKIPPED" = "0" ]; then
+        outln "✅ 갱신 완료 ($TS)"
+        outln "   백업: $BACKUP_ROOT/$TS   (되돌리기: sudo sh $(basename "$0") --rollback $TS)"
+        exit 0
+      fi
+      outln "⚠  갱신은 끝났으나 **검증을 완료하지 못했습니다**(curl 없음) — 정상 여부는 확인되지 않았습니다"
+      outln "   확인: 브라우저 접속 / wget -qO- http://127.0.0.1:$PORT/api/health"
+      outln "   백업: $BACKUP_ROOT/$TS   (되돌리기: sudo sh $(basename "$0") --rollback $TS)"
+      exit 2
+    fi
+    outln "❌ 갱신이 완전하지 않습니다 (검증 실패 $V_FAIL 건, 재시작 exit $RRC, 의존성 실패 $PYDEPS_FAIL)"
+    echo
+    outln "   되돌리려면:"
+    outln "     sudo sh $(basename "$0") --rollback $TS"
+    outln "   되돌린 뒤에는 백엔드를 반드시 재시작해야 구 코드가 실제로 적용됩니다."
+    exit 1
+    ;;
+
+  rollback)
+    # 종료코드로도 사실을 말한다: 0=쓰기 집합 전부 복구, 2=부분 복구, 1=실패.
+    # (부분 복구에 0 을 주면 감싸는 스크립트가 '완전 복구' 로 오독한다)
+    RBRC=0; do_rollback || RBRC=$?
+    exit "$RBRC" ;;
+  *)        usage ;;
+esac
