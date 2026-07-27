@@ -22,7 +22,9 @@ class Settings:
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = int(os.getenv("SAINTVIEW_JWT_EXPIRE_MINUTES", "480"))
     # Orthanc (D-3)
-    orthanc_url: str = os.getenv("SAINTVIEW_ORTHANC_URL", "http://localhost:8042")
+    # ⚠ 기본값은 127.0.0.1 — 'localhost' 는 IPv6(::1) 우선 조회 후 IPv4 폴백으로 연결당 ~200ms
+    # 지연이 붙어 프레임 로딩이 느려진다(실측: localhost 219ms vs 127.0.0.1 11ms).
+    orthanc_url: str = os.getenv("SAINTVIEW_ORTHANC_URL", "http://127.0.0.1:8042")
     # 클라이언트(브라우저)가 쓰는 썸네일 프리뷰 베이스 — 기본은 상대경로 '/orthanc'(Vite 프록시→localhost:8042).
     # 같은 출처라 원격(Tailscale) 접속에서도 동작. 직접 노출하려면 SAINTVIEW_ORTHANC_PREVIEW_BASE=http://<IP>:8042 로 override.
     orthanc_preview_base: str = os.getenv("SAINTVIEW_ORTHANC_PREVIEW_BASE", "/orthanc")

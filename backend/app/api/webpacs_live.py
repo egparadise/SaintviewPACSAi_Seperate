@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -67,6 +67,22 @@ def study_detail(vid: int, db: Session = Depends(get_db), user: dict = Depends(c
 @router.get("/studies/{vid}/series-tree")
 def series_tree(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
     return _wrap(lambda: live.live_series_tree(db, vid, user))
+
+
+@router.post("/studies/{vid}/prefetch")
+def prefetch(vid: int, tasks: BackgroundTasks, db: Session = Depends(get_db),
+             user: dict = Depends(current_user)):
+    """검사 오픈 시 호출 — 전 인스턴스 원본을 백그라운드 병렬 예열(A→B 지연 은닉).
+    즉시 반환하고 워밍은 백그라운드에서 진행. 별도 DB 세션 사용."""
+    def _bg():
+        from app.db import SessionLocal
+        with SessionLocal() as bg_db:
+            try:
+                live.prefetch_series(bg_db, vid, user)
+            except Exception:  # noqa: BLE001 — 프리페치 실패는 온디맨드 렌더로 폴백
+                pass
+    tasks.add_task(_bg)
+    return {"ok": True, "started": True}
 
 
 @router.get("/studies/{vid}/instances")
@@ -260,11 +276,11 @@ def _render_with_retry(db: Session, study_uid: str, series_uid: str, sop_uid: st
     client = _wrap(lambda: live.service_client(db))
     data = _wrap(lambda: live.get_instance_bytes(client, study_uid, series_uid, sop_uid))
     try:
-        return live.render_instance(data, wc, ww, fmt=fmt, quality=quality)
+        return live.render_instance(data, wc, ww, fmt=fmt, quality=quality, sop_uid=sop_uid)
     except Exception:  # noqa: BLE001 — 손상 캐시 의심 → 삭제 후 강제 재다운로드 1회
         live.invalidate_instance(sop_uid)
         data = _wrap(lambda: live.get_instance_bytes(client, study_uid, series_uid, sop_uid, force=True))
-        return live.render_instance(data, wc, ww, fmt=fmt, quality=quality)
+        return live.render_instance(data, wc, ww, fmt=fmt, quality=quality, sop_uid=sop_uid)
 
 
 # ── 픽셀 (무인증 — <img>/Cornerstone 헤더 없는 요청. 모듈 독스트링 참조) ──

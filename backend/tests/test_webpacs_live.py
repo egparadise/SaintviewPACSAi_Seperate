@@ -104,7 +104,36 @@ def test_live_detail_and_tree(client, auth_headers, live_ready):
     assert r.status_code == 200 and len(r.json()["items"]) == 3
 
 
-def test_live_rendered_and_thumb(client, auth_headers, live_ready):
+def test_live_prefetch_and_decode_cache(client, auth_headers, live_ready):
+    """속도 개선: 프리페치(병렬 원본 예열) + 디코드 캐시(재요청 디코드 생략)."""
+    import time as _t
+
+    from app.services import webpacs_live as wl
+
+    # 프리페치 킥 — 백그라운드(TestClient 는 동기 실행)로 원본 디스크 캐시 예열
+    r = client.post(f"/api/webpacs/live/studies/{VID1}/prefetch", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["started"]
+
+    tree = client.get(f"/api/webpacs/live/studies/{VID1}/series-tree",
+                      headers=auth_headers).json()
+    s = tree["series"][0]
+    sop = s["instances"][0]["sop_uid"]
+    url = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
+           f"/series/{s['series_uid']}/instances/{sop}/rendered")
+    # 디코드 캐시 초기화 후 첫 렌더(디코드 발생) vs 둘째(캐시 히트) 시간 비교
+    with wl._DECODE_LOCK:
+        wl._DECODE_CACHE.clear()
+    t0 = _t.perf_counter()
+    r1 = client.get(url, params={"window": "40,400"})
+    t1 = _t.perf_counter()
+    r2 = client.get(url, params={"window": "80,500"})   # 다른 W/L — 디코드는 캐시, 윈도잉만
+    t2 = _t.perf_counter()
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.content[:8] == b"\x89PNG\r\n\x1a\n"
+    # 캐시 히트(둘째)가 첫 요청보다 느리지 않아야(윈도잉만) — 디코드 캐시 동작 확인
+    assert (t2 - t1) <= (t1 - t0) + 0.05
+    # sop 가 디코드 캐시에 적재됨
+    assert sop in wl._DECODE_CACHE
     tree = client.get(f"/api/webpacs/live/studies/{VID1}/series-tree",
                       headers=auth_headers).json()
     s = tree["series"][0]

@@ -484,6 +484,9 @@ export const api = {
           assignee: string; report_status: string; report_updated: string;
           report_writer: string; viewers: string[];
           other_writing: boolean; other_writers: string[] }>(`${LIVE}/studies/${studyId}/state`),
+  // 검사 오픈 시 A→B 원본 병렬 예열(지연 은닉) — 실패해도 온디맨드 렌더로 폴백
+  livePrefetch: (studyId: number) =>
+    req<{ ok: boolean }>(`${LIVE}/studies/${studyId}/prefetch`, { method: "POST" }).catch(() => ({ ok: false })),
   liveClaim: (studyId: number) =>
     req<{ status: number; message: string }>(`${LIVE}/studies/${studyId}/claim`, { method: "POST" }),
   liveRelease: (studyId: number) =>

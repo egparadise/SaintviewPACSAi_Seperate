@@ -48,10 +48,12 @@ export default defineConfig(({ command }) => ({
     allowedHosts: true,      // Vite Host 헤더 체크 우회(Tailscale IP·MagicDNS 호스트 허용)
     https: command === 'serve' ? httpsOption() : undefined,   // dev 전용 HTTPS 강제(자체서명, http 폴백 없음)
     proxy: {
-      '/api': process.env.SV_API_URL ?? 'http://localhost:8010',            // 백엔드 FastAPI
-      '/dicom-web': process.env.SV_DICOMWEB_URL ?? 'http://localhost:3001', // Orthanc DICOMweb (OHIF nginx 경유)
+      // ⚠ 프록시 대상은 반드시 127.0.0.1 — 'localhost' 는 IPv6(::1) 우선 조회 후 IPv4 폴백으로
+      // 연결당 ~200ms 가 붙어 프레임 로딩이 눈에 띄게 느려진다(실측: localhost 219ms vs 127.0.0.1 11ms).
+      '/api': process.env.SV_API_URL ?? 'http://127.0.0.1:8010',            // 백엔드 FastAPI
+      '/dicom-web': process.env.SV_DICOMWEB_URL ?? 'http://127.0.0.1:3001', // Orthanc DICOMweb (OHIF nginx 경유)
       '/orthanc': {                            // 썸네일 프리뷰 — Orthanc 네이티브 /instances/.../preview
-        target: process.env.SV_ORTHANC_URL ?? 'http://localhost:8043',
+        target: process.env.SV_ORTHANC_URL ?? 'http://127.0.0.1:8043',
         rewrite: (p) => p.replace(/^\/orthanc/, ''),
         // preview 캐시 1시간 — 200 응답에만(오류 캐시 고정 방지), immutable 금지(동일 SOP 재전송 대비)
         configure: (proxy) => {

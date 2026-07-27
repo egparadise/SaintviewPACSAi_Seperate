@@ -1,7 +1,7 @@
 // 뷰어 전용 웹페이지 — 워크리스트에서 window.open으로 열리는 별도 창 (?viewer=2d&study=ID)
 // Study Open 옵션(Add/Stack/Key/With Open)을 URL 파라미터로 전달받아 Viewer2D를 전체 화면으로 띄운다.
 import { Suspense, lazy, useEffect, useState } from "react";
-import { api, ensureToken, type StudyDetail } from "../api";
+import { api, ensureToken, isLiveId, type StudyDetail } from "../api";
 import { DEFAULT_CLIENT_VIEWER } from "../lib/viewerConfig";
 import { folderToFilters, loadTabs } from "./WorklistTree";
 
@@ -67,12 +67,14 @@ export function ViewerWindow() {
         const id = (r.value as { client_viewer?: string }).client_viewer;
         if (id) setViewerId(id);
       }).catch(() => {});
+      // Live(원격 직결) 검사: 오픈 즉시 서버측 원본 병렬 예열 킥(A→B 지연 은닉)
+      if (isLiveId(studyId)) void api.livePrefetch(studyId);
       api.study(studyId).then((d) => {
         setDetail(d);
         document.title = `Saintview Viewer — ${d.modality} ${d.patient_name} ${d.study_date}`;
       }).catch((e) => setErr(e instanceof Error ? e.message : "검사 로드 실패"));
-      if (addId) api.study(addId).then(setAddDetail).catch(() => {});
-      if (stackId) api.study(stackId).then(setStackDetail).catch(() => {});
+      if (addId) { if (isLiveId(addId)) void api.livePrefetch(addId); api.study(addId).then(setAddDetail).catch(() => {}); }
+      if (stackId) { if (isLiveId(stackId)) void api.livePrefetch(stackId); api.study(stackId).then(setStackDetail).catch(() => {}); }
     });
   }, [studyId, addId, stackId]);
 

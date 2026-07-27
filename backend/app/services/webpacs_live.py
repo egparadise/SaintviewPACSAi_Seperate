@@ -477,16 +477,18 @@ def _prune_cache() -> None:
         pass
 
 
-def render_instance(data: bytes, wc: float | None, ww: float | None,
-                    fmt: str = "png", quality: int = 90) -> tuple[bytes, str]:
-    """DICOM bytes → 윈도잉 8bit PNG/JPEG. localpacs.render_png 와 동일 규칙.
+# 디코드 결과 메모리 캐시 — DICOM 픽셀 디코드(JPEG2000 등)는 비싸므로 sop 단위로 1회만 디코드하고
+# 그 뒤 스크롤 재방문·W/L 드래그는 윈도잉(싼 연산)만 수행 → 재요청 즉시 응답.
+# 그레이: rescale 적용 float32 배열(윈도잉 대기), RGB: uint8. 메모리 상한 LRU.
+_DECODE_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+_DECODE_LOCK = threading.Lock()
+_DECODE_MAX = 300   # 512²×4B ≈ 1MB/장 → 최대 ~300MB(대형 매트릭스는 개수만큼 더)
 
-    W/L: 쿼리 > 태그 > min-max. MONOCHROME1 반전·RGB·멀티프레임 첫 프레임.
-    반환: (bytes, media_type).
-    """
+
+def _decode_pixels(data: bytes) -> dict:
+    """DICOM bytes → 디코드 산출물(윈도잉 전). {rgb} 또는 {gray, tag_wc, tag_ww, mono1}."""
     import numpy as np
     import pydicom
-    from PIL import Image
     from pydicom.uid import ImplicitVRLittleEndian
 
     from app.services.localpacs_service import _tag_window
@@ -496,30 +498,62 @@ def render_instance(data: bytes, wc: float | None, ww: float | None,
         ds.file_meta = getattr(ds, "file_meta", None) or pydicom.dataset.FileMetaDataset()
         ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
     arr = ds.pixel_array
-
     photometric = str(getattr(ds, "PhotometricInterpretation", "") or "").upper()
     samples = int(getattr(ds, "SamplesPerPixel", 1) or 1)
     is_rgb = samples == 3 or (arr.ndim == 3 and arr.shape[-1] == 3 and "MONOCHROME" not in photometric)
     if is_rgb:
         if arr.ndim == 4:
             arr = arr[0]
-    elif arr.ndim == 3:
-        arr = arr[0]
-
-    if is_rgb:
         rgb = arr.astype(np.float32)
         if rgb.max() > 255:
             rgb = rgb / rgb.max() * 255.0
-        img = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB")
+        return {"rgb": np.clip(rgb, 0, 255).astype(np.uint8)}
+    if arr.ndim == 3:
+        arr = arr[0]
+    slope = float(getattr(ds, "RescaleSlope", 1) or 1)
+    intercept = float(getattr(ds, "RescaleIntercept", 0) or 0)
+    gray = arr.astype(np.float32) * slope + intercept
+    tag_wc, tag_ww = _tag_window(ds)
+    return {"gray": gray, "tag_wc": tag_wc, "tag_ww": tag_ww,
+            "mono1": photometric == "MONOCHROME1"}
+
+
+def _decoded(sop_uid: str | None, data: bytes) -> dict:
+    """sop 캐시된 디코드 산출물 반환(없으면 디코드 후 캐시). sop 미지정이면 캐시 없이 디코드."""
+    if not sop_uid:
+        return _decode_pixels(data)
+    with _DECODE_LOCK:
+        hit = _DECODE_CACHE.get(sop_uid)
+        if hit is not None:
+            _DECODE_CACHE.move_to_end(sop_uid)
+            return hit
+    dec = _decode_pixels(data)   # 락 밖에서 디코드(동시 요청은 각자 디코드하되 결과는 동일)
+    with _DECODE_LOCK:
+        _DECODE_CACHE[sop_uid] = dec
+        _DECODE_CACHE.move_to_end(sop_uid)
+        while len(_DECODE_CACHE) > _DECODE_MAX:
+            _DECODE_CACHE.popitem(last=False)
+    return dec
+
+
+def render_instance(data: bytes, wc: float | None, ww: float | None,
+                    fmt: str = "png", quality: int = 90,
+                    sop_uid: str | None = None) -> tuple[bytes, str]:
+    """디코드(캐시) + 윈도잉 8bit PNG/JPEG. W/L: 쿼리 > 태그 > min-max.
+
+    sop_uid 주면 디코드 결과를 메모리 캐시 → 재스크롤·W/L 드래그는 윈도잉만(디코드 생략).
+    """
+    import numpy as np
+    from PIL import Image
+
+    dec = _decoded(sop_uid, data)
+    if "rgb" in dec:
+        img = Image.fromarray(dec["rgb"], mode="RGB")
     else:
-        d = arr.astype(np.float32)
-        slope = float(getattr(ds, "RescaleSlope", 1) or 1)
-        intercept = float(getattr(ds, "RescaleIntercept", 0) or 0)
-        d = d * slope + intercept
+        d = dec["gray"]
         if wc is None or ww is None:
-            tag_wc, tag_ww = _tag_window(ds)
-            wc = wc if wc is not None else tag_wc
-            ww = ww if ww is not None else tag_ww
+            wc = wc if wc is not None else dec["tag_wc"]
+            ww = ww if ww is not None else dec["tag_ww"]
         if wc is None or ww is None or ww <= 0:
             lo, hi = float(d.min()), float(d.max())
             if hi <= lo:
@@ -527,7 +561,7 @@ def render_instance(data: bytes, wc: float | None, ww: float | None,
         else:
             lo, hi = wc - ww / 2.0, wc + ww / 2.0
         norm = np.clip((d - lo) / (hi - lo), 0.0, 1.0)
-        if photometric == "MONOCHROME1":
+        if dec["mono1"]:
             norm = 1.0 - norm
         img = Image.fromarray((norm * 255.0).astype(np.uint8), mode="L")
 
@@ -536,8 +570,45 @@ def render_instance(data: bytes, wc: float | None, ww: float | None,
         img.convert("L" if img.mode == "L" else "RGB").save(
             buf, format="JPEG", quality=max(1, min(int(quality or 90), 100)))
         return buf.getvalue(), "image/jpeg"
-    img.save(buf, format="PNG")
+    img.save(buf, format="PNG", compress_level=1)   # 낮은 압축=빠른 인코딩(전송은 로컬망)
     return buf.getvalue(), "image/png"
+
+
+# ── 시리즈 병렬 프리페치 — 검사 오픈 시 A→B 원본 다운로드를 백그라운드 선행(지연 은닉) ──
+_prefetch_lock = threading.Lock()
+_prefetching: set[int] = set()
+
+
+def prefetch_series(db: Session, vid: int, user: dict | None = None) -> int:
+    """활성 검사의 전 인스턴스 원본 bytes 를 병렬로 디스크 캐시에 예열(A→B 지연 은닉).
+    반환: 예열 시도 인스턴스 수. 이미 진행 중이면 0."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with _prefetch_lock:
+        if vid in _prefetching:
+            return 0
+        _prefetching.add(vid)
+    try:
+        client = service_client(db)   # 이미지 취득은 서비스 계정
+        tree = live_series_tree(db, vid, user)
+        targets = [(tree["study_uid"], s["series_uid"], i["sop_uid"])
+                   for s in tree["series"] for i in s["instances"]
+                   if not _cache_path(i["sop_uid"]).exists()]
+        if not targets:
+            return 0
+
+        def _one(t):
+            try:
+                get_instance_bytes(client, *t)
+            except Exception:  # noqa: BLE001 — 개별 실패는 무시(온디맨드에서 재시도)
+                pass
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_one, targets))
+        return len(targets)
+    finally:
+        with _prefetch_lock:
+            _prefetching.discard(vid)
 
 
 # ── 판독 (A pacs_study_report ↔ 우리 Report 계약) ─────────────────────────
