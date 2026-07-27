@@ -31,6 +31,28 @@ function httpsOption() {
 // Cornerstone3D 공식 Vite 가이드: codec(CJS/WASM) ESM 변환 + 워커 설정
 // [Viewer Suite] 함수형 config — HTTPS 강제(인증서 필수)는 dev 서빙(serve)에만 적용.
 // build 는 정적 산출물 생성이라 인증서가 필요 없다(신규 체크아웃에서 빌드 가능해야 함).
+// dev(serve)와 preview(프로덕션 dist 서빙)가 동일한 프록시·HTTPS 를 쓰도록 공유 정의.
+// ⚠ 프록시 대상은 반드시 127.0.0.1 — 'localhost' 는 IPv6(::1) 우선 조회 후 IPv4 폴백으로
+// 연결당 ~200ms 가 붙어 프레임 로딩이 눈에 띄게 느려진다(실측: localhost 219ms vs 127.0.0.1 11ms).
+const proxyConfig = {
+  '/api': process.env.SV_API_URL ?? 'http://127.0.0.1:8010',            // 백엔드 FastAPI
+  '/dicom-web': process.env.SV_DICOMWEB_URL ?? 'http://127.0.0.1:3001', // Orthanc DICOMweb (OHIF nginx 경유)
+  '/orthanc': {                            // 썸네일 프리뷰 — Orthanc 네이티브 /instances/.../preview
+    target: process.env.SV_ORTHANC_URL ?? 'http://127.0.0.1:8043',
+    rewrite: (p: string) => p.replace(/^\/orthanc/, ''),
+    // preview 캐시 1시간 — 200 응답에만(오류 캐시 고정 방지), immutable 금지(동일 SOP 재전송 대비)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    configure: (proxy: any) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      proxy.on('proxyRes', (proxyRes: any, req: any) => {
+        if (proxyRes.statusCode === 200 && /\/instances\/[^/]+\/preview/.test(req.url ?? '')) {
+          proxyRes.headers['cache-control'] = 'private, max-age=3600'
+        }
+      })
+    },
+  },
+}
+
 export default defineConfig(({ command }) => ({
   plugins: [viteCommonjs(), react()],
   optimizeDeps: {
@@ -47,23 +69,15 @@ export default defineConfig(({ command }) => ({
     host: '0.0.0.0',
     allowedHosts: true,      // Vite Host 헤더 체크 우회(Tailscale IP·MagicDNS 호스트 허용)
     https: command === 'serve' ? httpsOption() : undefined,   // dev 전용 HTTPS 강제(자체서명, http 폴백 없음)
-    proxy: {
-      // ⚠ 프록시 대상은 반드시 127.0.0.1 — 'localhost' 는 IPv6(::1) 우선 조회 후 IPv4 폴백으로
-      // 연결당 ~200ms 가 붙어 프레임 로딩이 눈에 띄게 느려진다(실측: localhost 219ms vs 127.0.0.1 11ms).
-      '/api': process.env.SV_API_URL ?? 'http://127.0.0.1:8010',            // 백엔드 FastAPI
-      '/dicom-web': process.env.SV_DICOMWEB_URL ?? 'http://127.0.0.1:3001', // Orthanc DICOMweb (OHIF nginx 경유)
-      '/orthanc': {                            // 썸네일 프리뷰 — Orthanc 네이티브 /instances/.../preview
-        target: process.env.SV_ORTHANC_URL ?? 'http://127.0.0.1:8043',
-        rewrite: (p) => p.replace(/^\/orthanc/, ''),
-        // preview 캐시 1시간 — 200 응답에만(오류 캐시 고정 방지), immutable 금지(동일 SOP 재전송 대비)
-        configure: (proxy) => {
-          proxy.on('proxyRes', (proxyRes, req) => {
-            if (proxyRes.statusCode === 200 && /\/instances\/[^/]+\/preview/.test(req.url ?? '')) {
-              proxyRes.headers['cache-control'] = 'private, max-age=3600'
-            }
-          })
-        },
-      },
-    },
+    proxy: proxyConfig,
+  },
+  // ⚡ preview = 프로덕션 dist 서빙. 운영 기동은 이 모드를 쓴다(dev 모드는 새 뷰어 창마다
+  // 비압축 모듈 수십 개·6.8MB 를 내려받아 창 열기가 눈에 띄게 느리다 — 실측 dev 6.8MB/53요청
+  // vs prod 0.7MB/3요청). dev 와 동일한 프록시·HTTPS 를 쓰도록 같은 설정을 공유한다.
+  preview: {
+    host: '0.0.0.0',
+    allowedHosts: true,
+    https: httpsOption(),
+    proxy: proxyConfig,
   },
 }))

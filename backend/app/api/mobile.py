@@ -144,6 +144,10 @@ async def capture_upload(token: str, files: list[UploadFile], db: Session = Depe
             ds.save_as(buf, write_like_original=False)
             r = client.upload_dicom(buf.getvalue())
             orthanc_sid = r.get("ParentStudy", orthanc_sid)
+            if orthanc_sid:   # 새 시리즈 추가 — series-tree 캐시 무효화(뷰어가 즉시 반영)
+                from app.api.worklist import invalidate_series_tree
+
+                invalidate_series_tree(orthanc_sid)
         # DB 재등록 — 시리즈/인스턴스 수 갱신(뷰어 refreshExam 이 새 시리즈 표시)
         if orthanc_sid:
             m = client.study_metadata(orthanc_sid)

@@ -59,9 +59,29 @@ echo [3/4] 뷰어 프론트(:5180, HTTPS 전용) 확인...
 netstat -an | findstr /c:":5180 " | findstr /c:"LISTENING" >nul 2>&1
 if not errorlevel 1 (
   echo    :5180 이미 실행 중 - 건너뜁니다.
-) else (
-  start "SVViewer Front (5180)" /min cmd /c "cd /d %~dp0frontend && npm run dev -- --host 0.0.0.0 --port 5180 --strictPort > %TEMP%\svviewer_5180.log 2>&1"
+  goto front_started
 )
+rem ⚡ 기본은 프로덕션 빌드 서빙(preview) — 뷰어 창 열기 속도의 핵심.
+rem    dev 모드는 새 창마다 비압축 모듈 수십 개(6.8MB)를 내려받아 창 열기가 느리다
+rem    (실측: dev 6.8MB/53요청 vs 프로덕션 0.7MB/3요청). 소스 수정 즉시 반영이 필요한
+rem    개발 중에는  start_viewer_suite.bat dev  로 실행하면 기존 dev 모드로 뜬다.
+if /I "%~1"=="dev" (
+  echo    [개발 모드] vite dev 로 기동합니다 - 창 열기가 느릴 수 있습니다.
+  start "SVViewer Front (5180 dev)" /min cmd /c "cd /d %~dp0frontend && npm run dev -- --host 0.0.0.0 --port 5180 --strictPort > %TEMP%\svviewer_5180.log 2>&1"
+  goto front_started
+)
+echo    프로덕션 빌드 생성 중(최초/소스 변경 시 수십 초)...
+pushd "%~dp0frontend"
+call npm run build > %TEMP%\svviewer_build.log 2>&1
+if errorlevel 1 (
+  echo    [!] 빌드 실패 - dev 모드로 대체합니다. 로그: %TEMP%\svviewer_build.log
+  popd
+  start "SVViewer Front (5180 dev)" /min cmd /c "cd /d %~dp0frontend && npm run dev -- --host 0.0.0.0 --port 5180 --strictPort > %TEMP%\svviewer_5180.log 2>&1"
+  goto front_started
+)
+popd
+start "SVViewer Front (5180)" /min cmd /c "cd /d %~dp0frontend && npm run preview -- --host 0.0.0.0 --port 5180 --strictPort > %TEMP%\svviewer_5180.log 2>&1"
+:front_started
 
 echo [4/4] 뷰어 응답 대기(최대 90초)...
 set /a _try=0

@@ -8,6 +8,12 @@ import { folderToFilters, loadTabs } from "./WorklistTree";
 const Viewer2D = lazy(() => import("./Viewer2D").then((m) => ({ default: m.Viewer2D })));
 const ViewerInfi = lazy(() => import("./ViewerInfi").then((m) => ({ default: m.ViewerInfi })));
 
+// ⚡ 뷰어 청크 선행 로드 — 모듈 평가 시점(=창 문서 로드 직후)에 곧바로 시작한다.
+// 예전엔 `if (!detail) return <로딩>` 게이트 때문에 api.study() 응답이 온 뒤에야
+// lazy 청크 다운로드가 시작돼, "가장 큰 다운로드"와 "API 왕복"이 직렬로 줄을 섰다.
+// 이제 둘이 겹쳐 흘러가므로 첫 프레임까지의 벽시계 시간이 왕복 1회만큼 줄어든다.
+void import("./Viewer2D");
+
 // 선택 뷰어(설정>뷰어): infi=In Viewer, 그 외(ty/sv)=Viewer2D(엔진 재사용, sv 는 SAINT VIEW 크롬 skin)
 
 export function ViewerWindow() {

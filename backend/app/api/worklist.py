@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import threading
+import time
+from collections import OrderedDict
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -224,6 +228,40 @@ def set_priority(
     return {"ok": True, "emergency": study.emergency}
 
 
+# series-tree 캐시 — 열기·탭 전환·비교에서 반복 호출되는데 Orthanc 왕복이 인스턴스 수에 비례한다
+# (CT 200장 ≈ 116ms). 구조는 검사 수신이 끝나면 거의 불변이므로 짧은 TTL 로 캐시해 재오픈을 즉시화.
+# ⚠ Exam Control(소프트 삭제·재귀속)은 캐시 뒤에 매번 오버레이하므로 QC 변경은 즉시 반영된다.
+_TREE_CACHE: "OrderedDict[str, tuple[float, list]]" = OrderedDict()
+_TREE_TTL = 60.0
+_TREE_MAX = 128
+_TREE_LOCK = threading.Lock()
+
+
+def invalidate_series_tree(orthanc_id: str = "") -> None:
+    """구조 변경(Import·수신·QC 이동) 시 캐시 무효화. 인자 없으면 전체."""
+    with _TREE_LOCK:
+        if orthanc_id:
+            _TREE_CACHE.pop(orthanc_id, None)
+        else:
+            _TREE_CACHE.clear()
+
+
+def _cached_series_tree(client, orthanc_id: str) -> list:
+    now = time.time()
+    with _TREE_LOCK:
+        hit = _TREE_CACHE.get(orthanc_id)
+        if hit and now - hit[0] < _TREE_TTL:
+            _TREE_CACHE.move_to_end(orthanc_id)
+            return hit[1]
+    tree = client.series_tree(orthanc_id)
+    with _TREE_LOCK:
+        _TREE_CACHE[orthanc_id] = (now, tree)
+        _TREE_CACHE.move_to_end(orthanc_id)
+        while len(_TREE_CACHE) > _TREE_MAX:
+            _TREE_CACHE.popitem(last=False)
+    return tree
+
+
 @router.get("/studies/{study_id}/series-tree")
 def series_tree(study_id: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
     """시리즈→인스턴스 트리 + 썸네일 URL — 자체 뷰어 세로 썸네일용."""
@@ -242,7 +280,7 @@ def series_tree(study_id: int, db: Session = Depends(get_db), user: dict = Depen
     client = OrthancClient()
     try:
         # alive() 사전 왕복 제거 — 실패는 아래 호출이 곧바로 드러난다(열기당 GET /system 1회 절감)
-        tree = client.series_tree(study.orthanc_id)
+        tree = _cached_series_tree(client, study.orthanc_id)
     except _httpx.HTTPError as e:
         # Orthanc 미가용/HTTP 오류만 우아 강등(빈 트리) — 코드 버그류는 그대로 500 으로 노출
         logging.getLogger("saintview.worklist").warning(
@@ -428,6 +466,7 @@ async def import_dicom(
                 orthanc_id=sid,
             )
             registered += 1
+            invalidate_series_tree(sid)   # 새 인스턴스 추가 — 트리 캐시 무효화(즉시 반영)
             # 수신 검사와 동일: 자동 AI 초안 큐잉(중복 가드)
             from sqlalchemy import select as _select
 

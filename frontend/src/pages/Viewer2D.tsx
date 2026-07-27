@@ -15,7 +15,7 @@ import { ReportDock } from "../components/ReportDock";
 import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { IN_MOUSE_OPS } from "../lib/infiConfig";
-import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/cornerstone";
+import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { renderedRootFor } from "../lib/liveUids";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
@@ -1056,11 +1056,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     histRef.current = [];
     histIdx.current = -1;
     setHistTick((t) => t + 1);
-    Promise.all([
-      api.seriesTree(detail.id),
-      api.presentation(detail.id).catch(() => ({ series: {} as Record<string, import("../api").PState> })),
-    ]).then(([r, ps]) => {
-      pstateRef.current = { ...pstateRef.current, ...(ps.series || {}) };   // 저장된 표시상태(W/L·방향·필터·셔터)
+    // ⚡ 첫 프레임 지연 제거: presentation(표시상태)은 첫 픽셀 표시에 필요 없다.
+    // 예전엔 Promise.all 로 묶여 seriesTree 가 와도 presentation 을 기다렸다 → 왕복 1회만큼 늦어짐.
+    // 지금은 seriesTree 만 기다려 즉시 그리고, 표시상태는 도착하는 대로 적용(재렌더).
+    api.presentation(detail.id)
+      .then((ps) => { pstateRef.current = { ...pstateRef.current, ...(ps.series || {}) }; })
+      .catch(() => { /* 표시상태 없음 — 기본값으로 표시 */ });
+    api.seriesTree(detail.id).then((r) => {
       let imgSeries = r.series.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality));
       // ⑤ Key Image View: 키 이미지 SOP만 남긴다 (빈 시리즈 제거)
       if (keySops?.length) {

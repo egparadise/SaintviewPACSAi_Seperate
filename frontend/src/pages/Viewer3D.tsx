@@ -33,7 +33,7 @@ import {
   init as toolsInit,
 } from "@cornerstonejs/tools";
 import { init as dicomImageLoaderInit, wadors } from "@cornerstonejs/dicom-image-loader";
-import { authHeader, framesBase, getWadoTs } from "../lib/cornerstone";
+import { authHeader, framesBase, getWadoTs } from "../lib/imageFormat";
 
 const DICOMWEB_ROOT = import.meta.env.VITE_DICOMWEB_ROOT ?? "http://localhost:3000/dicom-web";
 

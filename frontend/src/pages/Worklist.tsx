@@ -2586,6 +2586,11 @@ export function Worklist() {
     if (gestureCollapsedRef.current) { gestureCollapsedRef.current = false; return; }
     persistViewerSizes();
   }, [persistViewerSizes]);
+  // 스플리터 더블클릭 — 해당 영역 높이를 기본값으로 복원(계정 저장)
+  const resetInfiRegion = useCallback((sizeKey: keyof InfiSizes) => {
+    setInfiLive({ [sizeKey]: DEFAULT_INFI_SIZES[sizeKey] } as Partial<InfiSizes>);
+    persistViewerSizes();
+  }, [setInfiLive, persistViewerSizes]);
   // E행 패널 사이 스플리터: 좌측 패널 폭 조절(좌측이 가변 report면 우측을 역방향 조절)
   const resizeE = useCallback((left: string, right: string, dx: number) => {
     const keyOf = (k: string): keyof LayoutSizes | null =>
@@ -3723,7 +3728,7 @@ export function Worklist() {
             {/* ⑤ Preview — 선택 검사 미리보기 (원본 좌하단 흑배경). 스플리터 최소까지 드래그=숨김 */}
             {panelsOn.preview ? (
               <>
-                <Splitter dir="h" onEnd={() => endInfiRegion("preview")}
+                <Splitter dir="h" onEnd={() => endInfiRegion("preview")} onReset={() => resetInfiRegion("prevH")}
                           onDrag={(dy) => dragInfiRegion("preview", "prevH", 60, 600, dy)} />
                 <div style={{ height: infiSz.prevH, flexShrink: 0, background: "#000", border: "1px solid var(--border)",
                               borderRadius: 4, overflow: "hidden", display: "flex" }}>
@@ -3749,7 +3754,7 @@ export function Worklist() {
             </div>
             {panelsOn.related ? (
               <>
-                <Splitter dir="h" onEnd={() => endInfiRegion("related")}
+                <Splitter dir="h" onEnd={() => endInfiRegion("related")} onReset={() => resetInfiRegion("priorH")}
                           onDrag={(dy) => dragInfiRegion("related", "priorH", 40, 320, dy)} />
                 <div style={{ height: infiSz.priorH, flexShrink: 0, display: "flex" }}>
                   <PriorStudiesGrid detail={selected}
@@ -3762,7 +3767,7 @@ export function Worklist() {
             )}
             {panelsOn.report ? (
               <>
-                <Splitter dir="h" onEnd={() => endInfiRegion("report")}
+                <Splitter dir="h" onEnd={() => endInfiRegion("report")} onReset={() => resetInfiRegion("repH")}
                           onDrag={(dy) => dragInfiRegion("report", "repH", 56, 640, dy)} />
                 <div style={{ height: infiSz.repH, flexShrink: 0, display: "flex" }}>
                   <InfiReport detail={selected} />
@@ -3804,6 +3809,7 @@ export function Worklist() {
       {/* 하단1 (UBPACS p.8): Order | Related Study List-1 | Related Study List-2 — 드래그 재배치 + 상하 스플리터 */}
       {!infiMode && !svMode && panelOrder.d.some((k) => panelsOn[k]) && (
         <Splitter dir="h" onEnd={persistSizes}
+                  onReset={() => { setSizes((s) => ({ ...s, dH: DEFAULT_SIZES.dH })); persistSizes(); }}
                   onDrag={(dy) => setSizes((s) => ({ ...s, dH: clampSz(s.dH - dy, 80, 420) }))} />
       )}
       {!infiMode && !svMode && panelOrder.d.some((k) => panelsOn[k]) && (
@@ -3828,6 +3834,7 @@ export function Worklist() {
       {/* 하단2 (UBPACS p.8): Thumbnail | Reference(상용구) | Comment+MEMO | Report — 드래그 재배치 + 스플리터 */}
       {!infiMode && !svMode && panelOrder.e.some((k) => panelsOn[k]) && (
         <Splitter dir="h" onEnd={persistSizes}
+                  onReset={() => { setSizes((s) => ({ ...s, eH: DEFAULT_SIZES.eH })); persistSizes(); }}
                   onDrag={(dy) => setSizes((s) => ({ ...s, eH: clampSz(s.eH - dy, 140, 640) }))} />
       )}
       {!infiMode && !svMode && panelOrder.e.some((k) => panelsOn[k]) && (

@@ -16,8 +16,10 @@ import {
 } from "@cornerstonejs/tools";
 import { init as dicomImageLoaderInit, wadors } from "@cornerstonejs/dicom-image-loader";
 
-export const DICOMWEB_ROOT =
-  import.meta.env.VITE_DICOMWEB_ROOT ?? "http://localhost:3000/dicom-web";
+// DICOMWEB_ROOT·영상 형식 유틸은 lib/imageFormat.ts 로 이관(2D 뷰어가 cornerstone 을
+// 끌어오지 않게 하기 위함). ⚠ 여기서 re-export 하면 번들러가 두 모듈을 한 청크로 묶어
+// 분리 효과가 사라진다 — 소비자는 반드시 lib/imageFormat 에서 직접 import 할 것.
+import { DICOMWEB_ROOT } from "./imageFormat";
 
 let initialized = false;
 export async function ensureCornerstone() {
@@ -79,32 +81,4 @@ export async function buildVolumeImageIds(studyUid: string): Promise<string[]> {
   candidates.sort((a, b) =>
     (Number(NON_DIAG_RE.test(a.desc)) - Number(NON_DIAG_RE.test(b.desc))) || (b.count - a.count));
   return registerSeriesImageIds(studyUid, candidates[0].uid);
-}
-
-
-// ── 병원별 클라이언트 영상 전송 형식(관리자 설정) — rendered 호출에 accept/quality 파라미터 부여 ──
-// default=서버 기본(JPEG) / png=무손실 표시 / jpeg=품질 지정(저대역 원격 최적화)
-let IMG_FMT: { format: string; quality: number; wado_ts?: string } = { format: "default", quality: 90, wado_ts: "" };
-export function setImageFormat(f: { format?: string; quality?: number; wado_ts?: string }): void {
-  IMG_FMT = { format: f.format ?? "default", quality: f.quality ?? 90, wado_ts: f.wado_ts ?? "" };
-}
-/** 원본 픽셀 전송(3D·정밀) 전송구문 — ""=원본 그대로 */
-export function getWadoTs(): string { return IMG_FMT.wado_ts ?? ""; }
-/** rendered URL 뒤에 붙일 형식 파라미터 — hasQuery: 이미 ?window= 등이 있는지 */
-export function renderedParams(hasQuery: boolean): string {
-  const sep = hasQuery ? "&" : "?";
-  if (IMG_FMT.format === "png") return sep + "accept=image/png";
-  if (IMG_FMT.format === "jpeg") return sep + "accept=image/jpeg&quality=" + IMG_FMT.quality;
-  return "";
-}
-
-
-// HTJ2K 전송구문 — Orthanc 미지원이라 백엔드 스트리밍 프록시(/api/htj2k)로 프레임을 받는다
-const HTJ2K_UIDS = ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.202", "1.2.840.10008.1.2.4.203"];
-export function isHtj2kTs(): boolean { return HTJ2K_UIDS.includes(IMG_FMT.wado_ts ?? ""); }
-/** 프레임 요청 베이스 — HTJ2K 설정 시 백엔드 프록시, 그 외 Orthanc DICOMweb */
-export function framesBase(): string { return isHtj2kTs() ? "/api/htj2k" : DICOMWEB_ROOT; }
-export function authHeader(): Record<string, string> {
-  const t = localStorage.getItem("sv_token") ?? sessionStorage.getItem("sv_token");
-  return t ? { Authorization: "Bearer " + t } : {};
 }

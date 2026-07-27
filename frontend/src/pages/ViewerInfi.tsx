@@ -15,7 +15,7 @@ const SettingsModal = lazy(() => import("./SettingsModal").then((m) => ({ defaul
 const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewer3D })));
 import { api, openViewer, type Anno, type GspsItem, type InstanceNode, type SeriesNode, type StudyDetail } from "../api";
 import { annoLabel, measureAnno } from "../lib/annotations";
-import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/cornerstone";
+import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { renderedRootFor } from "../lib/liveUids";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";

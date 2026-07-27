@@ -86,7 +86,39 @@ export function hasToken() {
   return !!token;
 }
 
+/* ⚡ GET 인플라이트 합류(dedupe) — 같은 GET 이 짧은 시간에 중복 발사되는 것을 1회로 합친다.
+ *
+ * 뷰어 열기 1회에 실측으로 `GET /api/studies/{id}` 가 4회(워크리스트 onSelect ×2 · doAction ·
+ * 뷰어창), `GET /api/settings/viewer.prefs` 가 5회 발사됐다. 원격(RTT 큰 회선)에서는 이 중복이
+ * 그대로 지연이 된다. 진행 중인 동일 GET 이 있으면 그 Promise 에 합류시키고, 완료 후에도
+ * 아주 짧게(TTL) 결과를 공유해 마운트 폭풍을 흡수한다.
+ * ⚠ 상태가 바뀌는 요청과 폴링을 방해하면 안 되므로 (a) GET 만 (b) TTL 을 아주 짧게 (c) 화이트리스트
+ *   경로(열기 경로에서만 중복되는 읽기)만 적용한다. */
+const DEDUPE_TTL_MS = 1500;
+const DEDUPE_RE = /^\/api\/(studies\/\d+$|settings\/|hospitals\/\d+\/image-format$|auth\/profile$)/;
+const _inflight = new Map<string, { at: number; p: Promise<unknown> }>();
+
+function dedupeKey(path: string, init?: RequestInit): string | null {
+  const isGet = !init?.method || init.method.toUpperCase() === "GET";
+  if (!isGet || !DEDUPE_RE.test(path)) return null;
+  return path;
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const key = dedupeKey(path, init);
+  if (key) {
+    const hit = _inflight.get(key);
+    if (hit && Date.now() - hit.at < DEDUPE_TTL_MS) return hit.p as Promise<T>;
+    const p = reqRaw<T>(path, init);
+    _inflight.set(key, { at: Date.now(), p: p as Promise<unknown> });
+    // 실패는 캐시하지 않는다(다음 호출이 정상 재시도하도록)
+    p.catch(() => _inflight.delete(key));
+    return p;
+  }
+  return reqRaw<T>(path, init);
+}
+
+async function reqRaw<T>(path: string, init?: RequestInit): Promise<T> {
   // FormData(파일 업로드)는 브라우저가 multipart boundary 를 직접 설정 — Content-Type 강제 금지
   const isForm = init?.body instanceof FormData;
   // 일시 장애 자동 재시도 — 백엔드 재시작/프록시 순단(502/503/504, 네트워크 오류) 시

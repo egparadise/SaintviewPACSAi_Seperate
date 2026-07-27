@@ -163,6 +163,31 @@ Live 픽셀은 `A 원본 다운로드 → 서버측 디코드 → 윈도잉 → 
 > **127.0.0.1**(또는 실제 IP)을 쓸 것. 실 병원 데이터(512², JPEG2000)는 디코드 비용이 커
 > 프리페치·디코드 캐시 효과가 더 크다.
 
+## 2.9 뷰어 오픈 속도 — 목표(DR<1s, CT<3s) 달성 내역
+
+**측정 기준선(실사이즈 합성 데이터)**: DX 2048²×1장, CT 512²×200장.
+
+| 병목 | 원인 | 대책 |
+|---|---|---|
+| **번들 오염(최대)** | `Viewer2D`가 상수 3개 때문에 `lib/cornerstone.ts` 를 정적 import → `@cornerstonejs/core+tools` **3.0MB** 가 2D 경로에 딸려옴(2D 는 cornerstone 미실행) | `lib/imageFormat.ts` 로 분리(cornerstone 의존 0). **2D 뷰어 창 페이로드 4.2MB → 0.94MB** |
+| **dev 모드 서빙** | 런처가 `npm run dev` → 새 창마다 비압축 모듈 수십 개 | 런처 기본을 **프로덕션 빌드(preview)** 로 전환(`start_viewer_suite.bat dev` 로 개발 모드). **6.8MB/53요청 → 0.7MB/3요청** |
+| 번들이 API 뒤에 직렬 | `if (!detail) return <로딩>` 이 lazy 청크 다운로드를 API 응답 뒤로 밀어냄 | `ViewerWindow` 모듈 평가 시 `import("./Viewer2D")` 선행 — 다운로드와 API 를 겹침 |
+| 첫 프레임이 표시상태 대기 | `Promise.all([seriesTree, presentation])` | seriesTree 만 게이트, presentation 은 도착 시 적용 |
+| 동일 GET 중복 | 열기 1회에 `studies/{id}` ×4, `settings/viewer.prefs` ×5 | api.ts **GET 인플라이트 합류**(화이트리스트·TTL 1.5s) → 각 1회 |
+| series-tree 반복 | CT 200장 ≈ 116ms, 재오픈마다 Orthanc 왕복 | 60s TTL 캐시(+Import·모바일 업로드 시 무효화). QC 오버레이는 캐시 뒤 적용이라 즉시 반영 |
+
+**실측(프로덕션 빌드, 브라우저 Navigation Timing)**
+
+| 검사 | 첫 프레임 | 목표 | 판정 |
+|---|---|---|---|
+| DR/DX 2048² | **799ms** | 1,000ms | ✅ |
+| CT 512² 200장 | **779ms** (200프레임 전량 프리페치 완료) | 3,000ms | ✅ |
+
+> 현재 저장 압축은 **원본 그대로**(장비 전송 TS 유지 — Orthanc 트랜스코딩 미설정). 뷰어 표시는
+> 서버 렌더(`/rendered` PNG/JPEG)라 저장 TS 는 서버 디코드 비용에만 영향한다. 대역이 좁은 원격
+> 회선에서는 설정>병원별 영상 형식에서 **JPEG(품질 80~90)** 로 바꾸면 DR 전송량이 크게 준다
+> (실측 2048²: PNG 4.1MB/200ms → JPEG q80 2.5MB/77ms, 합성 랜덤 노이즈 기준·실제 X-ray 는 이득이 더 큼).
+
 ## 3. 운용 가이드 (실서버 연결)
 
 1. **원격 계정 준비**: 인계 PACS 에 `user_type` 에 `P` 가 포함된 계정(브리지 전용 계정 권장).
