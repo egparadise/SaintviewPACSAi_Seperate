@@ -1737,13 +1737,14 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     if (!mgOn || !inst || !mgSeries(p)) return null;
     // 마주 볼 짝이 없는 칸(홀수 그리드 정가운데·그리드 바깥 변)은 손대지 않는다 —
     // 밀어붙이면 영상을 화면 바깥쪽으로 밀어내는 꼴이 된다
-    if (!mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, t % p.il.c, p.il.c)) return null;
+    const side = mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, t % p.il.c, p.il.c);
+    if (!side) return null;
     const size = tileSizes[`${pi}:${t}`];
     if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
     const box = mgBoxAt(p, inst, t);
     if (!box) return null;
     return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV,
-                 mgForceZoom(size, inst));
+                 mgForceZoom(size, inst), side);
   };
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
   const mgOnImgLoad = (p: Pane, sop: string, el: HTMLImageElement) => {

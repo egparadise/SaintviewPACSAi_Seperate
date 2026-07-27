@@ -2965,8 +2965,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // 마주 볼 짝이 없는 칸은 손대지 않는다(밖으로 밀어내는 사고 방지).
     // Series 분할로 걸린 MG 는 페인 그리드의 열 위치로 판정한다.
     const gCols = (p.il?.c ?? 1) > 1 ? p.il!.c : LAYOUTS[layout].cols;
-    const gi = (p.il?.c ?? 1) > 1 ? t : PANE_IDS.indexOf(pid) % LAYOUTS[layout].cols;
-    if (!mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, gi, gCols)) return null;
+    const gi = (p.il?.c ?? 1) > 1 ? t % gCols : PANE_IDS.indexOf(pid) % LAYOUTS[layout].cols;
+    const side = mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, gi, gCols);
+    if (!side) return null;
     const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
     // 단일 이미지 페인은 페인 자체가 타일 — 기존 페인 실측(ResizeObserver)을 그대로 쓴다
     const size = tiles > 1 ? tileSizes[`${pid}:${t}`] : paneSizes.current[pid];
@@ -2974,19 +2975,23 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const box = mgBoxFor(p, inst, t, p.il?.c ?? 1);
     if (!box) return null;
     return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV,
-                 mgForceZoom(size, inst));
+                 mgForceZoom(size, inst), side);
   };
   /** 주석·측정 좌표용 — 페인 사각형만 있으면 되는 경로(단일 이미지 페인)에서 보정을 흡수 */
-  const mgAt = (p: PaneState, rect: { width: number; height: number }): PaneState => {
+  const mgAt = (p: PaneState, rect: { width: number; height: number }, pid?: string): PaneState => {
     const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
     if (!mgOn || tiles > 1 || !mgSeries(p)) return p;
     const inst = p.series?.instances[p.index];
     if (!inst) return p;
     const box = mgBoxFor(p, inst, 0, 1);
     if (!box) return p;
+    const cols = LAYOUTS[layout].cols;
+    const side = mgInnerSide(mammoView(p.series?.series_desc ?? "").lat,
+                             Math.max(0, PANE_IDS.indexOf(pid ?? activePane)) % cols, cols);
+    if (!side) return p;
     const sz = { w: rect.width, h: rect.height };
     return mgApply(p, mgFit(sz, { w: inst.cols, h: inst.rows }, box, mgCfg,
-                            p.flipH, p.flipV, mgForceZoom(sz, inst)));
+                            p.flipH, p.flipV, mgForceZoom(sz, inst), side));
   };
   mgAtRef.current = mgAt;
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */

@@ -283,6 +283,9 @@ export function mgFit(
   cfg: Pick<MgCfg, "margin">,
   flipH = false, flipV = false,
   forceZoom?: number,
+  /** 어느 변에 붙일지를 **레이아웃이 지정**한다(왼쪽 칸→right, 오른쪽 칸→left).
+   *  주지 않으면 box.wall(픽셀에서 추측한 흉벽 방향)로 정한다 — 폴백일 뿐이다. */
+  side?: "left" | "right",
 ): MgFit | null {
   if (!box) return null;
   const W = tile.w, H = tile.h, iw = img.w, ih = img.h;
@@ -304,10 +307,14 @@ export function mgFit(
   const sx = flipH ? -1 : 1, sy = flipV ? -1 : 1;
   const ex0 = sx * mz * (x0 - 0.5) * dw, ex1 = sx * mz * (x1 - 0.5) * dw;
   const left = Math.min(ex0, ex1), right = Math.max(ex0, ex1);
-  // 흉벽이 화면에서 어느 쪽인지 — 좌우 반전되면 뒤집힌다.
-  // 그 방향의 타일 가장자리에 붙인다(= 좌우 타일이 가운데에서 맞닿음)
-  const wallDisp = flipH ? (box.wall === "L" ? "R" : "L") : box.wall;
-  const mtx = wallDisp === "L" ? -(W / 2) - left : (W / 2) - right;
+  // ⚠ 붙일 변은 **레이아웃이 정한다**(왼쪽 칸의 안쪽=오른쪽, 오른쪽 칸의 안쪽=왼쪽).
+  //   예전엔 픽셀에서 추측한 흉벽 방향(box.wall)으로 정했는데, 그 추측이 칸 위치와 어긋나면
+  //   한쪽 열만 안쪽으로 붙고 다른 열은 엉뚱하게 놓인다(실제로 R열만 안 붙는 증상).
+  //   조직 경계상자는 '조직이 어디까지인가'만 말해 주면 되고, 방향은 배치가 안다.
+  const toRight = side
+    ? side === "right"
+    : (flipH ? (box.wall === "L" ? "R" : "L") : box.wall) === "R";
+  const mtx = toRight ? (W / 2) - right : -(W / 2) - left;
 
   const ey0 = sy * mz * (y0 - 0.5) * dh, ey1 = sy * mz * (y1 - 0.5) * dh;
   const mty = -(Math.min(ey0, ey1) + Math.max(ey0, ey1)) / 2;
