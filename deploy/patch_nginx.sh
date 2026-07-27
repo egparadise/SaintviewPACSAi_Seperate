@@ -6,7 +6,11 @@
 # 무엇을 하나
 #   · **사전 압축본(.gz/.br) 서빙을 켠다.** 빌드가 이미 만들어 두므로 런타임 CPU 0 으로
 #     전송량만 줄어든다. 실측(sv70): 850,757B → gzip 232,233B → brotli 약 171KB.
-#   · 이미 적용된 항목은 **건드리지 않는다**(같은 값으로 덮어써도 무해하도록 설계).
+#   · 이미 설정된 지시어는 **넣지 않는다.** nginx 의 gzip/gzip_vary/gzip_comp_level/
+#     gzip_min_length/gzip_proxied/gzip_static 은 같은 컨텍스트에서 두 번 선언하면
+#     같은 값이어도 `"gzip" directive is duplicate` 로 **기동 거부**된다(flag/num/size/enum 슬롯).
+#     conf.d 는 http{} 안에서 include 되므로, 데비안·우분투처럼 nginx.conf http 에 gzip on 이
+#     이미 있는 배포판에서는 그대로 넣으면 항상 실패한다. → nginx 가 거부한 줄만 빼고 재시도한다.
 #   · 캐시(Cache-Control)는 손대지 않는다 — server 블록에서 이미 설정돼 있으면 중복 지정이
 #     오히려 충돌을 만든다. 미설정이면 --check 가 알려 주고, 그때만 수동으로 넣는다.
 #
@@ -100,14 +104,21 @@ find_nginx() {
   DROPIN="$CONFDIR/$DROPIN_NAME"
 }
 
-build_dropin() {
-  # 모듈이 없는데 지시어를 쓰면 nginx 가 기동 자체를 거부한다 → 있을 때만 넣는다
-  V="$("$NGINX" -V 2>&1)"
-  GZS="# gzip_static 미지원 빌드"
-  BRS="# ngx_brotli 미설치 — 설치하면 gzip 대비 약 25% 더 작아진다"
-  case "$V" in *--with-http_gzip_static_module*) GZS="gzip_static on;" ;; esac
-  case "$V" in *brotli*) BRS="brotli_static on;
-brotli off;          # 런타임 압축은 CPU 를 쓴다 — 빌드가 만든 .br 만 서빙" ;; esac
+# 넣고 싶은 지시어들(우선순위 순). 실제로 무엇이 들어갈지는 nginx 가 정한다 — 아래 build_dropin 참조.
+#  ⚠ 모듈 유무를 nginx -V 로 판정하지 않는다. 데비안·우분투는 brotli 를 **동적 모듈**로 싣기 때문에
+#    -V 의 configure 인자에는 brotli 가 안 나오고(미탐), 반대로 인자에 있어도 load_module 이
+#    꺼져 있으면 unknown directive 로 죽는다(오탐). **직접 써 보고 nginx -t 로 확인**하는 게 정확하다.
+WANT='brotli_static on;
+gzip_static on;
+gzip on;
+gzip_vary on;
+gzip_comp_level 6;
+gzip_min_length 1024;
+gzip_proxied any;'
+
+DROP_LIST=""   # nginx 가 거부해서 뺀 지시어들(보고용)
+
+emit_dropin() {   # $1 = 넣을 지시어 목록(줄 단위)
   cat <<EOF
 # Saintview Viewer Suite — 전송 최적화 (http 컨텍스트 드롭인)
 # 생성: $(date '+%Y-%m-%d %H:%M:%S')
@@ -115,18 +126,31 @@ brotli off;          # 런타임 압축은 CPU 를 쓴다 — 빌드가 만든 .
 #
 # 빌드가 산출물 옆에 .gz/.br 을 미리 만들어 두므로, static 지시어만 켜면
 # **런타임 CPU 0** 으로 압축본이 나간다.
-$GZS
-$BRS
-
-gzip on;
-gzip_vary on;
-gzip_comp_level 6;
-gzip_min_length 1024;
-gzip_proxied any;
-gzip_types
-    application/javascript text/javascript application/json
-    text/css text/plain image/svg+xml application/manifest+json;
+# ※ 이미 설정돼 있거나 모듈이 없는 지시어는 nginx 가 거부하므로 자동으로 빠져 있다.
+$1
 EOF
+}
+
+# nginx 가 거부한 지시어를 하나씩 빼면서 통과할 때까지 재시도.
+# `"X" directive is duplicate` (이미 설정됨) 와 `unknown directive "X"` (모듈 없음) 를 모두 흡수한다.
+build_and_test() {
+  LIST="$WANT"
+  i=0
+  while [ $i -lt 12 ]; do
+    i=$((i + 1))
+    if [ -z "$(printf '%s' "$LIST" | tr -d '[:space:]')" ]; then return 2; fi   # 넣을 게 없음
+    emit_dropin "$LIST" > "$DROPIN"
+    ERR="$("$NGINX" -t 2>&1)" && return 0
+    BAD="$(printf '%s' "$ERR" | sed -n 's/.*"\([a-z_]*\)" directive is duplicate.*/\1/p;
+                                        s/.*unknown directive "\([a-z_]*\)".*/\1/p' | head -1)"
+    [ -n "$BAD" ] || { printf '%s
+' "$ERR"; return 1; }   # 우리가 아는 원인이 아니면 그대로 실패
+    echo "· '$BAD' 는 이 서버에 넣을 수 없어 제외합니다(이미 설정됨 또는 모듈 없음)"
+    DROP_LIST="$DROP_LIST $BAD"
+    LIST="$(printf '%s
+' "$LIST" | grep -v "^$BAD[[:space:]]")"
+  done
+  return 1
 }
 
 do_apply() {
@@ -136,19 +160,38 @@ do_apply() {
     echo "  → http { } 안에 다음 줄을 추가한 뒤 다시 실행하세요:  include $CONFDIR/*.conf;"
     exit 1; }
   mkdir -p "$CONFDIR"
+  # 예전 이름(apply_nginx.ps1 이 쓰던 드롭인)이 남아 있으면 그것과도 중복이 난다 → 함께 정리
+  OLD="$CONFDIR/zz-saintview-gzip.conf"
+  OLDBAK=""
+  if [ -f "$OLD" ]; then OLDBAK="$OLD.replaced.$(date +%Y%m%d%H%M%S)"; mv "$OLD" "$OLDBAK"
+    echo "· 이전 드롭인 발견 — 대체합니다($OLD)"; fi
   BAK=""
   if [ -f "$DROPIN" ]; then BAK="$DROPIN.bak.$(date +%Y%m%d%H%M%S)"; cp "$DROPIN" "$BAK"; fi
-  build_dropin > "$DROPIN"
-  echo "· 작성: $DROPIN"
-  if ! "$NGINX" -t; then
+
+  build_and_test; RC=$?
+  if [ "$RC" = "2" ]; then
+    rm -f "$DROPIN"
+    [ -n "$OLDBAK" ] && mv "$OLDBAK" "$OLD"
+    [ -n "$BAK" ] && mv "$BAK" "$DROPIN"
+    echo "· 이 서버에 추가로 넣을 설정이 없습니다(전부 이미 적용됨 또는 모듈 미설치)"
+    "$NGINX" -t >/dev/null 2>&1 || echo "  ⚠ 기존 설정에 다른 문제가 있습니다: nginx -t 확인 필요"
+    [ -n "$URL" ] && { echo; do_check; }
+    exit 0
+  fi
+  if [ "$RC" != "0" ]; then
     echo "✗ nginx -t 실패 — 원복합니다"
-    if [ -n "$BAK" ]; then mv "$BAK" "$DROPIN"; else rm -f "$DROPIN"; fi
-    "$NGINX" -t >/dev/null 2>&1 && echo "  (원복 완료: 기존 설정 정상)"
+    rm -f "$DROPIN"
+    [ -n "$OLDBAK" ] && mv "$OLDBAK" "$OLD"
+    [ -n "$BAK" ] && mv "$BAK" "$DROPIN"
+    "$NGINX" -t >/dev/null 2>&1 && echo "  (원복 완료: 기존 설정은 정상입니다)"
     exit 1
   fi
+  echo "· 작성: $DROPIN"
+  [ -n "$DROP_LIST" ] && echo "· 제외된 지시어:$DROP_LIST"
   "$NGINX" -s reload
   echo "✓ nginx reload 완료"
   [ -n "$BAK" ] && rm -f "$BAK" || true
+  [ -n "$OLDBAK" ] && rm -f "$OLDBAK" || true
   if [ -n "$URL" ]; then echo; do_check; fi
 }
 
@@ -164,6 +207,8 @@ case "$MODE" in
   check)    do_check ;;
   apply)    do_apply ;;
   rollback) do_rollback ;;
-  dryrun)   find_nginx; echo "# → $DROPIN 에 아래 내용을 씁니다"; echo; build_dropin ;;
+  dryrun)   find_nginx
+            echo "# → $DROPIN 에 아래 후보를 쓰고, nginx 가 거부하는 줄은 자동으로 뺍니다"
+            echo; emit_dropin "$WANT" ;;
   *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
