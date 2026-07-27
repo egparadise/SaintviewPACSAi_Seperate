@@ -145,6 +145,7 @@ interface PaneState {
   cineSec?: number;
   media?: { url: string; kind: "image" | "video"; name: string } | null;  /** 페인별 Image Layout(N×M 타일) — 활성 페인에만 적용, 기본 1×1 */
   il?: { r: number; c: number };
+  ilPrev?: { r: number; c: number } | null;  // 타일 더블클릭으로 1×1 확대하기 직전의 분할(되돌리기용)
 }
 const initPane = (studyUid: string): PaneState => ({
   studyUid, series: null, index: 0, zoom: 1, tx: 0, ty: 0, rot: 0,
@@ -2959,7 +2960,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
            }}
            onDoubleClick={() => {
              if (tool && OPEN_ENDED.has(tool)) { finishOpenEnded(); return; }  // 수집 종료 — 최대화 충돌 회피
-             if (!tool) setMaximized((m) => (m === pid ? null : pid));   // 더블클릭 = 페인 최대화/복원
+             if (tool) return;
+             // 타일에서 펼쳐 온 페인이면 원래 Image 분할로 되돌린다(펼치기의 역동작).
+             // 되돌릴 때는 현재 이미지가 포함된 페이지의 첫 장으로 맞춘다.
+             if (p.ilPrev && (p.ilPrev.r * p.ilPrev.c) > 1) {
+               const size = p.ilPrev.r * p.ilPrev.c;
+               setImgLay(p.ilPrev);
+               patch(pid, { il: p.ilPrev, ilPrev: null, index: Math.floor(p.index / size) * size });
+               return;
+             }
+             setMaximized((m) => (m === pid ? null : pid));   // 더블클릭 = 페인 최대화/복원
            }}
            onMouseMove={(e) => {   // Magnification — 단일 이미지 페인에서 마우스 추적 (In Viewer 이식)
              if (!magOn || !inst || tileCount > 1) return;
@@ -3037,7 +3047,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   const nInst = p.series?.instances.length ?? 0;
                   return (
                     <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)}
-                         style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0 }}>
+                         // 타일 더블클릭 = 이 이미지를 1×1 로 펼치고, 이후 스크롤로 시리즈 전체를 본다.
+                         // 페인 더블클릭(최대화)으로 번지지 않게 stopPropagation.
+                         onDoubleClick={(e) => {
+                           if (!ti) return;
+                           e.stopPropagation();
+                           setImgLay({ r: 1, c: 1 });
+                           patch(pid, { il: { r: 1, c: 1 }, index: tIdx, ilPrev: p.il ?? null });
+                           setActivePane(pid);
+                           setStatus(`이미지 ${tIdx + 1}/${nInst} — 스크롤로 시리즈 전체 이동 (더블클릭: 분할 복귀)`);
+                         }}
+                         style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0,
+                                  cursor: ti ? "zoom-in" : undefined }}>
                       {u && previewUrlOf(u, p.studyUid) && !(ti && prevDone[ti.sop_uid]) && (
                         <img src={previewUrlOf(u, p.studyUid)!} alt="" draggable={false} aria-hidden
                              style={{ position: "absolute", inset: 0, width: "100%", height: "100%",

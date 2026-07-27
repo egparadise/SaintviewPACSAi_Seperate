@@ -233,6 +233,20 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   // 오류 기록(정보 탭) — 화면 백지화 원인이 새로고침으로 사라지지 않게 보관한 것
   const [crashes, setCrashes] = useState<CrashEntry[]>([]);
+  // Live(원격 PACS 직결) 접속 설정 — 웹 서버 설정과 같은 자리에서 등록한다(워크리스트 팝업에만
+  // 있던 것을 옮김). 비밀번호는 서버가 마스킹해 내려주므로 빈 칸이면 기존 값을 유지한다.
+  const [lv, setLv] = useState<{ enabled: boolean; base_url: string; user_id: string;
+                                 verify_ssl: boolean; has_password?: boolean }>(
+    { enabled: false, base_url: "", user_id: "", verify_ssl: true });
+  const [lvPw, setLvPw] = useState("");
+  const [lvMsg, setLvMsg] = useState("");
+  useEffect(() => {
+    api.webpacsConfig().then((r) => setLv({
+      enabled: !!r.value.enabled, base_url: r.value.base_url || "",
+      user_id: r.value.user_id || "", verify_ssl: r.value.verify_ssl !== false,
+      has_password: r.value.has_password,
+    })).catch(() => {});
+  }, []);
   useEffect(() => { setCrashes(readCrashLog()); }, []);
   const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
   // 비교(Compare) 설정 — viewer.prefs.compare (뷰어·openV2 가 소비). 편집은 판독(Reading) 탭.
@@ -1004,6 +1018,73 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       }}>서버 설정 저장</button>
                     </div>
                   )}
+
+                  {/* ── Live (원격 PACS 직결) ─────────────────────────────────
+                      '어느 서버의 데이터를 볼 것인가'는 웹 서버 설정과 같은 축이라 여기에 둔다.
+                      예전엔 워크리스트의 [WebPACS] 팝업에만 있어서 찾기 어려웠다. */}
+                  <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4, color: "#22c55e" }}>
+                      Live — 원격 PACS 직결 (복사 없음)
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 7, lineHeight: 1.7 }}>
+                      원격 PACS 의 워크리스트·영상·판독을 <b>복사 없이 그대로</b> 사용합니다.
+                      켜면 워크리스트 우측 서버 버튼에서 <b style={{ color: "#22c55e" }}>Live</b> 로 전환할 수 있습니다.
+                    </div>
+                    <Row label="사용">
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input type="checkbox" checked={lv.enabled} disabled={!isAdmin}
+                               onChange={(e) => setLv((p) => ({ ...p, enabled: e.target.checked }))} />
+                        Live 모드 활성화
+                      </label>
+                    </Row>
+                    <Row label="원격 주소">
+                      <input value={lv.base_url} disabled={!isAdmin} placeholder="https://api.example.co.kr"
+                             onChange={(e) => setLv((p) => ({ ...p, base_url: e.target.value }))}
+                             style={{ width: 320 }} />
+                    </Row>
+                    <Row label="계정">
+                      <input value={lv.user_id} disabled={!isAdmin} placeholder="원격 PACS 사용자 ID"
+                             onChange={(e) => setLv((p) => ({ ...p, user_id: e.target.value }))}
+                             style={{ width: 200 }} />
+                    </Row>
+                    <Row label="비밀번호">
+                      <input type="password" value={lvPw} disabled={!isAdmin}
+                             placeholder={lv.has_password ? "(저장됨 — 바꿀 때만 입력)" : "비밀번호"}
+                             onChange={(e) => setLvPw(e.target.value)} style={{ width: 200 }} />
+                    </Row>
+                    <Row label="SSL 인증서">
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                        <input type="checkbox" checked={lv.verify_ssl} disabled={!isAdmin}
+                               onChange={(e) => setLv((p) => ({ ...p, verify_ssl: e.target.checked }))} />
+                        인증서 검증 (자체서명 서버면 해제)
+                      </label>
+                    </Row>
+                    {isAdmin && (
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6 }}>
+                        <button className="primary" onClick={async () => {
+                          try {
+                            const r = await api.webpacsSaveConfig({
+                              enabled: lv.enabled, base_url: lv.base_url.trim(),
+                              user_id: lv.user_id.trim(), verify_ssl: lv.verify_ssl,
+                              ...(lvPw ? { password: lvPw } : {}),   // 빈 칸이면 기존 비밀번호 유지
+                            });
+                            setLv((p) => ({ ...p, has_password: r.value.has_password }));
+                            setLvPw("");
+                            setLvMsg("Live 설정 저장됨");
+                          } catch (e) { setLvMsg(e instanceof Error ? e.message : "저장 실패"); }
+                        }}>Live 설정 저장</button>
+                        <button onClick={async () => {
+                          setLvMsg("연결 테스트 중…");
+                          try {
+                            const r = await api.webpacsTest();
+                            setLvMsg(r.ok ? `✅ 연결됨 — 원격 검사 ${r.study_count ?? "?"}건`
+                                          : `❌ ${r.detail || "연결 실패"}`);
+                          } catch (e) { setLvMsg(`❌ ${e instanceof Error ? e.message : "연결 실패"}`); }
+                        }}>연결 테스트</button>
+                        {lvMsg && <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{lvMsg}</span>}
+                      </div>
+                    )}
+                  </div>
                 </Group>
                 <Group title="연결 테스트 (Ping · DICOM Echo · DB)">
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

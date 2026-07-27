@@ -103,6 +103,7 @@ interface Pane {
   wl: string;
   fx: "" | "sharpen" | "smooth" | "pseudo";   // p.13 필터(Sharpens/Average/Pseudo)
   il: { r: number; c: number };  // Image Layout — DICOM 계층: 페인(Series) 내부의 이미지 타일 분할(페인별)
+  ilPrev?: { r: number; c: number } | null;  // 타일 더블클릭으로 1×1 확대하기 직전의 분할(되돌리기용)
   shutter?: { kind: "rect" | "ellipse" | "poly"; pts: { x: number; y: number }[] } | null;  // 표시 셔터
   playing?: boolean;             // 시네 재생 중 (페인별 독립)
   cineSec?: number;              // 시네 간격(초) — 없으면 설정 기본값
@@ -2570,6 +2571,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                const inst2 = p.series?.instances.find((x) => x.sop_uid === pend.sop);
                if (inst2 && finishOpenEnded(pi, p, inst2)) return;
              }
+             // 타일에서 펼쳐 온 페인이면 원래 Image 분할로 되돌린다(펼치기의 역동작)
+             if (p.ilPrev && (p.ilPrev.r * p.ilPrev.c) > 1) {
+               const size = p.ilPrev.r * p.ilPrev.c;
+               upd(pi, { il: p.ilPrev, ilPrev: null, index: Math.floor(p.index / size) * size });
+               return;
+             }
              setMaximized((m) => (m === null ? pi : null));
            }}
            // 썸네일 시리즈 드롭 — 이 페인에 로드 (드래그앤드롭)
@@ -2601,7 +2608,16 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           const pT = mgApply(p, mgf);
           return (
             <div key={t} ref={sizeRef(`${pi}:${t}`)} data-sv-mg={mgStamp(mgf)}
-                 style={{ position: "relative", overflow: "hidden", background: "#000" }}
+                 // 타일 더블클릭 = 이 이미지를 1×1 로 펼치고, 이후 스크롤로 시리즈 전체를 본다
+                 onDoubleClick={(e) => {
+                   if (!inst || tilesOf(p) <= 1) return;
+                   e.stopPropagation();   // 페인 더블클릭(최대화)으로 번지지 않게
+                   upd(pi, { il: { r: 1, c: 1 }, index: idx, ilPrev: p.il });
+                   setActive(pi);
+                   setToast(`이미지 ${idx + 1}/${insts.length} — 스크롤로 시리즈 전체 이동 (더블클릭: 분할 복귀)`);
+                 }}
+                 style={{ position: "relative", overflow: "hidden", background: "#000",
+                          cursor: inst && tilesOf(p) > 1 ? "zoom-in" : undefined }}
                  onMouseDown={(e) => {
                    if (e.button !== 0 || !p.series || !inst) return;
                    if (DRAG_TOOLS.has(tool)) {

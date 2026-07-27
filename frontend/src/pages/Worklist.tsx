@@ -764,6 +764,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
   onWebPacs?: () => void;   // WebPACS 브리지 모달 열기 (인계 PACS 검사 가져오기)
 }) {
   const [open, setOpen] = useState<null | "local" | "web">(null);
+  const [live, setLive] = useState<{ enabled?: boolean; base_url?: string; user_id?: string }>({});
   const [net, setNet] = useState<ServerNetwork>({});
   const [files, setFiles] = useState<{ name: string; is_dir: boolean; size: number; mtime: number }[]>([]);
   const [shareDir, setShareDir] = useState("");
@@ -780,12 +781,13 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
   useEffect(() => {
     // 팝업을 열 때마다 최신 설정을 다시 읽는다 — 설정>서버 네트워크 저장 직후에도 반영
     api.getSetting("server.network").then((r) => setNet(r.value as ServerNetwork)).catch(() => {});
+    api.webpacsConfig().then((r) => setLive(r.value)).catch(() => {});   // Live(원격 직결) 접속 설정
   }, [open]);
 
   const pick = (m: "local" | "web" | "live") => {
     onMode(m);
     setErr("");
-    if (m === "live") { setOpen(null); return; }   // LIVE 는 팝오버 없음(배지가 상태 표시)
+    if (m === "live") { setOpen("web"); return; }   // 통합 버튼 — 팝오버는 그대로 두고 모드만 전환
     if (open === m) { setOpen(null); return; }
     setOpen(m as "local" | "web");
     if (m === "local") { setShareDir(""); setSub(""); openLocal(""); }
@@ -801,20 +803,15 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
                        color: mode === "local" ? "#fff" : undefined }}>
         Local Server
       </button>
-      <button onClick={() => pick("web")}
-              title="Web Server — 서버 주소·포트 확인 (설정>서버 네트워크)"
+      {/* Web Server 와 Live 는 '어느 서버의 데이터를 볼 것인가'라는 같은 축이라 하나로 합쳤다.
+          버튼이 현재 모드를 그대로 보여 주고(Live 는 녹색), 클릭하면 팝오버에서 전환한다. */}
+      <button onClick={() => setOpen((o) => (o === "web" ? null : "web"))}
+              title="서버 — Web Server(이 서버) / Live(원격 PACS 직결) 전환·설정 확인"
               style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700,
-                       background: mode === "web" ? "var(--accent)" : undefined,
-                       color: mode === "web" ? "#fff" : undefined }}>
-        Web Server
-      </button>
-      <button onClick={() => pick("live")}
-              title="WebPACS Live — 원격 PACS 직결(복사 없음): 실시간 워크리스트·판독 왕복·상태 동기"
-              style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700,
-                       background: mode === "live" ? "#22c55e" : undefined,
-                       color: mode === "live" ? "#fff" : "#22c55e",
-                       borderColor: "#22c55e" }}>
-        Live
+                       background: mode === "live" ? "#22c55e" : mode === "web" ? "var(--accent)" : undefined,
+                       color: mode === "live" || mode === "web" ? "#fff" : undefined,
+                       borderColor: mode === "live" ? "#22c55e" : undefined }}>
+        {mode === "live" ? "Live" : "Web Server"} ▾
       </button>
       {onWebPacs && (
         <button onClick={onWebPacs}
@@ -887,17 +884,35 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
             </>
           ) : (
             <>
-              <b>Web Server</b>
-              <table className="grid-table" style={{ marginTop: 6 }}>
+              <b>서버 선택</b>
+              <div style={{ display: "flex", gap: 6, margin: "7px 0 9px" }}>
+                <button onClick={() => onMode("web")} style={{ flex: 1, fontSize: 11.5, fontWeight: 700,
+                        background: mode === "web" ? "var(--accent)" : undefined,
+                        color: mode === "web" ? "#fff" : undefined }}>
+                  Web Server<br /><span style={{ fontSize: 10, fontWeight: 400 }}>이 서버의 검사</span>
+                </button>
+                <button onClick={() => onMode("live")} disabled={!live.enabled}
+                        title={live.enabled ? "원격 PACS 직결(복사 없음)" : "설정 > 서버 네트워크 > 웹 서버에서 Live 를 먼저 활성화하세요"}
+                        style={{ flex: 1, fontSize: 11.5, fontWeight: 700,
+                        background: mode === "live" ? "#22c55e" : undefined,
+                        color: mode === "live" ? "#fff" : live.enabled ? "#22c55e" : undefined,
+                        borderColor: "#22c55e" }}>
+                  Live<br /><span style={{ fontSize: 10, fontWeight: 400 }}>원격 PACS 직결</span>
+                </button>
+              </div>
+              <table className="grid-table">
                 <tbody>
-                  <tr><th style={{ width: 80 }}>주소(IP)</th><td>{net.web?.ip || "(미설정)"}</td></tr>
+                  <tr><th style={{ width: 84 }}>주소(IP)</th><td>{net.web?.ip || "(미설정)"}</td></tr>
                   <tr><th>Port</th><td>{net.web?.port || "(미설정)"}</td></tr>
                   <tr><th>Name</th><td>{net.web?.name || "-"}</td></tr>
                   <tr><th>AE Title</th><td>{net.web?.ae_title || "-"}</td></tr>
+                  <tr><th style={{ color: "#22c55e" }}>Live 원격</th>
+                      <td>{live.enabled ? (live.base_url || "(주소 미설정)") : "사용 안 함"}</td></tr>
+                  <tr><th style={{ color: "#22c55e" }}>Live 계정</th><td>{live.user_id || "-"}</td></tr>
                 </tbody>
               </table>
               <div style={{ marginTop: 5, color: "var(--text-secondary)", fontSize: 11 }}>
-                설정 변경·Ping/Echo/DB 테스트는 설정 &gt; 서버 네트워크에서.
+                설정 변경·Live 접속·Ping/Echo/DB 테스트는 설정 &gt; 서버 네트워크 &gt; 웹 서버에서.
               </div>
             </>
           )}
