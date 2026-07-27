@@ -18,6 +18,7 @@ import { annoLabel, measureAnno } from "../lib/annotations";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
+import { TileGridLines } from "../components/TileGridLines";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -2774,6 +2775,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
             </div>
           );
         })}
+        {/* Image 분할 칸 경계선 — 변환 밖이라 확대·이동해도 칸 구획으로 고정된다 */}
+        <TileGridLines r={p.il.r} c={p.il.c} />
         {scrollBarOn && insts.length > 1 && <ScrollBar index={p.index} total={insts.length} />}
         {/* 페인별 시네 컨트롤 — 각 Layout 프레임 개별 재생/정지 + 간격(초) */}
         {p.series && insts.length > 1 && (

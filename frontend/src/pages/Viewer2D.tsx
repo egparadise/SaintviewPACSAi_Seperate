@@ -23,6 +23,7 @@ import { IN_MOUSE_OPS } from "../lib/infiConfig";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
+import { TileGridLines } from "../components/TileGridLines";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
@@ -3122,6 +3123,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           </div>
           );
         })()}
+        {/* Image 분할 칸 경계선 — 변환 밖이라 확대·이동해도 칸 구획으로 고정된다 */}
+        <TileGridLines r={pIl.r} c={pIl.c} />
         {/* 확대경 렌즈 — 마우스 위치 3배 확대 (배경이미지 트릭, In Viewer 동일) */}
         {magOn && magPos && magPos.pid === pid && url && inst && tileCount <= 1 && (
           <div style={{
