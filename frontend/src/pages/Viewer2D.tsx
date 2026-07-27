@@ -20,7 +20,7 @@ import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { IN_MOUSE_OPS } from "../lib/infiConfig";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
-import { renderedRootFor } from "../lib/liveUids";
+import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
@@ -2903,9 +2903,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           }}>
             {tileCount <= 1 ? (
               <>
+                {/* ⚡ 저해상 미리보기(원격 A 사전생성 512px JPEG) — 원본 뒤. 원본이 오면 덮인다 */}
+                {previewUrlOf(url, p.studyUid) && (
+                  <img src={previewUrlOf(url, p.studyUid)!} alt="" draggable={false} aria-hidden
+                       style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
+                                objectFit: "contain", filter: paneFilter(p) }} />
+                )}
                 <img src={url} alt="" draggable={false}
                      onLoad={(e) => mgOnImgLoad(p, inst?.sop_uid, e.currentTarget)}
                      style={{
+                       position: "absolute", inset: 0,
                        width: "100%", height: "100%", objectFit: "contain", userSelect: "none",
                        filter: paneFilter(p),
                      }} />
@@ -2926,6 +2933,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   return (
                     <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)}
                          style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0 }}>
+                      {u && previewUrlOf(u, p.studyUid) && (
+                        <img src={previewUrlOf(u, p.studyUid)!} alt="" draggable={false} aria-hidden
+                             style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
+                                      objectFit: "contain",
+                                      transform: mgTiles ? xf(mgApply(p, fk)) : undefined,
+                                      filter: paneFilter(p) }} />
+                      )}
                       {u && (
                         <img src={u} alt="" draggable={false}
                              onLoad={(e) => mgOnImgLoad(p, ti?.sop_uid, e.currentTarget)}

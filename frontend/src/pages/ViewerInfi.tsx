@@ -16,7 +16,7 @@ const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewe
 import { api, openViewer, type Anno, type GspsItem, type InstanceNode, type SeriesNode, type StudyDetail } from "../api";
 import { annoLabel, measureAnno } from "../lib/annotations";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
-import { renderedRootFor } from "../lib/liveUids";
+import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -2587,12 +2587,25 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                 const pd = exams.find((e) => e.d.study_uid === p.studyUid)?.d ?? curD;
                 return (
                 <>
-                  <img src={instUrl(p.studyUid || pd.study_uid, p.series, inst, p.wl)} alt="" draggable={false}
-                       onLoad={(e) => mgOnImgLoad(p, inst.sop_uid, e.currentTarget)}
-                       style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
-                                objectFit: "contain",
-                                transform: `translate(${pT.tx}px,${pT.ty}px) scale(${pT.zoom * (p.flipH ? -1 : 1)},${pT.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`,
-                                filter: paneFilter(p), userSelect: "none" }} />
+                  {(() => {
+                  const full = instUrl(p.studyUid || pd.study_uid, p.series, inst, p.wl);
+                  const prev = previewUrlOf(full, p.studyUid || pd.study_uid);
+                  const xform = `translate(${pT.tx}px,${pT.ty}px) scale(${pT.zoom * (p.flipH ? -1 : 1)},${pT.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`;
+                  const box: React.CSSProperties = { position: "absolute", inset: 0, width: "100%", height: "100%",
+                                                     objectFit: "contain", transform: xform,
+                                                     filter: paneFilter(p), userSelect: "none" };
+                  return (
+                    <>
+                      {/* ⚡ 저해상 미리보기(원격 A 사전생성 512px JPEG) — 원본 뒤에 깔아 두면
+                          원본이 도착하는 즉시 위에 그려진다. 첫 화면 대기 시간을 없앤다. */}
+                      {prev && <img src={prev} alt="" draggable={false} aria-hidden
+                                    style={{ ...box, zIndex: 0 }} />}
+                      <img src={full} alt="" draggable={false}
+                           onLoad={(e) => mgOnImgLoad(p, inst.sop_uid, e.currentTarget)}
+                           style={{ ...box, zIndex: 1 }} />
+                    </>
+                  );
+                  })()}
                   <TileAnno inst={inst} pane={pT}
                             annos={annos[inst.sop_uid] ?? []}
                             pend={pend?.sop === inst.sop_uid ? pend.pts : []}

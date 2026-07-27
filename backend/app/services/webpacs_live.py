@@ -23,6 +23,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -439,6 +440,30 @@ def _cache_path(sop_uid: str) -> Path:
     return CACHE_DIR / f"{safe}.dcm"
 
 
+# 동일 SOP 동시 요청 직렬화 — 프리페치(8스레드)와 화면 요청이 같은 인스턴스를 동시에 집으면
+# ① A 로 같은 수 MB 를 두 번 받고 ② 같은 .part 에 동시 기록해 캐시가 깨졌다(손상 재시도 경로가
+# 그 증거). SOP 단위 락으로 한 번만 받고 나머지는 그 결과를 기다린다.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT: dict[str, threading.Lock] = {}
+_DEC_INFLIGHT: dict[str, threading.Lock] = {}
+
+
+def _named_lock(registry: dict[str, threading.Lock], key: str) -> threading.Lock:
+    with _INFLIGHT_LOCK:
+        lk = registry.get(key)
+        if lk is None:
+            lk = registry[key] = threading.Lock()
+        if len(registry) > 4096:       # 유휴 락 정리(잠기지 않은 것만)
+            for k in [k for k, v in list(registry.items()) if not v.locked()][:2048]:
+                if k != key:
+                    registry.pop(k, None)
+        return lk
+
+
+def _sop_lock(sop_uid: str) -> threading.Lock:
+    return _named_lock(_INFLIGHT, sop_uid)
+
+
 def get_instance_bytes(client: WebPacsClient, study_uid: str, series_uid: str,
                        sop_uid: str, *, force: bool = False) -> bytes:
     p = _cache_path(sop_uid)
@@ -447,17 +472,48 @@ def get_instance_bytes(client: WebPacsClient, study_uid: str, series_uid: str,
             return p.read_bytes()
         except OSError:
             pass
-    data = client.instance_dicom(study_uid, series_uid, sop_uid)
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        # 원자적 쓰기 — 중단/디스크풀로 잘린 파일이 남아 영구 렌더 실패로 고착되는 것 방지
-        tmp = p.with_suffix(".part")
-        tmp.write_bytes(data)
-        os.replace(tmp, p)
-        _prune_cache()
-    except OSError:  # 캐시 실패는 서빙을 막지 않는다
-        pass
+    with _sop_lock(sop_uid):
+        if p.exists() and not force:      # 락 대기 중 다른 스레드가 받아 놨으면 그걸 쓴다
+            try:
+                return p.read_bytes()
+            except OSError:
+                pass
+        data = client.instance_dicom(study_uid, series_uid, sop_uid)
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            # 원자적 쓰기 — 중단/디스크풀로 잘린 파일이 남아 영구 렌더 실패로 고착되는 것 방지.
+            # 임시 파일명에 스레드 id 를 넣어 강제 재다운로드(force)끼리도 겹치지 않게 한다.
+            tmp = p.with_suffix(f".{threading.get_ident():x}.part")
+            tmp.write_bytes(data)
+            os.replace(tmp, p)
+            _prune_cache()
+        except OSError:  # 캐시 실패는 서빙을 막지 않는다
+            pass
     return data
+
+
+def instance_is_cached(sop_uid: str) -> bool:
+    return _cache_path(sop_uid).exists()
+
+
+def preview_bytes(db: Session, study_uid: str, series_uid: str, sop_uid: str) -> bytes | None:
+    """저해상 미리보기 JPEG — A 가 배치로 미리 만들어 둔 512×512 q80 을 그대로 받는다.
+
+    A 는 인스턴스마다 thumb/{sop}.jpg(128px)와 rendered/{sop}_512x512_q80.jpg 를 백그라운드로
+    생성해 MinIO 에 (평문으로) 넣어 둔다. 즉 **원본 DICOM 을 건드리지 않고** 곧바로 보여줄 수
+    있는 그림이 이미 있다. 512 실패 시 128 썸네일이라도 준다(빈 화면보다 낫다).
+    """
+    client = service_client(db)
+    try:
+        data = client.rendered_preview(study_uid, series_uid, sop_uid)
+        if data:
+            return data
+    except WebPacsError:
+        pass
+    try:
+        return client.thumbnail(study_uid, series_uid, sop_uid)
+    except WebPacsError:
+        return None
 
 
 def invalidate_instance(sop_uid: str) -> None:
@@ -466,9 +522,25 @@ def invalidate_instance(sop_uid: str) -> None:
         _cache_path(sop_uid).unlink(missing_ok=True)
     except OSError:
         pass
+    with _DECODE_LOCK:
+        _DECODE_CACHE.pop(sop_uid, None)
 
 
-def _prune_cache() -> None:
+# 프루닝 상각 — 예전엔 인스턴스를 받을 때마다 캐시 폴더 전체를 stat+정렬했다.
+# 4000개 상한에서 **호출당 약 140ms**, 그것도 프리페치 8스레드가 동시에 → 200장 CT 하나에
+# 순수 디렉터리 스캔만 수십 초. 그 시간 동안 같은 단일 워커가 화면 프레임을 못 낸다.
+# 이제 상한을 넘길 가능성이 있을 때만(쓰기 N회마다) 스캔한다.
+_PRUNE_EVERY = 256
+_prune_counter = 0
+_PRUNE_LOCK = threading.Lock()
+
+
+def _prune_cache(force: bool = False) -> None:
+    global _prune_counter
+    with _PRUNE_LOCK:
+        _prune_counter += 1
+        if not force and _prune_counter % _PRUNE_EVERY != 0:
+            return
     try:
         files = sorted(CACHE_DIR.glob("*.dcm"), key=lambda f: f.stat().st_mtime)
         for f in files[:-CACHE_MAX_FILES] if len(files) > CACHE_MAX_FILES else []:
@@ -518,35 +590,52 @@ def _decode_pixels(data: bytes) -> dict:
             "mono1": photometric == "MONOCHROME1"}
 
 
-def _decoded(sop_uid: str | None, data: bytes) -> dict:
-    """sop 캐시된 디코드 산출물 반환(없으면 디코드 후 캐시). sop 미지정이면 캐시 없이 디코드."""
+def decode_cached(sop_uid: str) -> bool:
+    """이 SOP 의 디코드 결과가 메모리에 있나 — 있으면 원본 파일을 읽을 필요가 없다."""
+    with _DECODE_LOCK:
+        return sop_uid in _DECODE_CACHE
+
+
+def _decoded(sop_uid: str | None, load: Callable[[], bytes]) -> dict:
+    """sop 캐시된 디코드 산출물 반환(없으면 디코드 후 캐시). sop 미지정이면 캐시 없이 디코드.
+
+    load 는 **필요할 때만** 원본 bytes 를 준다 — 캐시 적중 시 수 MB 디스크 읽기를 통째로 생략.
+    같은 SOP 를 동시에 요청하면 한 스레드만 디코드하고 나머지는 결과를 기다린다(중복 디코드 제거).
+    """
     if not sop_uid:
-        return _decode_pixels(data)
+        return _decode_pixels(load())
     with _DECODE_LOCK:
         hit = _DECODE_CACHE.get(sop_uid)
         if hit is not None:
             _DECODE_CACHE.move_to_end(sop_uid)
             return hit
-    dec = _decode_pixels(data)   # 락 밖에서 디코드(동시 요청은 각자 디코드하되 결과는 동일)
-    with _DECODE_LOCK:
-        _DECODE_CACHE[sop_uid] = dec
-        _DECODE_CACHE.move_to_end(sop_uid)
-        while len(_DECODE_CACHE) > _DECODE_MAX:
-            _DECODE_CACHE.popitem(last=False)
+    with _named_lock(_DEC_INFLIGHT, sop_uid):
+        with _DECODE_LOCK:                       # 대기 중 다른 스레드가 채웠으면 그걸 쓴다
+            hit = _DECODE_CACHE.get(sop_uid)
+            if hit is not None:
+                _DECODE_CACHE.move_to_end(sop_uid)
+                return hit
+        dec = _decode_pixels(load())
+        with _DECODE_LOCK:
+            _DECODE_CACHE[sop_uid] = dec
+            _DECODE_CACHE.move_to_end(sop_uid)
+            while len(_DECODE_CACHE) > _DECODE_MAX:
+                _DECODE_CACHE.popitem(last=False)
     return dec
 
 
-def render_instance(data: bytes, wc: float | None, ww: float | None,
+def render_instance(data: bytes | Callable[[], bytes], wc: float | None, ww: float | None,
                     fmt: str = "png", quality: int = 90,
                     sop_uid: str | None = None) -> tuple[bytes, str]:
     """디코드(캐시) + 윈도잉 8bit PNG/JPEG. W/L: 쿼리 > 태그 > min-max.
 
-    sop_uid 주면 디코드 결과를 메모리 캐시 → 재스크롤·W/L 드래그는 윈도잉만(디코드 생략).
+    data 는 bytes 또는 **지연 로더**(callable). sop_uid 주면 디코드 결과를 메모리 캐시 →
+    재스크롤·W/L 드래그는 윈도잉만(디코드·디스크 읽기 생략).
     """
     import numpy as np
     from PIL import Image
 
-    dec = _decoded(sop_uid, data)
+    dec = _decoded(sop_uid, data if callable(data) else (lambda: data))
     if "rgb" in dec:
         img = Image.fromarray(dec["rgb"], mode="RGB")
     else:
@@ -574,6 +663,39 @@ def render_instance(data: bytes, wc: float | None, ww: float | None,
     return buf.getvalue(), "image/png"
 
 
+# 인코딩 산출물 캐시 — (SOP·윈도우·형식·품질)은 불변이라 재인코딩이 순수 낭비였다.
+# PNG 인코딩은 512²에서 ~20ms, 2048²에서 ~95ms — 시네·다중 페인·창 여러 개면 이것만으로
+# 단일 워커의 코어가 포화된다. 브라우저 캐시(ETag/max-age)가 1차, 이건 창·사용자 간 공유용.
+_ENC_CACHE: "OrderedDict[str, tuple[bytes, str]]" = OrderedDict()
+_ENC_LOCK = threading.Lock()
+_ENC_MAX_BYTES = 192 * 1024 * 1024
+_enc_bytes = 0
+
+
+def encoded_get(key: str) -> tuple[bytes, str] | None:
+    with _ENC_LOCK:
+        hit = _ENC_CACHE.get(key)
+        if hit is not None:
+            _ENC_CACHE.move_to_end(key)
+        return hit
+
+
+def encoded_put(key: str, value: tuple[bytes, str]) -> None:
+    global _enc_bytes
+    n = len(value[0])
+    if n > _ENC_MAX_BYTES // 4:      # 단일 프레임이 캐시를 독식하지 않게
+        return
+    with _ENC_LOCK:
+        if key in _ENC_CACHE:
+            _enc_bytes -= len(_ENC_CACHE[key][0])
+        _ENC_CACHE[key] = value
+        _ENC_CACHE.move_to_end(key)
+        _enc_bytes += n
+        while _enc_bytes > _ENC_MAX_BYTES and _ENC_CACHE:
+            _, v = _ENC_CACHE.popitem(last=False)
+            _enc_bytes -= len(v[0])
+
+
 # ── 시리즈 병렬 프리페치 — 검사 오픈 시 A→B 원본 다운로드를 백그라운드 선행(지연 은닉) ──
 _prefetch_lock = threading.Lock()
 _prefetching: set[int] = set()
@@ -591,9 +713,21 @@ def prefetch_series(db: Session, vid: int, user: dict | None = None) -> int:
     try:
         client = service_client(db)   # 이미지 취득은 서비스 계정
         tree = live_series_tree(db, vid, user)
-        targets = [(tree["study_uid"], s["series_uid"], i["sop_uid"])
-                   for s in tree["series"] for i in s["instances"]
-                   if not _cache_path(i["sop_uid"]).exists()]
+        # 순서가 중요하다: 뷰어는 각 시리즈의 **가운데** 슬라이스부터 연다(index=len/2).
+        # 예전엔 0번부터 순서대로 받아서, 200장 CT 라면 화면에 필요한 장이 101번째 순번이었다
+        # → 프리페치가 도는 내내 화면은 온디맨드 다운로드를 기다렸다. 이제 가운데에서 바깥으로.
+        # SR/KO/PR 등 비영상 시리즈는 뷰어가 거르므로 받지 않는다.
+        SKIP = {"SR", "KO", "PR", "DOC", "REG", "SEG", "RTSTRUCT"}
+        targets: list[tuple[str, str, str]] = []
+        for s in tree["series"]:
+            if str(s.get("modality") or "").upper() in SKIP:
+                continue
+            insts = [i for i in s["instances"] if not _cache_path(i["sop_uid"]).exists()]
+            if not insts:
+                continue
+            mid = len(insts) // 2
+            order = sorted(range(len(insts)), key=lambda k: abs(k - mid))
+            targets += [(tree["study_uid"], s["series_uid"], insts[k]["sop_uid"]) for k in order]
         if not targets:
             return 0
 

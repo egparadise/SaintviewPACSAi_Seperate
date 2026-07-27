@@ -114,6 +114,10 @@ class WebPacsClient:
             kw["transport"] = transport   # 테스트(ASGITransport) 주입
         else:
             kw["verify"] = verify_ssl
+            # 연결 풀 — 기본 keepalive 20 은 프리페치 8스레드 + 화면 요청이 겹치면 모자라서
+            # 매 요청 TCP+TLS 를 새로 맺었다(원격 A 상대로는 왕복 2~3회 추가). 넉넉히 잡는다.
+            kw["limits"] = httpx.Limits(max_keepalive_connections=32, max_connections=64,
+                                        keepalive_expiry=60.0)
         self._client = httpx.Client(**kw)
 
     # ── 인증 ──────────────────────────────────────────────
@@ -262,12 +266,38 @@ class WebPacsClient:
         return r.json()
 
     def thumbnail(self, study_uid: str, series_uid: str, sop_uid: str) -> bytes | None:
-        """v2 썸네일(128px JPEG) — 실패 시 None(호출부 폴백)."""
+        """v2 썸네일(128px JPEG) — 실패 시 None(호출부 폴백).
+
+        A 가 배치로 **미리 만들어 MinIO 에 넣어 둔** thumb/{sop}.jpg 를 그대로 준다
+        (평문 JPEG, DICOM 다운로드·디코드 0). 전 인스턴스 커버.
+        """
         r = self._request(
             "GET",
             f"/api/dicomweb/v2/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/thumbnail",
         )
         return r.content if r.status_code == 200 else None
+
+    # A 가 미리 만들어 둔 저해상 렌더(rendered/{sop}_512x512_q80.jpg).
+    # ⚠ 이 **정확한 조합**(viewport=512x512 & quality=80 & window 없음)일 때만 사전생성본을 탄다 —
+    #    다른 값이면 A 가 그 자리에서 렌더한다(느림). Dicomweb.py 의 is_default_rendered 참조.
+    PREVIEW_VIEWPORT = "512x512"
+    PREVIEW_QUALITY = 80
+
+    def rendered_preview(self, study_uid: str, series_uid: str, sop_uid: str) -> bytes | None:
+        """저해상 미리보기 JPEG(≈40KB) — 첫 화면을 즉시 띄우기 위한 것.
+
+        원본 DICOM(수 MB) 다운로드·디코드·PNG 인코딩을 전부 건너뛴다. v1 경로는
+        Redis→MinIO→즉석렌더 폴백이 있어 404 가 나지 않는다. 실패 시 None(호출부 폴백).
+        """
+        r = self._request(
+            "GET",
+            f"/api/dicomweb/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/rendered",
+            params={"viewport": self.PREVIEW_VIEWPORT, "quality": self.PREVIEW_QUALITY},
+            headers={"Accept": "image/jpeg"},
+        )
+        if r.status_code == 200 and r.content[:2] == b"\xff\xd8":   # JPEG SOI
+            return r.content
+        return None
 
     # ── 판독·상태·주석 (Live 모드 — A DB 가 단일 원본) ─────────────
     def report_get(self, study_idx: int) -> dict | None:

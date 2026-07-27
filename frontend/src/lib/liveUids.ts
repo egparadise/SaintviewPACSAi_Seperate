@@ -19,3 +19,14 @@ export function isLiveStudyUid(uid: string | undefined | null): boolean {
 export function renderedRootFor(studyUid: string | undefined | null, fallback: string): string {
   return isLiveStudyUid(studyUid) ? LIVE_DICOMWEB_ROOT : fallback;
 }
+
+/** ⚡ 저해상 미리보기 URL — Live 검사에서만. 원격 A 가 배치로 미리 만들어 둔
+ *  512×512 JPEG(≈40KB)이라 원본(수 MB PNG)이 도착하기 전에 화면을 즉시 채운다.
+ *  뷰어는 이 이미지를 원본 <img> **뒤에** 깔아 두기만 하면 된다 —
+ *  원본이 로드되면 위에 그려지므로 별도 전환 처리가 필요 없다.
+ *  Live 가 아니면 null(로컬 Orthanc 는 같은 망이라 2단계가 오히려 요청만 늘린다). */
+export function previewUrlOf(renderedUrl: string, studyUid: string | undefined | null): string | null {
+  if (!isLiveStudyUid(studyUid)) return null;
+  const base = renderedUrl.split("?")[0];       // W/L·형식 파라미터는 미리보기에 무의미
+  return `${base}?preview=1`;
+}

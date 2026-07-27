@@ -324,3 +324,48 @@ def test_live_sse_status_endpoint(client, auth_headers, live_ready):
     assert s["enabled"] is True          # 브리지 활성
     assert "connected" in s and "rev" in s
     # 미연결이어도 프론트가 폴링으로 폴백하므로 기능 손실 없음
+
+
+def test_live_preview_uses_prebaked_render(client, auth_headers, live_ready, mock_remote):
+    """⚡ 첫 화면용 저해상 미리보기 — A 가 미리 만들어 둔 512×512 q80 JPEG 을 그대로 전달.
+
+    핵심은 '원본 DICOM 을 받지 않는다'는 것. 예전 경로는 프레임 1장을 띄우려고 수 MB DICOM 을
+    내려받아 디코드하고 PNG 로 다시 인코딩했다.
+    """
+    from app.services.webpacs_live import VID_BASE
+
+    vid = VID_BASE + 2
+    tree = client.get(f"/api/webpacs/live/studies/{vid}/series-tree", headers=auth_headers).json()
+    s0 = tree["series"][0]
+    sop = s0["instances"][0]["sop_uid"]
+
+    before = httpx.get(f"{mock_remote}/__test__/state").json()
+    url = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
+           f"/series/{s0['series_uid']}/instances/{sop}/rendered?preview=1")
+    r = client.get(url)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content[:2] == b"\xff\xd8"          # JPEG SOI
+    after = httpx.get(f"{mock_remote}/__test__/state").json()
+    # 사전생성 파라미터(viewport=512x512 & quality=80 & window 없음)로 요청했는가
+    assert after["rendered_prebaked"] == before["rendered_prebaked"] + 1
+    # 원본 DICOM 다운로드는 0건이어야 한다
+    assert after["instance_calls"] == before["instance_calls"]
+
+
+def test_live_rendered_etag_304(client, auth_headers, live_ready):
+    """rendered 는 (SOP·윈도우·형식·품질)이 불변이므로 ETag 로 304 — 재방문 재다운로드 제거."""
+    from app.services.webpacs_live import VID_BASE
+
+    vid = VID_BASE + 2
+    tree = client.get(f"/api/webpacs/live/studies/{vid}/series-tree", headers=auth_headers).json()
+    s0 = tree["series"][0]
+    url = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
+           f"/series/{s0['series_uid']}/instances/{s0['instances'][0]['sop_uid']}/rendered")
+    r = client.get(url)
+    assert r.status_code == 200, r.text
+    etag = r.headers.get("ETag")
+    assert etag and "max-age=3600" in r.headers.get("Cache-Control", "")
+    r2 = client.get(url, headers={"If-None-Match": etag})
+    assert r2.status_code == 304
+    assert r2.headers.get("ETag") == etag

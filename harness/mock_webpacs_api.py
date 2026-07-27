@@ -237,6 +237,7 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
         data = dicom_bytes.get(sop_uid)
         if data is None:
             raise HTTPException(status_code=404, detail="instance not found")
+        state["instance_calls"] = state.get("instance_calls", 0) + 1
         return Response(content=data, media_type="application/dicom")
 
     @app.get("/api/dicomweb/v2/studies/{study_uid}/series/{series_uid}/metadata")
@@ -263,6 +264,27 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
 
         buf = _io.BytesIO()
         Image.new("L", (32, 32), color=96).save(buf, format="JPEG")
+        return Response(content=buf.getvalue(), media_type="image/jpeg")
+
+    # A 가 배치로 미리 만들어 두는 저해상 렌더(rendered/{sop}_512x512_q80.jpg) 서빙 경로.
+    # 실서버는 v1 Dicomweb.py 의 /rendered 가 Redis→MinIO 사전생성본→즉석렌더 순으로 응답한다.
+    # 사전생성본을 타려면 viewport=512x512 & quality=80 & window 없음 이어야 한다.
+    @app.get("/api/dicomweb/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/rendered")
+    def rendered_v1(study_uid: str, series_uid: str, sop_uid: str,
+                    viewport: str = "", quality: int = 0, window: str | None = None,
+                    authorization: str | None = Header(default=None)):
+        _auth(authorization)
+        if sop_uid not in dicom_bytes:
+            raise HTTPException(status_code=404, detail="instance not found")
+        import io as _io
+
+        from PIL import Image
+
+        state["rendered_calls"] = state.get("rendered_calls", 0) + 1
+        state["rendered_prebaked"] = state.get("rendered_prebaked", 0) + (
+            1 if (viewport == "512x512" and quality == 80 and not window) else 0)
+        buf = _io.BytesIO()
+        Image.new("L", (512, 512), color=128).save(buf, format="JPEG", quality=quality or 80)
         return Response(content=buf.getvalue(), media_type="image/jpeg")
 
     # ── 판독/선점/주석 (Live 계약 — A StudyReport.py/StudyImage.py 재현) ──
@@ -394,7 +416,10 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
 
     @app.get("/__test__/state")
     def test_state():
-        return {"logins": state["logins"]}
+        return {"logins": state["logins"],
+                "rendered_calls": state.get("rendered_calls", 0),
+                "rendered_prebaked": state.get("rendered_prebaked", 0),
+                "instance_calls": state.get("instance_calls", 0)}
 
     return app
 

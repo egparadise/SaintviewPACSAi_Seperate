@@ -10,9 +10,12 @@
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi import (
+    APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response,
+)
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -283,21 +286,34 @@ def roi_stats(vid: int, body: RoiBody, db: Session = Depends(get_db),
 
 def _render_with_retry(db: Session, study_uid: str, series_uid: str, sop_uid: str,
                        wc, ww, fmt: str, quality: int) -> tuple[bytes, str]:
-    """캐시 유래 렌더 실패 시 캐시 무효화 후 1회 재다운로드-재시도(손상 캐시 영구 고착 방지)."""
-    client = _wrap(lambda: live.service_client(db))
-    data = _wrap(lambda: live.get_instance_bytes(client, study_uid, series_uid, sop_uid))
+    """캐시 유래 렌더 실패 시 캐시 무효화 후 1회 재다운로드-재시도(손상 캐시 영구 고착 방지).
+
+    ⚡ 원본 bytes 는 **지연 로드** — 디코드 결과가 메모리에 있으면(스크롤 재방문·W/L 드래그)
+    수 MB 파일 읽기를 통째로 건너뛴다. 예전엔 캐시 적중이어도 매 프레임 read_bytes() 를 했다.
+    """
+    client_box: list = []
+
+    def _client():
+        if not client_box:
+            client_box.append(_wrap(lambda: live.service_client(db)))
+        return client_box[0]
+
+    def _load(force: bool = False):
+        return _wrap(lambda: live.get_instance_bytes(
+            _client(), study_uid, series_uid, sop_uid, force=force))
+
     try:
-        return live.render_instance(data, wc, ww, fmt=fmt, quality=quality, sop_uid=sop_uid)
+        return live.render_instance(_load, wc, ww, fmt=fmt, quality=quality, sop_uid=sop_uid)
     except Exception:  # noqa: BLE001 — 손상 캐시 의심 → 삭제 후 강제 재다운로드 1회
         live.invalidate_instance(sop_uid)
-        data = _wrap(lambda: live.get_instance_bytes(client, study_uid, series_uid, sop_uid, force=True))
-        return live.render_instance(data, wc, ww, fmt=fmt, quality=quality, sop_uid=sop_uid)
+        return live.render_instance(lambda: _load(True), wc, ww,
+                                    fmt=fmt, quality=quality, sop_uid=sop_uid)
 
 
 # ── 픽셀 (무인증 — <img>/Cornerstone 헤더 없는 요청. 모듈 독스트링 참조) ──
 @router.get("/dicom-web/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/rendered")
-def rendered(study_uid: str, series_uid: str, sop_uid: str,
-             window: str = "", accept: str = "", quality: int = 90,
+def rendered(study_uid: str, series_uid: str, sop_uid: str, request: Request,
+             window: str = "", accept: str = "", quality: int = 90, preview: int = 0,
              db: Session = Depends(get_db)):
     """뷰어 rendered 동형 — window=C,W[,linear] 서버측 윈도잉. Orthanc 프록시 대체."""
     _uid(study_uid, series_uid, sop_uid)   # UID 인젝션 차단(원본 DICOM 노출 방지)
@@ -310,20 +326,51 @@ def rendered(study_uid: str, series_uid: str, sop_uid: str,
         except (ValueError, IndexError):
             wc = ww = None
     fmt = "jpeg" if "jpeg" in (accept or "") else "png"
-    try:
-        img, media = _render_with_retry(db, study_uid, series_uid, sop_uid, wc, ww, fmt, quality)
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001 — 코덱/픽셀 문제를 502 로 구분
-        raise HTTPException(status_code=502, detail=f"렌더 실패: {str(e)[:120]}")
+    # ⚡ preview=1 — A 가 배치로 미리 만들어 둔 512×512 q80 JPEG(≈40KB)을 그대로 전달한다.
+    # 원본 DICOM(수 MB) 다운로드·디코드·인코딩을 전부 건너뛰므로 첫 화면이 즉시 뜬다.
+    # 뷰어는 이걸 먼저 깔고 그 위에 원본 해상도를 얹는다(2단계 표시).
+    if preview:
+        key = f"pv|{sop_uid}"
+        hit = live.encoded_get(key)
+        if hit is None:
+            data = _wrap(lambda: live.preview_bytes(db, study_uid, series_uid, sop_uid))
+            if not data:
+                raise HTTPException(status_code=404, detail="미리보기 없음")
+            hit = (data, "image/jpeg")
+            live.encoded_put(key, hit)
+        return Response(content=hit[0], media_type=hit[1],
+                        headers={"Cache-Control": "private, max-age=3600"})
+    # (SOP, 윈도우, 형식, 품질) 은 **불변** — 같은 키면 항상 같은 바이트다.
+    # 그래서 ETag 로 304 를 줄 수 있고, 캐시 수명을 60초에서 1시간으로 올려도 안전하다.
+    # (예전 60초: 60초 지나 되돌아온 슬라이스마다 재다운로드+재렌더가 걸렸다)
+    etag = 'W/"' + hashlib.sha1(
+        f"{sop_uid}|{window}|{fmt}|{quality}".encode()).hexdigest()[:20] + '"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag,
+                                                  "Cache-Control": "private, max-age=3600"})
+    cached = live.encoded_get(etag)
+    if cached is None:
+        try:
+            cached = _render_with_retry(db, study_uid, series_uid, sop_uid, wc, ww, fmt, quality)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 — 코덱/픽셀 문제를 502 로 구분
+            raise HTTPException(status_code=502, detail=f"렌더 실패: {str(e)[:120]}")
+        live.encoded_put(etag, cached)
+    img, media = cached
     return Response(content=img, media_type=media,
-                    headers={"Cache-Control": "private, max-age=60"})
+                    headers={"Cache-Control": "private, max-age=3600", "ETag": etag})
 
 
 @router.get("/thumb/{study_uid}/{series_uid}/{sop_uid}")
 def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(get_db)):
     """썸네일 — A v2 사전생성 썸네일 프록시(실패 시 렌더 폴백)."""
     _uid(study_uid, series_uid, sop_uid)   # UID 인젝션 차단(?/ 로 인스턴스 원본 노출 방지)
+    key = f"th|{sop_uid}"
+    hit = live.encoded_get(key)       # B 측 캐시 — 예전엔 썸네일마다 A 왕복을 그대로 했다
+    if hit is not None:
+        return Response(content=hit[0], media_type=hit[1],
+                        headers={"Cache-Control": "private, max-age=86400"})
     client = _wrap(lambda: live.service_client(db))
     data = None
     try:
@@ -331,8 +378,9 @@ def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(g
     except WebPacsError:
         data = None
     if data:
+        live.encoded_put(key, (data, "image/jpeg"))
         return Response(content=data, media_type="image/jpeg",
-                        headers={"Cache-Control": "private, max-age=3600"})
+                        headers={"Cache-Control": "private, max-age=86400"})
     try:
         img, media = _render_with_retry(db, study_uid, series_uid, sop_uid, None, None, "jpeg", 70)
     except HTTPException:
