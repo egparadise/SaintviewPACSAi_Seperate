@@ -26,7 +26,11 @@ export function renderedRootFor(studyUid: string | undefined | null, fallback: s
  *  원본이 로드되면 위에 그려지므로 별도 전환 처리가 필요 없다.
  *  Live 가 아니면 null(로컬 Orthanc 는 같은 망이라 2단계가 오히려 요청만 늘린다). */
 export function previewUrlOf(renderedUrl: string, studyUid: string | undefined | null): string | null {
+  // ⚠ studyUid 만 보면 안 된다 — Combine 페인은 다른 검사의 URL 을 쓰고, WASM 파이프라인은
+  //   blob: URL 을 준다. 그런 URL 에 ?preview=1 을 붙이면 엉뚱한 요청이 한 번 더 나간다.
+  //   실제로 라이브 프록시로 나가는 URL 인지까지 확인한다.
   if (!isLiveStudyUid(studyUid)) return null;
+  if (!renderedUrl.startsWith(LIVE_DICOMWEB_ROOT)) return null;
   const base = renderedUrl.split("?")[0];       // W/L·형식 파라미터는 미리보기에 무의미
   return `${base}?preview=1`;
 }

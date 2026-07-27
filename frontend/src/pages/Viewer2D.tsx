@@ -11,7 +11,7 @@ import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgRatioBox, mgStamp, mgWallByCol,
-  readMgCfg, toRC as toRC2, useTileSizes, type MgBox, type MgCfg, type MgFit,
+  readMgCfg, toRC as toRC2, useTileSizes, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 import { ToolIconTy } from "../components/ToolIconTy";
 import { AnatomyIcon } from "../lib/anatomyIcons";
@@ -630,7 +630,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // 2D-MG — 유방촬영 좌우 사이 공기 여백 제거(체크 시). 설정: 뷰어 공통 > 2D 행잉 > MG
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   const [mgOn, setMgOn] = useState(DEFAULT_MG_CFG.on);
-  const [mgBoxes, setMgBoxes] = useState<Record<string, MgBox | null>>({});   // SOP → 조직 경계상자
+  const [mgBoxes, setMgBoxes] = useState<Record<string, MgProbe>>({});   // SOP → 조직 경계 탐지 결과
+  const [prevDone, setPrevDone] = useState<Record<string, true>>({});   // 원본이 한 번 뜬 SOP
+  const [mgReady, setMgReady] = useState(false);   // viewer.prefs 로드 완료(행잉 경합 방지)
   const { sizes: tileSizes, sizeRef } = useTileSizes();
   // window 리스너(빈 deps) 안의 드래그 경로가 최신 보정 함수를 쓰도록 — 아래 mgAt 정의 후 대입
   const mgAtRef = useRef<(p: PaneState, rect: { width: number; height: number }) => PaneState>((p) => p);
@@ -993,6 +995,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const mg = readMgCfg(v.mg_hang);
       setMgCfg(mg);
       setMgOn(mg.on);
+      setMgReady(true);   // 이 뒤에야 MG 행잉을 건다 — prefs 가 늦게 오면 'off' 설정이 무시됐다
       const merged = { ...DEFAULT_PREFS, ...v };
       if (!merged.wl_presets?.length) merged.wl_presets = WL_PRESETS;
       // 구 기본값 업그레이드(23차: 팔레트·썸네일 확대) — 직접 조절한 값은 유지
@@ -1063,19 +1066,37 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
      설정(뷰어 공통 > 2D 행잉 > MG)의 Image layout(1×2/2×2/2×3) 타일로 건다.
      시리즈·설정이 둘 다 준비된 뒤 실행되므로 로드 순서 경합이 없다. */
   const mgHungRef = useRef("");
+  const mgHangTo = (lk: string) => {
+    // ⚠ **Image 타일이 아니라 Series 분할**로 건다. T-View/SaintView 는 타일(il>1) 페인에
+    //   주석 SVG 를 렌더하지 않고 포인터 좌표도 페인 기준으로 계산하므로, 타일로 걸면
+    //   MG 검사에서 측정·주석이 통째로 죽는다(I-View 는 타일별 레이어가 있어 무관).
+    //   같은 시리즈를 인덱스만 달리해 페인마다 하나씩 → 뷰마다 W/L·확대·계측이 독립적으로 동작.
+    const s0 = series[0];
+    if (!LAYOUTS[lk] || !s0) return;
+    hang2dImgRef.current = null;
+    setLayout(lk as keyof typeof LAYOUTS);
+    setImgLay({ r: 1, c: 1 });
+    setPanes((prev) => {
+      const next = { ...prev };
+      PANE_IDS.forEach((pid, i) => {
+        next[pid] = i < s0.instances.length
+          ? applyPState({ ...initPane(detail.study_uid), series: s0, index: i, il: { r: 1, c: 1 } })
+          : initPane(detail.study_uid);
+      });
+      return next;
+    });
+  };
   useEffect(() => {
-    if (detail.modality !== "MG" || !series.length) return;
+    if (!mgReady || detail.modality !== "MG" || !series.length) return;
     const key = `${detail.id}:${mgCfg.on}:${mgCfg.layout}`;
     if (mgHungRef.current === key) return;
     // 뷰별 시리즈가 따로 있는 검사(R CC/L CC/…)는 기존 표준 2×2 페인 행잉 유지
     if (!mgCfg.on || mammoAssign(series).some(Boolean) || (series[0]?.instances.length ?? 0) < 2) return;
+    const g = toRC2(mgCfg.layout);
     mgHungRef.current = key;
-    const il = toRC2(mgCfg.layout);
-    hang2dImgRef.current = il;
-    setLayout("1x1");
-    setImgLay(il);
-    setPanes((prev) => ({ ...prev, p0: { ...prev.p0, il, index: 0 } }));
-  }, [detail.id, detail.modality, series, mgCfg.on, mgCfg.layout]);
+    mgHangTo(`${g.r}x${g.c}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mgReady, detail.id, detail.modality, detail.study_uid, series, mgCfg.on, mgCfg.layout]);
 
   /* 시리즈 트리 + 리포트 로드 */
   useEffect(() => {
@@ -2772,13 +2793,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
   const mgSeries = (p: PaneState) => (p.series?.modality || "") === "MG";
   /** 흉벽 방향: 탐지 결과 우선 → 검사명 laterality → 타일 열 위치 */
-  const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number): MgBox | null | undefined => {
+  const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number) => {
     if (mgCfg.detect === "auto") {
-      const b = mgBoxes[inst.sop_uid];
-      if (b === undefined) return undefined;    // 아직 탐지 전 — 원본으로 두고 완료되면 반영
-      if (b) return b;
+      const pr = mgBoxes[inst.sop_uid];
+      if (!pr) return undefined;                // 아직 탐지 전 — 원본으로 두고 완료되면 반영
+      if (pr.kind === "none") return undefined; // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다
+      if (pr.kind === "box") return pr.box;
     }
-    // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
+    // 픽셀을 못 읽었을 때만(blind) 고정 비율
     const lat = mammoView(p.series?.series_desc ?? "").lat;
     const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, cols);
     return mgRatioBox(wall, mgCfg.ratio);
@@ -2807,9 +2829,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   mgAtRef.current = mgAt;
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
   const mgOnImgLoad = (p: PaneState, sop: string | undefined, el: HTMLImageElement) => {
-    if (!mgSeries(p) || !sop || sop in mgBoxes) return;
+    if (!sop) return;
+    setPrevDone((d) => (d[sop] ? d : { ...d, [sop]: true }));   // 원본이 떴으니 미리보기는 내린다
+    if (!mgSeries(p) || mgBoxes[sop]) return;
     const b = mgProbe(sop, el, mgCfg.thr);
-    setMgBoxes((m) => (sop in m ? m : { ...m, [sop]: b }));
+    setMgBoxes((m) => (m[sop] ? m : { ...m, [sop]: b }));
   };
 
   const renderPane = (pid: string) => {
@@ -2866,10 +2890,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
              if (!magOn || !inst || tileCount > 1) return;
              const r = e.currentTarget.getBoundingClientRect();
              const cols = inst.cols || 1, rows = inst.rows || 1;
-             const s = Math.min(r.width / cols, r.height / rows) * p.zoom;
+             // 렌즈는 화면에 실제로 그려진 변환을 따라야 한다 — 2D-MG 보정을 포함한 pEff 사용
+             const pe = mgAtRef.current(p, r);
+             const s = Math.min(r.width / cols, r.height / rows) * pe.zoom;
              if (!s) return;
-             const ix = (e.clientX - (r.left + r.width / 2 + p.tx)) / s + cols / 2;
-             const iy = (e.clientY - (r.top + r.height / 2 + p.ty)) / s + rows / 2;
+             const ix = (e.clientX - (r.left + r.width / 2 + pe.tx)) / s + cols / 2;
+             const iy = (e.clientY - (r.top + r.height / 2 + pe.ty)) / s + rows / 2;
              setMagPos({ pid, mx: e.clientX - r.left, my: e.clientY - r.top,
                          nx: ix / cols, ny: iy / rows, sc: s });
            }}
@@ -2903,8 +2929,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           }}>
             {tileCount <= 1 ? (
               <>
-                {/* ⚡ 저해상 미리보기(원격 A 사전생성 512px JPEG) — 원본 뒤. 원본이 오면 덮인다 */}
-                {previewUrlOf(url, p.studyUid) && (
+                {/* ⚡ 저해상 미리보기(원격 A 사전생성 512px JPEG) — 원본 뒤. 원본이 오면 덮인다.
+                    ⚠ 원본이 한 번 뜬 뒤에는 내린다 — A 기본 W/L 로 렌더된 영상이라 W/L 드래그 중
+                    드러나면 오버레이가 표시하는 W/L 과 다른 영상이 보인다(판독 오해). */}
+                {previewUrlOf(url, p.studyUid) && !(inst && prevDone[inst.sop_uid]) && (
                   <img src={previewUrlOf(url, p.studyUid)!} alt="" draggable={false} aria-hidden
                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
                                 objectFit: "contain", filter: paneFilter(p) }} />
@@ -2933,7 +2961,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   return (
                     <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)}
                          style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0 }}>
-                      {u && previewUrlOf(u, p.studyUid) && (
+                      {u && previewUrlOf(u, p.studyUid) && !(ti && prevDone[ti.sop_uid]) && (
                         <img src={previewUrlOf(u, p.studyUid)!} alt="" draggable={false} aria-hidden
                              style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
                                       objectFit: "contain",
@@ -4104,15 +4132,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                             color: "#f0abfc", fontWeight: 700, cursor: "pointer" }}>
               <input type="checkbox" checked={mgOn} onChange={(e) => setMgOn(e.target.checked)} />2D-MG
             </label>
-            <select value={`${panes[activePane]?.il?.r ?? 1}x${panes[activePane]?.il?.c ?? 1}`}
-                    title="MG 배치 — Image layout"
-                    onChange={(e) => { const v = toRC2(e.target.value); setLayout("1x1"); setImgLay(v); patch(activePane, { il: v, index: 0 }); }}
+            <select value={layout}
+                    title="MG 배치 — 뷰 하나당 페인 하나(계측·W/L 이 뷰별로 독립)"
+                    onChange={(e) => mgHangTo(e.target.value)}
                     style={{ fontSize: 11, padding: "0 2px" }}>
               {MG_LAYOUTS.map((l) => <option key={l} value={l}>{l.replace("x", "×")}</option>)}
-              {!(MG_LAYOUTS as readonly string[]).includes(`${panes[activePane]?.il?.r ?? 1}x${panes[activePane]?.il?.c ?? 1}`) && (
-                <option value={`${panes[activePane]?.il?.r ?? 1}x${panes[activePane]?.il?.c ?? 1}`}>
-                  {panes[activePane]?.il?.r ?? 1}×{panes[activePane]?.il?.c ?? 1}
-                </option>
+              {!(MG_LAYOUTS as readonly string[]).includes(layout) && (
+                <option value={layout}>{layout.replace("x", "×")}</option>
               )}
             </select>
           </span>

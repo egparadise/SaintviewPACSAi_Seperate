@@ -369,3 +369,37 @@ def test_live_rendered_etag_304(client, auth_headers, live_ready):
     r2 = client.get(url, headers={"If-None-Match": etag})
     assert r2.status_code == 304
     assert r2.headers.get("ETag") == etag
+
+
+def test_get_instance_bytes_dedupes_concurrent_downloads(tmp_path, monkeypatch):
+    """동일 SOP 를 여러 스레드가 동시에 요청해도 A 원본 다운로드는 1회.
+
+    예전엔 파일 존재 여부만 보고 각자 받아서 ① A 로 같은 수 MB 를 두 번 받고
+    ② 같은 임시 파일에 동시에 써서 캐시가 깨졌다(손상 캐시 재시도 경로가 그 증거).
+    락 없이 실행하면 이 테스트는 calls == 6 으로 실패한다.
+    """
+    import concurrent.futures as cf
+
+    from app.services import webpacs_live as live
+
+    monkeypatch.setattr(live, "CACHE_DIR", tmp_path)
+    sop = "1.2.3.4.5.99"
+    calls = []
+    lock = threading.Lock()
+
+    class _Slow:
+        def instance_dicom(self, study_uid, series_uid, sop_uid):
+            with lock:
+                calls.append(sop_uid)
+            time.sleep(0.15)          # 다른 스레드가 확실히 겹쳐 들어오도록
+            return b"DICM-PAYLOAD"
+
+    cli = _Slow()
+    with cf.ThreadPoolExecutor(max_workers=6) as ex:
+        out = [f.result() for f in
+               [ex.submit(live.get_instance_bytes, cli, "1.2", "1.2.3", sop) for _ in range(6)]]
+
+    assert out == [b"DICM-PAYLOAD"] * 6
+    assert len(calls) == 1, f"원본 다운로드가 {len(calls)}회 발생(1회여야 함)"
+    assert (tmp_path / f"{sop}.dcm").read_bytes() == b"DICM-PAYLOAD"
+    assert not list(tmp_path.glob("*.part")), "임시 파일이 남았다"

@@ -63,20 +63,36 @@ export function toRC(s: string, def = { r: 2, c: 2 }): { r: number; c: number } 
 }
 
 // ── 조직 경계상자 탐지 ────────────────────────────────────────────────────
-// SOP 단위 캐시. null = 탐지 불가/불필요(공기 여백이 없는 프레임) → 보정 생략.
-const BOXES = new Map<string, MgBox | null>();
+// ⚠ 결과는 반드시 **3상태**여야 한다. 예전엔 "상자 or null" 2상태여서,
+//   *공기 여백이 없어 보정이 필요 없는* 프레임(null)과 *픽셀을 못 읽은* 프레임(null)이
+//   구분되지 않아 전자에도 고정 38% 컷이 먹었다 — 멀쩡한 조직이 잘려 나갔다.
+//     box  : 잘라낼 여백을 찾음
+//     none : 프레임이 이미 조직으로 꽉 참 → **보정하지 않는다**
+//     blind: canvas 오염 등으로 픽셀을 못 읽음 → 설정의 고정 비율로 폴백
+export type MgProbe =
+  | { kind: "box"; box: MgBox }
+  | { kind: "none" }
+  | { kind: "blind" };
+
+// 캐시 키에 임계값을 포함한다 — 설정에서 배경 임계값을 바꾸면 다시 탐지해야 한다
+const BOXES = new Map<string, MgProbe>();
 const PROBE_MAX = 192;      // 샘플링 해상도(긴 변) — 경계상자 정밀도엔 이 정도면 충분
 const RUN = 3;              // 유효 시작/끝으로 인정할 연속 칸 수 — 번인 문자·점 노이즈 무시
 const FILL = 0.04;          // 한 줄이 '조직'이려면 임계 초과 픽셀이 4% 이상
 
-export function mgBoxOf(sop: string): MgBox | null | undefined { return BOXES.get(sop); }
+const _key = (sop: string, thrPct: number) => `${sop}|${Math.round(thrPct)}`;
 
-/** 화면에 뜬 <img> 에서 조직 경계상자 산출(동기, SOP 캐시). null = 보정 대상 아님/탐지 불가. */
-export function mgProbe(sop: string, img: HTMLImageElement, thrPct: number): MgBox | null {
-  if (!sop) return null;
-  const hit = BOXES.get(sop);
+export function mgBoxOf(sop: string, thrPct: number): MgProbe | undefined {
+  return BOXES.get(_key(sop, thrPct));
+}
+
+/** 화면에 뜬 <img> 에서 조직 경계상자 산출(동기, SOP+임계 캐시). */
+export function mgProbe(sop: string, img: HTMLImageElement, thrPct: number): MgProbe {
+  if (!sop) return { kind: "blind" };
+  const ck = _key(sop, thrPct);
+  const hit = BOXES.get(ck);
   if (hit !== undefined) return hit;
-  let box: MgBox | null = null;
+  let out: MgProbe = { kind: "blind" };
   try {
     const iw = img.naturalWidth, ih = img.naturalHeight;
     if (iw > 1 && ih > 1) {
@@ -123,20 +139,22 @@ export function mgProbe(sop: string, img: HTMLImageElement, thrPct: number): MgB
           const [ry0, ry1] = span(rowN, h, w);
           if (cx0 >= 0 && cx1 > cx0 && ry0 >= 0 && ry1 > ry0) {
             const x0 = cx0 / w, x1 = (cx1 + 1) / w, y0 = ry0 / h, y1 = (ry1 + 1) / h;
-            // 잘라낼 공기가 거의 없으면(가로 97% 이상 차지) 보정하지 않는다 — MG 가 아닐 수도
-            if (x1 - x0 < 0.97) {
+            // 잘라낼 공기가 거의 없으면(가로 97% 이상 차지) **보정하지 않는다**(none).
+            // 고정 비율 폴백으로 흘려보내면 안 된다 — 꽉 찬 프레임을 38% 잘라먹는다.
+            out = x1 - x0 < 0.97
               // 흉벽 = 조직이 프레임 가장자리에 붙은 쪽(유두 쪽엔 공기가 넓게 남는다)
-              box = { x0, y0, x1, y1, wall: x0 <= 1 - x1 ? "L" : "R" };
-            }
+              ? { kind: "box", box: { x0, y0, x1, y1, wall: x0 <= 1 - x1 ? "L" : "R" } }
+              : { kind: "none" };
           }
         }
       }
     }
   } catch {
-    box = null;    // canvas 오염(타 출처 DICOMweb) 등 — 고정 비율 폴백으로
+    out = { kind: "blind" };    // canvas 오염(타 출처 DICOMweb) 등 — 고정 비율 폴백으로
   }
-  BOXES.set(sop, box);
-  return box;
+  if (BOXES.size > 2000) BOXES.clear();
+  BOXES.set(ck, out);
+  return out;
 }
 
 /** 탐지 실패/비활성 시 쓰는 고정 비율 상자 — 안쪽(유두 쪽)에서 ratio% 를 잘라낸다 */

@@ -29,7 +29,8 @@ import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewe
 import { mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgRatioBox,
-  mgStamp, mgWallByCol, readMgCfg, toRC, useTileSizes, type MgBox, type MgCfg, type MgFit,
+  mgStamp, mgWallByCol, readMgCfg, toRC, useTileSizes,
+  type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 
 // 해부학 아이콘 — 심장(CTR)/척추(Spine)/측만(Cobb)/골반+다리(Limb) 그림 (em 크기 = 칩 글리프에 맞춰 확대)
@@ -369,7 +370,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // 2D-MG — 유방촬영 좌우 사이 공기 여백 제거(체크 시). 설정: 뷰어 공통 > 2D 행잉 > MG
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   const [mgOn, setMgOn] = useState(DEFAULT_MG_CFG.on);
-  const [mgBoxes, setMgBoxes] = useState<Record<string, MgBox | null>>({});   // SOP → 조직 경계상자
+  const [mgBoxes, setMgBoxes] = useState<Record<string, MgProbe>>({});   // SOP → 조직 경계 탐지 결과
+  const [prevDone, setPrevDone] = useState<Record<string, true>>({});   // 원본이 한 번 뜬 SOP
   const { sizes: tileSizes, sizeRef } = useTileSizes();
   const [toast, setToast] = useState("");
   // §3.1 툴바 상단(원본): Report 도크(ReportDock — TY 와 동일 기능) + Prev/Next 워크리스트 내비게이션
@@ -646,7 +648,16 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // Mammo(MG) 전용 행잉 — 표준 2×2 [R CC, L CC, R MLO, L MLO] + 오버레이 텍스트 제거 (전 뷰어 공통 규칙)
       const mammo = single && mod === "MG";
       const ma = mammo ? mammoAssign(hangList[0].series) : null;
-      const mammoSeries = ma && ma.some(Boolean) ? ma : null;   // 매칭 0이면 순서대로 폴백(빈 페인 방지)
+      // 부분 매칭(예: RCC 만 라벨이 맞는 검사)에서 빈 슬롯을 남기면 반대편 유방이 아예 안 뜬다
+      // → 매칭 안 된 시리즈로 빈 칸을 순서대로 채운다. 매칭 0이면 통째로 순서대로 폴백.
+      const mammoSeries = ma && ma.some(Boolean)
+        ? (() => {
+            const used = new Set(ma.filter(Boolean));
+            const rest = hangList[0].series.filter((x) => !used.has(x));
+            let k = 0;
+            return ma.map((x) => x ?? rest[k++] ?? null);
+          })()
+        : null;
       if (mammo) setOvlVisible(false);
       // 4-view 가 한 시리즈에 다 들어 있는 검사(대부분의 MG)는 Series 2×2 로 걸면 3칸이 빈다.
       // 2D-MG 사용 시엔 Series 1×1 + 설정된 Image layout(1×2/2×2/2×3) 타일로 건다.
@@ -1658,13 +1669,15 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     if (!mgOn || !inst || !mgSeries(p)) return null;
     const size = tileSizes[`${pi}:${t}`];
     if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
-    let box: MgBox | null | undefined;
+    let box;
     if (mgCfg.detect === "auto") {
-      box = mgBoxes[inst.sop_uid];
-      if (box === undefined) return null;         // 아직 탐지 전 — 원본으로 두고 완료되면 반영
+      const pr = mgBoxes[inst.sop_uid];
+      if (!pr) return null;                       // 아직 탐지 전 — 원본으로 두고 완료되면 반영
+      if (pr.kind === "none") return null;        // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다
+      if (pr.kind === "box") box = pr.box;
     }
     if (!box) {
-      // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
+      // 픽셀을 못 읽었을 때만(blind) 고정 비율. MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 은 왼쪽
       const lat = mammoView(p.series?.series_desc ?? "").lat;
       const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, p.il.c);
       box = mgRatioBox(wall, mgCfg.ratio);
@@ -1673,9 +1686,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   };
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
   const mgOnImgLoad = (p: Pane, sop: string, el: HTMLImageElement) => {
-    if (!mgSeries(p) || !sop || sop in mgBoxes) return;
+    setPrevDone((d) => (d[sop] ? d : { ...d, [sop]: true }));   // 원본이 떴으니 미리보기는 내린다
+    if (!mgSeries(p) || !sop || mgBoxes[sop]) return;
     const b = mgProbe(sop, el, mgCfg.thr);
-    setMgBoxes((m) => (sop in m ? m : { ...m, [sop]: b }));
+    setMgBoxes((m) => (m[sop] ? m : { ...m, [sop]: b }));
   };
   // 3DC 홀드-드래그 배치 — 렌더마다 최신 상태·함수 캡처(stale closure 방지), pointermove 는 rAF 스로틀
   c3PlaceRef.current = (cx: number, cy: number) => {
@@ -2597,9 +2611,14 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                   return (
                     <>
                       {/* ⚡ 저해상 미리보기(원격 A 사전생성 512px JPEG) — 원본 뒤에 깔아 두면
-                          원본이 도착하는 즉시 위에 그려진다. 첫 화면 대기 시간을 없앤다. */}
-                      {prev && <img src={prev} alt="" draggable={false} aria-hidden
-                                    style={{ ...box, zIndex: 0 }} />}
+                          원본이 도착하는 즉시 위에 그려진다. 첫 화면 대기 시간을 없앤다.
+                          ⚠ 원본이 한 번 뜬 뒤에는 반드시 내린다 — 미리보기는 A 기본 W/L 로 렌더된
+                          영상이라, W/L 드래그로 원본이 재요청되는 사이에 드러나면 오버레이가 표시하는
+                          W/L 과 다른 영상이 보인다(판독 오해). */}
+                      {prev && !prevDone[inst.sop_uid] && (
+                        <img src={prev} alt="" draggable={false} aria-hidden
+                             style={{ ...box, zIndex: 0 }} />
+                      )}
                       <img src={full} alt="" draggable={false}
                            onLoad={(e) => mgOnImgLoad(p, inst.sop_uid, e.currentTarget)}
                            style={{ ...box, zIndex: 1 }} />

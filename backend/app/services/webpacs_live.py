@@ -15,6 +15,7 @@ B 클라이언트 간 열람은 인메모리 하트비트로 보강한다.
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -444,23 +445,31 @@ def _cache_path(sop_uid: str) -> Path:
 # ① A 로 같은 수 MB 를 두 번 받고 ② 같은 .part 에 동시 기록해 캐시가 깨졌다(손상 재시도 경로가
 # 그 증거). SOP 단위 락으로 한 번만 받고 나머지는 그 결과를 기다린다.
 _INFLIGHT_LOCK = threading.Lock()
-_INFLIGHT: dict[str, threading.Lock] = {}
-_DEC_INFLIGHT: dict[str, threading.Lock] = {}
+# key → [Lock, 참조 수]. 예전엔 "잠기지 않은 항목"을 회수했는데, 락 객체를 이미 받아 들고
+# acquire 직전인 스레드의 항목도 그 조건을 만족한다 — 회수되면 뒤이은 요청이 **새 락**을 만들어
+# 같은 SOP 를 동시에 내려받는다(상호배제 붕괴). 참조 수가 0 일 때만 지운다.
+_INFLIGHT: dict[str, list] = {}
+_DEC_INFLIGHT: dict[str, list] = {}
 
 
-def _named_lock(registry: dict[str, threading.Lock], key: str) -> threading.Lock:
+@contextlib.contextmanager
+def _named_lock(registry: dict[str, list], key: str):
     with _INFLIGHT_LOCK:
-        lk = registry.get(key)
-        if lk is None:
-            lk = registry[key] = threading.Lock()
-        if len(registry) > 4096:       # 유휴 락 정리(잠기지 않은 것만)
-            for k in [k for k, v in list(registry.items()) if not v.locked()][:2048]:
-                if k != key:
-                    registry.pop(k, None)
-        return lk
+        ent = registry.get(key)
+        if ent is None:
+            ent = registry[key] = [threading.Lock(), 0]
+        ent[1] += 1
+    try:
+        with ent[0]:
+            yield
+    finally:
+        with _INFLIGHT_LOCK:
+            ent[1] -= 1
+            if ent[1] <= 0 and registry.get(key) is ent:
+                del registry[key]
 
 
-def _sop_lock(sop_uid: str) -> threading.Lock:
+def _sop_lock(sop_uid: str):
     return _named_lock(_INFLIGHT, sop_uid)
 
 
@@ -545,6 +554,15 @@ def _prune_cache(force: bool = False) -> None:
         files = sorted(CACHE_DIR.glob("*.dcm"), key=lambda f: f.stat().st_mtime)
         for f in files[:-CACHE_MAX_FILES] if len(files) > CACHE_MAX_FILES else []:
             f.unlink(missing_ok=True)
+        # os.replace 실패·프로세스 중단으로 남은 임시 파일 회수 — glob("*.dcm") 이 못 잡아
+        # 무한정 쌓이던 것들. 1시간 넘게 방치된 것만(진행 중인 쓰기는 건드리지 않는다).
+        cutoff = time.time() - 3600
+        for f in CACHE_DIR.glob("*.part"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                pass
     except OSError:
         pass
 
