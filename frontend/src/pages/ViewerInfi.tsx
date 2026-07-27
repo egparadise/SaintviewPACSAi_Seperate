@@ -809,14 +809,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     setHpName(rule.name);
     say(`행잉 프로토콜 적용 — ${rule.name}`);
   };
-  // 과거검사 시리즈 로드 (Related Exam 버튼)
-  const loadPrior = (reId: number, uid: string, label: string) => {
-    if (priorLoaded.has(reId)) return;
-    api.seriesTree(reId).then((r) => {
-      setPriorLoaded((s) => new Set(s).add(reId));
-      setPriorSeries((ps) => [...ps, ...r.series.map((s) => ({ uid, label, s }))]);
-    }).catch(() => {});
-  };
+  // 과거검사 시리즈 로드는 우측 판독 도크의 History 탭 → dockLoadPrior 단일 경로로 통합했다.
+  // (썸네일 패널의 중복 "+MMDD" 버튼을 제거하면서 그 전용 loadPrior 도 함께 제거 — 죽은 코드 방지)
   const upd = useCallback((i: number, patch: Partial<Pane>) => {
     setPanes((ps) => ps.map((p, k) => (k === i ? { ...p, ...patch } : p)));
   }, []);
@@ -2737,29 +2731,16 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           </div>
         </div>
       ))}
-      {(curD.related_exams ?? []).map((re) => !priorLoaded.has(re.id) && (
-        <button key={re.id} onClick={() => loadPrior(re.id, re.study_uid, re.study_date)}
-                title={`과거검사 열기 — ${re.modality} ${re.study_desc}`}
-                style={{ fontSize: 10, color: "#facc15" }}>
-          +{re.study_date.slice(4)} {re.modality}
-        </button>
-      ))}
-      {priorSeries.map((e) => (
-        <div key={`${e.uid}-${e.s.series_uid}`} draggable data-suid={e.s.series_uid}
-             onDragStart={(ev) => { ev.dataTransfer.setData("application/x-sv-series", e.s.series_uid); ev.dataTransfer.effectAllowed = "copy"; }}
-             onClick={() => upd(active, { series: e.s, index: 0, studyUid: e.uid })}
-             title={`[과거 ${e.label}] Se${e.s.series_number} · ${e.s.series_desc}\n· 드래그 → 원하는 페인에 놓기`}
-             style={{ cursor: "pointer", textAlign: "center", fontSize: 10, flexShrink: 0,
-                      border: thumbBorder(e.s.series_uid, "1px solid #854d0e"),
-                      borderRadius: 3, background: "#000" }}>
-        {e.s.instances[0] && (
-          <img src={e.s.instances[0].preview_url} alt="" loading="lazy" decoding="async" style={{ width: "100%", display: "block" }} />
-        )}
-        <div style={{ color: "#facc15", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-          P·{e.label.slice(4)}
+      {/* 과거검사(Related Exam)는 여기 표시하지 않는다 — 우측 판독 도크의 History 탭이
+          날짜·모달리티·검사명·썸네일과 클릭 로드(dockLoadPrior)를 모두 제공하므로 중복이다.
+          이 시리즈 패널은 **현재 검사의 시리즈**만 담아 섞임 없이 읽히게 한다.
+          (loadPrior 로 이미 불러온 과거 시리즈는 페인·Crosslink 에서 계속 정상 동작한다) */}
+      {priorSeries.length > 0 && (
+        <div title="불러온 과거검사 시리즈는 History 탭에서 관리합니다"
+             style={{ fontSize: 9, color: "#854d0e", textAlign: "center", padding: "2px 0" }}>
+          과거 {priorSeries.length}
         </div>
-        </div>
-      ))}
+      )}
     </div>
   );
 

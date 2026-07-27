@@ -11,6 +11,8 @@ import { IN_PALETTE } from "../lib/infiConfig";
 import { screenApiIssue } from "../lib/screens";
 import { SC_ACTIONS, SC_DEFAULTS, displayKey } from "../lib/shortcutDefs";
 import { ToolIconTy } from "../components/ToolIconTy";
+import { APP_VERSION, BUILD_DATE, PRODUCT_NAME, VENDOR } from "../lib/appVersion";
+import { SpeedTestPanel } from "./SpeedTestPanel";
 import { AnatomyIcon } from "../lib/anatomyIcons";
 import { HospitalsPanel, ModalityPanel, OverviewPanel, ServerPanel, StoragePanel, UsersPanel } from "./admin/ServerAdmin";
 import {
@@ -80,6 +82,11 @@ const TREE: { key: string; label: string; admin?: boolean; scope: SettingsScope;
   { key: "shortcuts", label: "단축키 (Mouse·Key)", scope: "viewer" },
   { key: "policy", label: "정책 (Policy)", scope: "viewer" },
   { key: "hp", label: "행잉 (HP)", scope: "viewer" },
+  { key: "speed", label: "속도 측정 (Speed Test)", scope: "viewer" },
+  // 정보 — 버전·적용일자·제조사(지속적인 버전 관리). 모든 scope 에서 접근 가능하도록 각 scope 에 배치
+  { key: "about", label: "정보 (About)", scope: "viewer" },
+  { key: "about", label: "정보 (About)", scope: "system" },
+  { key: "about", label: "정보 (About)", scope: "hospital" },
 ];
 const SCOPE_TITLE: Record<SettingsScope, string> = {
   system: "시스템 설정", hospital: "병원 설정", viewer: "뷰어 설정",
@@ -599,7 +606,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
           <span style={{ marginLeft: 8, fontSize: 11.5, color: "var(--text-secondary)" }}>
             {scope === "system" ? "서버 운영" : scope === "hospital" ? "병원별 배치 구성" : "사용자·판독 환경"}
           </span>
-          <button style={{ marginLeft: "auto", marginRight: 6 }} title={maxed ? "기본 크기로 복원" : "전체 화면으로 크게 보기"}
+          {/* 버전 표기 — 지속적인 버전 관리용. 클릭 시 [정보] 항목으로 이동(상세: 적용일자·제조사) */}
+          <span onClick={() => setPage("about")} title={`${PRODUCT_NAME} — 클릭하면 정보 보기`}
+                style={{ marginLeft: "auto", marginRight: 10, fontSize: 11.5, cursor: "pointer",
+                         color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+            v{APP_VERSION}
+          </span>
+          <button style={{ marginRight: 6 }} title={maxed ? "기본 크기로 복원" : "전체 화면으로 크게 보기"}
                   onClick={() => setMaxed((m) => !m)}>{maxed ? "❐ 복원" : "⬜ 최대화"}</button>
           <button onClick={onClose}>닫기</button>
         </div>
@@ -2135,6 +2148,28 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   setSaved("행잉 프로토콜 저장됨 — 왼쪽 ⟳ Refresh 후 뷰어 재오픈 시 적용");
                 }}
               />
+            )}
+
+            {page === "speed" && (
+              <Group title="영상 열기 속도 측정">
+                <SpeedTestPanel />
+              </Group>
+            )}
+
+            {page === "about" && (
+              <Group title="정보 (About)">
+                <Row label="제품">{PRODUCT_NAME}</Row>
+                <Row label="현재 Version">
+                  <b style={{ fontSize: 14, letterSpacing: 0.3 }}>v{APP_VERSION}</b>
+                </Row>
+                <Row label="버전 적용일자">{BUILD_DATE || "—"}</Row>
+                <Row label="제조사">{VENDOR}</Row>
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)",
+                              fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                  버전은 배포본 빌드 시점에 자동 기록됩니다(적용일자 = 빌드 일자).<br />
+                  기술 지원·문의: {VENDOR}
+                </div>
+              </Group>
             )}
 
             {page === "pdf" && isAdmin && (

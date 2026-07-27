@@ -122,3 +122,33 @@ cd backend && py -3.11 seed_sample.py
 **요약**: zip 해제 → `pip install`·`npm install` → `start_viewer_suite.bat` → `seed_sample.py`
 → [WebPACS] 접속 설정에 A 주소·계정 → [연결 테스트] → [Live] 또는 [WebPACS]로 열람.
 A 서버는 손대지 않습니다.
+
+---
+
+## 7. ⚡ 느리다면 여기부터 (실서버 점검 결과)
+
+실제 배포 서버(nginx 서빙) 점검에서 **가장 큰 두 가지**가 발견됐다. 코드가 아니라 **서버 설정** 문제다.
+
+| 증상 | 확인 방법 | 조치 |
+|---|---|---|
+| **JS 무압축 전송** (823KB 그대로) | 브라우저 F12 > 네트워크 > `index-*.js` 의 "전송" ≈ "크기" 면 무압축 | `deploy/nginx-viewer.conf` 의 `gzip_static on;` + `gzip on;` 적용 → **823KB → 220KB** |
+| **자산 캐시 없음** | 응답 헤더에 `Cache-Control` 없음 | 같은 파일의 `/assets/` 블록(`immutable, max-age=1y`) 적용 → 재방문 시 재검증 0회 |
+
+```bash
+# 서버에서 확인
+curl -sI https://<주소>/assets/index-XXXX.js | grep -iE "content-encoding|cache-control|content-length"
+#  → content-encoding: gzip  와  cache-control: ...immutable  이 나와야 정상
+```
+
+빌드가 `.gz`/`.br` 를 함께 만들어 두므로 `gzip_static on;` 이면 **런타임 CPU 없이** 압축본이 나간다.
+
+### 그래도 느리면 — 설정에서 직접 측정
+
+**설정 > 속도 측정 (Speed Test)** 에서 [▶ 속도 측정] 을 누르면
+① 서버 왕복 ② 검사 정보 ③ 시리즈 목록 ④ 첫 영상(콜드) ⑤ 재요청(웜) ⑥ 실효 전송속도
+를 **그 서버·그 회선 기준**으로 재고, 어느 구간이 병목인지와 조치를 바로 알려준다.
+
+자주 나오는 판정:
+- 🔴 *개발(dev) 모드로 서빙 중* → 서버에서 `start_viewer_suite.bat`(인자 없이) 재기동
+- 🔴 *첫 영상이 큰 PNG* → 설정 > 병원 설정 > 뷰어 영상 형식을 **JPEG(품질 90)** 로
+- 🟠 *서버 왕복이 큼* → 회선/거리 문제. 프리페치·캐시가 2회차부터 흡수

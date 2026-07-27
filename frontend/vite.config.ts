@@ -1,7 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { viteCommonjs } from '@originjs/vite-plugin-commonjs'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { gzipSync, brotliCompressSync } from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -53,8 +54,45 @@ const proxyConfig = {
   },
 }
 
+// 버전 정보 주입 — package.json 의 version 이 단일 소스, 적용일자는 빌드 시각.
+// 설정창 헤더·[정보] 항목이 이 값을 표시한다(lib/appVersion.ts).
+const pkgVersion = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf-8')).version ?? '0.0.0'
+const buildDate = new Date().toISOString().slice(0, 10)
+
+// ⚡ 사전 압축 — 빌드 산출물 옆에 .gz/.br 를 만들어 둔다.
+// nginx 가 `gzip_static on;`(+`brotli_static on;`)이면 이 파일을 그대로 보내므로
+// **런타임 CPU 0 으로 전송량이 1/4** 이 된다(실측: index-*.js 823KB → gzip 약 200KB).
+// 실서버 점검에서 nginx gzip 이 꺼져 있어 823KB 를 그대로 보내고 있었다.
+function precompress() {
+  return {
+    name: 'sv-precompress',
+    apply: 'build' as const,
+    closeBundle() {
+      const dir = new URL('./dist/assets/', import.meta.url)
+      let n = 0, saved = 0
+      for (const f of readdirSync(dir)) {
+        if (!/\.(js|css|svg|json|html)$/.test(f)) continue
+        const p = new URL(f, dir)
+        const raw = readFileSync(p)
+        if (raw.length < 1024) continue
+        const gz = gzipSync(raw, { level: 9 })
+        writeFileSync(new URL(f + '.gz', dir), gz)
+        const br = brotliCompressSync(raw)
+        writeFileSync(new URL(f + '.br', dir), br)
+        n++; saved += raw.length - br.length
+      }
+      if (n) console.log(`  사전 압축 ${n}개 (.gz/.br) — 절감 ${(saved / 1024 / 1024).toFixed(2)}MB`)
+    },
+  }
+}
+
 export default defineConfig(({ command }) => ({
-  plugins: [viteCommonjs(), react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkgVersion),
+    __BUILD_DATE__: JSON.stringify(buildDate),
+  },
+  plugins: [viteCommonjs(), react(), precompress()],
   optimizeDeps: {
     exclude: ['@cornerstonejs/dicom-image-loader'],
     include: ['dicom-parser'],
