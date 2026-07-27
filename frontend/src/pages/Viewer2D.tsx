@@ -8,7 +8,11 @@ import { GridPicker } from "../lib/GridPicker";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
 import { Splitter, clampSz } from "../lib/Splitter";
-import { DEFAULT_WL_PRESETS, mammoAssign, type HpRule } from "../lib/viewerConfig";
+import { DEFAULT_WL_PRESETS, mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
+import {
+  DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgRatioBox, mgStamp, mgWallByCol,
+  readMgCfg, toRC as toRC2, useTileSizes, type MgBox, type MgCfg, type MgFit,
+} from "../lib/mgHang";
 import { ToolIconTy } from "../components/ToolIconTy";
 import { AnatomyIcon } from "../lib/anatomyIcons";
 import { ReportDock } from "../components/ReportDock";
@@ -623,6 +627,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (n.has(k)) n.delete(k); else n.add(k);
     return n;
   });
+  // 2D-MG — 유방촬영 좌우 사이 공기 여백 제거(체크 시). 설정: 뷰어 공통 > 2D 행잉 > MG
+  const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
+  const [mgOn, setMgOn] = useState(DEFAULT_MG_CFG.on);
+  const [mgBoxes, setMgBoxes] = useState<Record<string, MgBox | null>>({});   // SOP → 조직 경계상자
+  const { sizes: tileSizes, sizeRef } = useTileSizes();
+  // window 리스너(빈 deps) 안의 드래그 경로가 최신 보정 함수를 쓰도록 — 아래 mgAt 정의 후 대입
+  const mgAtRef = useRef<(p: PaneState, rect: { width: number; height: number }) => PaneState>((p) => p);
   // TY-3(3): Crosslink 5모드 — 기존 syncScroll(Link 단일)을 확장. off/auto_sync/sync_other/scout/all_lines
   const [xmode, setXmode] = useState<XlinkMode>("off");
   const xmodeRef = useRef(xmode);
@@ -976,7 +987,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         hanging2d?: Record<string, string | { s: string; i: string }>;
         hanging2d_common_on?: boolean;
         hanging2d_by_viewer?: Record<string, Record<string, string | { s: string; i: string }>>;
+        mg_hang?: unknown;
       };
+      // 2D-MG(유방 여백 제거) — 체크 초기값·기본 Image layout. 실제 MG 행잉 적용은 아래 전용 effect
+      const mg = readMgCfg(v.mg_hang);
+      setMgCfg(mg);
+      setMgOn(mg.on);
       const merged = { ...DEFAULT_PREFS, ...v };
       if (!merged.wl_presets?.length) merged.wl_presets = WL_PRESETS;
       // 구 기본값 업그레이드(23차: 팔레트·썸네일 확대) — 직접 조절한 값은 유지
@@ -1042,6 +1058,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (m && m.use_on_exam_open !== false) applyHp(m);   // 'Exam 열 때 HP 사용' 꺼진 규칙은 자동적용 제외(수동 메뉴로 적용)
     }).catch(() => {});
   }, [detail.modality, detail.body_part, detail.study_desc, applyHp]);
+
+  /* 2D-MG 행잉 — 4-view 가 한 시리즈에 다 들어 있는 MG 검사(대부분)는 Series 2×2 로 걸면 3칸이 빈다.
+     설정(뷰어 공통 > 2D 행잉 > MG)의 Image layout(1×2/2×2/2×3) 타일로 건다.
+     시리즈·설정이 둘 다 준비된 뒤 실행되므로 로드 순서 경합이 없다. */
+  const mgHungRef = useRef("");
+  useEffect(() => {
+    if (detail.modality !== "MG" || !series.length) return;
+    const key = `${detail.id}:${mgCfg.on}:${mgCfg.layout}`;
+    if (mgHungRef.current === key) return;
+    // 뷰별 시리즈가 따로 있는 검사(R CC/L CC/…)는 기존 표준 2×2 페인 행잉 유지
+    if (!mgCfg.on || mammoAssign(series).some(Boolean) || (series[0]?.instances.length ?? 0) < 2) return;
+    mgHungRef.current = key;
+    const il = toRC2(mgCfg.layout);
+    hang2dImgRef.current = il;
+    setLayout("1x1");
+    setImgLay(il);
+    setPanes((prev) => ({ ...prev, p0: { ...prev.p0, il, index: 0 } }));
+  }, [detail.id, detail.modality, series, mgCfg.on, mgCfg.layout]);
 
   /* 시리즈 트리 + 리포트 로드 */
   useEffect(() => {
@@ -1613,7 +1647,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const inst = p?.series?.instances[p.index];
         if (!el || !p?.series || !inst) return;
         const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
-        const pt = screenToImage(clientX, clientY, el.getBoundingClientRect(), p, aspect);
+        const elRect = el.getBoundingClientRect();
+        const pt = screenToImage(clientX, clientY, elRect, mgAtRef.current(p, elRect), aspect);
         if (!pt) return;   // 이미지 밖 — 유지
         completeToolRef.current("cursor3d", d.pid, { sop_uid: inst.sop_uid, series_uid: p.series.series_uid }, [pt], inst);
       });
@@ -1683,8 +1718,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const inst = p?.series?.instances[p.index];
       if (!p?.series || !inst) return;
       const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
-      const a = screenToImage(Math.min(r.sx, r.cx), Math.min(r.sy, r.cy), r.rect, p, aspect);
-      const b = screenToImage(Math.max(r.sx, r.cx), Math.max(r.sy, r.cy), r.rect, p, aspect);
+      const a = screenToImage(Math.min(r.sx, r.cx), Math.min(r.sy, r.cy), r.rect, mgAt(p, r.rect), aspect);
+      const b = screenToImage(Math.max(r.sx, r.cx), Math.max(r.sy, r.cy), r.rect, mgAt(p, r.rect), aspect);
       if (!a || !b) { setStatus("영역 W/L — 이미지 안에서 박스를 지정하세요"); return; }
       const exId = openTabsRef.current.find((t) => t.uid === p.studyUid)?.id ?? detail.id;
       void api.roiStats(exId, { sop_uid: inst.sop_uid, kind: "rect", points: [a, b] }).then((st) => {
@@ -1713,7 +1748,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!tool || !p.series || !inst) return;
     const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-    const start = screenToImage(e.clientX, e.clientY, rect, p, aspect);
+    const start = screenToImage(e.clientX, e.clientY, rect, mgAt(p, rect), aspect);
     if (!start) return;
     annoDragRef.current = { type: "draw", pid, tool, sop: inst.sop_uid, series: p.series.series_uid,
                             start, cur: start, rect, aspect, inst };
@@ -1727,7 +1762,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!p.series || !inst) return;
     const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-    const start = screenToImage(e.clientX, e.clientY, rect, p, aspect);
+    const start = screenToImage(e.clientX, e.clientY, rect, mgAt(p, rect), aspect);
     if (!start) return;
     setSelAnno(null); setSelAnnos(null);
     marqueeRef.current = { pid, rect, aspect, a: start, b: start };
@@ -1754,7 +1789,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!p.series || !inst) return false;
     const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-    const cur = screenToImage(e.clientX, e.clientY, rect, p, aspect);
+    const cur = screenToImage(e.clientX, e.clientY, rect, mgAt(p, rect), aspect);
     if (!cur) return false;
     const cols = inst.cols || 1000, rows = inst.rows || 1000;
     const cx = cur[0] * cols, cy = cur[1] * rows;
@@ -1828,7 +1863,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (OPEN_ENDED.has(tool) && e.detail > 1) return;  // 더블클릭 2번째 mousedown 은 점 추가 안 함
     const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-    const pt = screenToImage(e.clientX, e.clientY, rect, p, aspect);
+    const pt = screenToImage(e.clientX, e.clientY, rect, mgAt(p, rect), aspect);
     if (!pt) return;
     const need = TOOL_PTS[tool] ?? 2;
     const d = draft && draft.pid === pid
@@ -2177,7 +2212,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (ad) {
         const pp = panesRef.current[ad.pid];
         if (!pp) return;
-        const c = screenToImage(e.clientX, e.clientY, ad.rect, pp, ad.aspect);
+        const c = screenToImage(e.clientX, e.clientY, ad.rect, mgAtRef.current(pp, ad.rect), ad.aspect);
         if (!c) return;   // 콘텐츠 밖 — 이번 이동 무시(마지막 값 유지)
         if (ad.type === "draw") {
           ad.cur = c;
@@ -2205,7 +2240,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (mq) {
         const pp = panesRef.current[mq.pid];
         if (!pp) return;
-        const c = screenToImage(e.clientX, e.clientY, mq.rect, pp, mq.aspect);
+        const c = screenToImage(e.clientX, e.clientY, mq.rect, mgAtRef.current(pp, mq.rect), mq.aspect);
         if (!c) return;
         mq.b = c;
         setMarquee({ a: mq.a, b: c });
@@ -2260,7 +2295,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         annoDragRef.current = null;
         if (ad.type === "draw") {
           const pp = panesRef.current[ad.pid];
-          const c = (pp && screenToImage(e.clientX, e.clientY, ad.rect, pp, ad.aspect)) || ad.cur;
+          const c = (pp && screenToImage(e.clientX, e.clientY, ad.rect, mgAtRef.current(pp, ad.rect), ad.aspect)) || ad.cur;
           const dxp = (c[0] - ad.start[0]) * (ad.inst.cols || 1000);
           const dyp = (c[1] - ad.start[1]) * (ad.inst.rows || 1000);
           if (Math.hypot(dxp, dyp) >= 3) {   // 3px(이미지) 이상만 확정 — 클릭 오작동 방지
@@ -2734,6 +2769,49 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
 
   /* 페인 1개 렌더 — 경계 스플리터 뷰포트(행×열 flex) 안에서 사용.
      더블클릭=최대화/복원(spineCurve 드래프트 수집 중에는 종료 전용 — 최대화 금지), 확대경=마우스 추적 3배 렌즈 */
+  // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
+  const mgSeries = (p: PaneState) => (p.series?.modality || "") === "MG";
+  /** 흉벽 방향: 탐지 결과 우선 → 검사명 laterality → 타일 열 위치 */
+  const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number): MgBox | null | undefined => {
+    if (mgCfg.detect === "auto") {
+      const b = mgBoxes[inst.sop_uid];
+      if (b === undefined) return undefined;    // 아직 탐지 전 — 원본으로 두고 완료되면 반영
+      if (b) return b;
+    }
+    // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
+    const lat = mammoView(p.series?.series_desc ?? "").lat;
+    const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, cols);
+    return mgRatioBox(wall, mgCfg.ratio);
+  };
+  const mgFitFor = (pid: string, t: number, p: PaneState, inst: InstanceNode | undefined): MgFit | null => {
+    if (!mgOn || !inst || !mgSeries(p)) return null;
+    const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
+    // 단일 이미지 페인은 페인 자체가 타일 — 기존 페인 실측(ResizeObserver)을 그대로 쓴다
+    const size = tiles > 1 ? tileSizes[`${pid}:${t}`] : paneSizes.current[pid];
+    if (!size) return null;                     // 실측 전 — 다음 프레임에 적용
+    const box = mgBoxFor(p, inst, t, p.il?.c ?? 1);
+    if (box === undefined) return null;
+    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV);
+  };
+  /** 주석·측정 좌표용 — 페인 사각형만 있으면 되는 경로(단일 이미지 페인)에서 보정을 흡수 */
+  const mgAt = (p: PaneState, rect: { width: number; height: number }): PaneState => {
+    const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
+    if (!mgOn || tiles > 1 || !mgSeries(p)) return p;
+    const inst = p.series?.instances[p.index];
+    if (!inst) return p;
+    const box = mgBoxFor(p, inst, 0, 1);
+    if (box === undefined) return p;
+    return mgApply(p, mgFit({ w: rect.width, h: rect.height },
+      { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV));
+  };
+  mgAtRef.current = mgAt;
+  /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
+  const mgOnImgLoad = (p: PaneState, sop: string | undefined, el: HTMLImageElement) => {
+    if (!mgSeries(p) || !sop || sop in mgBoxes) return;
+    const b = mgProbe(sop, el, mgCfg.thr);
+    setMgBoxes((m) => (sop in m ? m : { ...m, [sop]: b }));
+  };
+
   const renderPane = (pid: string) => {
     const p = panes[pid];
     // 페인별 Image Layout — 이 페인에 지정된 il 만 적용(다른 페인은 1×1 유지)
@@ -2811,18 +2889,27 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             ↓ 이 페인에 시리즈 표시
           </div>
         )}
-        {url && (
+        {url && (() => {
+          // 2D-MG — 타일마다 다른 보정(흉벽을 바깥에 붙이고 공기 여백 제거)이 필요하므로,
+          // 다중 타일일 때는 페인 공통 변환을 비우고 타일별 변환을 준다. 단일 이미지는 기존대로 공통.
+          const xf = (q: PaneState) =>
+            `translate(${q.tx}px,${q.ty}px) scale(${q.zoom * (p.flipH ? -1 : 1)},${q.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`;
+          const fit0 = tileCount <= 1 ? mgFitFor(pid, 0, p, inst) : null;
+          const mgTiles = tileCount > 1 && mgOn && mgSeries(p);
+          return (
           <div style={{
             position: "absolute", inset: 0,
-            transform: `translate(${p.tx}px,${p.ty}px) scale(${p.zoom * (p.flipH ? -1 : 1)},${p.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`,
+            transform: mgTiles ? undefined : xf(mgApply(p, fit0)),
           }}>
             {tileCount <= 1 ? (
               <>
                 <img src={url} alt="" draggable={false}
+                     onLoad={(e) => mgOnImgLoad(p, inst?.sop_uid, e.currentTarget)}
                      style={{
                        width: "100%", height: "100%", objectFit: "contain", userSelect: "none",
                        filter: paneFilter(p),
                      }} />
+                {/* 주석 SVG 는 이 변환 wrapper 안에 있어 MG 보정을 자동으로 함께 받는다 */}
                 {inst && annoSvg(pid, p, inst)}
               </>
             ) : (
@@ -2834,19 +2921,29 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               }}>
                 {Array.from({ length: tileCount }, (_, k) => {
                   const u = renderedUrlAt(p, p.index + k);
-                  return u ? (
-                    <img key={k} src={u} alt="" draggable={false}
-                         style={{
-                           width: "100%", height: "100%", objectFit: "contain", userSelect: "none",
-                           minWidth: 0, minHeight: 0,
-                           filter: paneFilter(p),
-                         }} />
-                  ) : <div key={k} />;
+                  const ti = p.series?.instances[p.index + k];
+                  const fk = mgTiles ? mgFitFor(pid, k, p, ti) : null;
+                  return (
+                    <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)}
+                         style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0 }}>
+                      {u && (
+                        <img src={u} alt="" draggable={false}
+                             onLoad={(e) => mgOnImgLoad(p, ti?.sop_uid, e.currentTarget)}
+                             style={{
+                               position: "absolute", inset: 0,
+                               width: "100%", height: "100%", objectFit: "contain", userSelect: "none",
+                               transform: mgTiles ? xf(mgApply(p, fk)) : undefined,
+                               filter: paneFilter(p),
+                             }} />
+                      )}
+                    </div>
+                  );
                 })}
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
         {/* 확대경 렌즈 — 마우스 위치 3배 확대 (배경이미지 트릭, In Viewer 동일) */}
         {magOn && magPos && magPos.pid === pid && url && inst && tileCount <= 1 && (
           <div style={{
@@ -3984,6 +4081,28 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           </span>
         )}
         <div style={{ flex: 1 }} />
+        {/* 2D-MG — MG 검사를 열었을 때만 노출(T-View·SaintView 공통).
+            체크: 좌우 사이 공기 여백을 잘라내고 흉벽을 바깥에 붙여 배치 / 해제: 원본 그대로 */}
+        {Object.values(panes).some((pp) => (pp.series?.modality || "") === "MG") && (
+          <span style={{ display: "flex", alignItems: "center", gap: 6, marginRight: 14, whiteSpace: "nowrap" }}>
+            <label title="2D-MG — 유방 사이 빈 공간(공기)을 잘라내고 흉벽을 바깥에 붙여 배치. 해제하면 원본 그대로"
+                   style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5,
+                            color: "#f0abfc", fontWeight: 700, cursor: "pointer" }}>
+              <input type="checkbox" checked={mgOn} onChange={(e) => setMgOn(e.target.checked)} />2D-MG
+            </label>
+            <select value={`${panes[activePane]?.il?.r ?? 1}x${panes[activePane]?.il?.c ?? 1}`}
+                    title="MG 배치 — Image layout"
+                    onChange={(e) => { const v = toRC2(e.target.value); setLayout("1x1"); setImgLay(v); patch(activePane, { il: v, index: 0 }); }}
+                    style={{ fontSize: 11, padding: "0 2px" }}>
+              {MG_LAYOUTS.map((l) => <option key={l} value={l}>{l.replace("x", "×")}</option>)}
+              {!(MG_LAYOUTS as readonly string[]).includes(`${panes[activePane]?.il?.r ?? 1}x${panes[activePane]?.il?.c ?? 1}`) && (
+                <option value={`${panes[activePane]?.il?.r ?? 1}x${panes[activePane]?.il?.c ?? 1}`}>
+                  {panes[activePane]?.il?.r ?? 1}×{panes[activePane]?.il?.c ?? 1}
+                </option>
+              )}
+            </select>
+          </span>
+        )}
         {/* SaintView — In-View 크로스링크 바(체크박스)를 상태바에 통합. xmode 5모드 매핑 */}
         {skin === "saint" && (() => {
           const XB: React.CSSProperties = { display: "flex", alignItems: "center", gap: 4, fontSize: 11.5,

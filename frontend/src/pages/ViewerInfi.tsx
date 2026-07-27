@@ -26,7 +26,11 @@ import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
-import { mammoAssign, type HpRule } from "../lib/viewerConfig";
+import { mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
+import {
+  DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgRatioBox,
+  mgStamp, mgWallByCol, readMgCfg, toRC, useTileSizes, type MgBox, type MgCfg, type MgFit,
+} from "../lib/mgHang";
 
 // 해부학 아이콘 — 심장(CTR)/척추(Spine)/측만(Cobb)/골반+다리(Limb) 그림 (em 크기 = 칩 글리프에 맞춰 확대)
 const ANATOMY_ICONS: Record<string, React.ReactNode> = {
@@ -362,6 +366,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // §3.3 Crosslink 5기능 — 전부 동작: crosslink=마스터, auto_sync=같은 검사, sync_other=다른 검사(과거),
   // scout=활성 페인 현재 이미지 절단선, all_lines=활성 시리즈 전체 절단선
   const [xlink, setXlink] = useState<Record<string, boolean>>({ crosslink: true, auto_sync: true, scout: true });
+  // 2D-MG — 유방촬영 좌우 사이 공기 여백 제거(체크 시). 설정: 뷰어 공통 > 2D 행잉 > MG
+  const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
+  const [mgOn, setMgOn] = useState(DEFAULT_MG_CFG.on);
+  const [mgBoxes, setMgBoxes] = useState<Record<string, MgBox | null>>({});   // SOP → 조직 경계상자
+  const { sizes: tileSizes, sizeRef } = useTileSizes();
   const [toast, setToast] = useState("");
   // §3.1 툴바 상단(원본): Report 도크(ReportDock — TY 와 동일 기능) + Prev/Next 워크리스트 내비게이션
   // 열림 상태는 viewer.prefs.infi_report_dock 로 계정 로밍
@@ -550,7 +559,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         hanging2d?: Record<string, string | { s: string; i: string }>;
         hanging2d_common_on?: boolean;
         hanging2d_by_viewer?: Record<string, Record<string, string | { s: string; i: string }>>;
+        mg_hang?: unknown;
       };
+      // 2D-MG(유방 여백 제거) 설정 — 체크 초기값·기본 Image layout 을 여기서 확정
+      const mg = readMgCfg(prefsV.mg_hang);
+      setMgCfg(mg);
+      setMgOn(mg.on);
       // In-View 기본 레이아웃 = infi_default_layout. 뷰어 공통 2D 행잉(공통/뷰어별 infi)을 병합:
       // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 우선. RxC 문자열 → {r,c} 변환.
       const defMap: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }> =
@@ -634,8 +648,14 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       const ma = mammo ? mammoAssign(hangList[0].series) : null;
       const mammoSeries = ma && ma.some(Boolean) ? ma : null;   // 매칭 0이면 순서대로 폴백(빈 페인 방지)
       if (mammo) setOvlVisible(false);
+      // 4-view 가 한 시리즈에 다 들어 있는 검사(대부분의 MG)는 Series 2×2 로 걸면 3칸이 빈다.
+      // 2D-MG 사용 시엔 Series 1×1 + 설정된 Image layout(1×2/2×2/2×3) 타일로 건다.
+      const mgTiled = mammo && mg.on && !mammoSeries
+        && (hangList[0].series[0]?.instances.length ?? 0) > 1;
+      const mgIl = toRC(mg.layout);
       let r: number, c: number;
-      if (mammo) { r = 2; c = 2; setHpName("Mammo 2×2"); }
+      if (mgTiled) { r = 1; c = 1; setHpName(`Mammo ${mgIl.r}×${mgIl.c}`); }
+      else if (mammo) { r = 2; c = 2; setHpName("Mammo 2×2"); }
       else if (single && hpMatch) {
         const vg = hpMatch.displays?.find((d) => d.role === "viewer")?.grid ?? hpMatch.s;
         r = Math.min(vg.r, 10); c = Math.min(vg.c, 10);
@@ -656,6 +676,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           // 단독 검사: 페인마다 시리즈를 순서대로(부족하면 빈 페인), Image 레이아웃은 설정값. Mammo 는 표준 4-view 배치.
           const s0 = mammoSeries ? (mammoSeries[i] ?? null) : (hangList[0].series[i] ?? null);
           const p = { ...initPane(hangList[0].d.study_uid), series: s0 };
+          if (mgTiled) { p.il = mgIl; return applyPStateToPane(p); }   // 2D-MG 타일 행잉이 최우선
           if (hpMatch) {   // IN-2 ①: HP 규칙의 Image layout·W/L 적용 (TY applyHp 동일)
             p.il = { r: Math.min(hpMatch.i.r, 10), c: Math.min(hpMatch.i.c, 10) };
             if (hpMatch.wl !== undefined) p.wl = hpMatch.wl ?? "";
@@ -1619,12 +1640,42 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const screenToImg = (clientX: number, clientY: number, tileEl: HTMLElement, p: Pane, inst: InstanceNode):
       { x: number; y: number } => {
     const r = tileEl.getBoundingClientRect();
+    // 2D-MG 보정은 타일 DOM(data-sv-mg)에서 되읽는다 — 드래그 경로는 tileEl 만 들고 다니므로
+    // 여기서 흡수해야 주석·측정·마퀴가 잘라낸 배치에서도 정확히 찍힌다.
+    const pe = mgFromEl(tileEl, p);
     const s0 = Math.min(r.width / (inst.cols || 1), r.height / (inst.rows || 1));
-    const s = s0 * p.zoom;
+    const s = s0 * pe.zoom;
     return {
-      x: (clientX - (r.left + r.width / 2 + p.tx)) / s + inst.cols / 2,
-      y: (clientY - (r.top + r.height / 2 + p.ty)) / s + inst.rows / 2,
+      x: (clientX - (r.left + r.width / 2 + pe.tx)) / s + inst.cols / 2,
+      y: (clientY - (r.top + r.height / 2 + pe.ty)) / s + inst.rows / 2,
     };
+  };
+
+  // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
+  const mgSeries = (p: Pane) => (p.series?.modality || "") === "MG";
+  /** 탐지 결과가 있으면 그걸로, 없으면(canvas 오염·고정비율 모드) 검사명 laterality → 열 위치로 흉벽 추정 */
+  const mgFitFor = (pi: number, t: number, p: Pane, inst: InstanceNode | undefined): MgFit | null => {
+    if (!mgOn || !inst || !mgSeries(p)) return null;
+    const size = tileSizes[`${pi}:${t}`];
+    if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
+    let box: MgBox | null | undefined;
+    if (mgCfg.detect === "auto") {
+      box = mgBoxes[inst.sop_uid];
+      if (box === undefined) return null;         // 아직 탐지 전 — 원본으로 두고 완료되면 반영
+    }
+    if (!box) {
+      // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
+      const lat = mammoView(p.series?.series_desc ?? "").lat;
+      const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, p.il.c);
+      box = mgRatioBox(wall, mgCfg.ratio);
+    }
+    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV);
+  };
+  /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
+  const mgOnImgLoad = (p: Pane, sop: string, el: HTMLImageElement) => {
+    if (!mgSeries(p) || !sop || sop in mgBoxes) return;
+    const b = mgProbe(sop, el, mgCfg.thr);
+    setMgBoxes((m) => (sop in m ? m : { ...m, [sop]: b }));
   };
   // 3DC 홀드-드래그 배치 — 렌더마다 최신 상태·함수 캡처(stale closure 방지), pointermove 는 rAF 스로틀
   c3PlaceRef.current = (cx: number, cy: number) => {
@@ -2470,8 +2521,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         {Array.from({ length: tilesOf(p) }, (_, t) => {
           const idx = p.index + t;
           const inst = insts[idx];
+          // 2D-MG — 이 타일만의 보정(흉벽을 바깥에 붙이고 공기 여백 제거)을 페인 상태에 합성.
+          // pT 를 이미지 변환·주석 레이어가 함께 쓰므로 그린 주석이 그대로 따라간다.
+          const mgf = mgFitFor(pi, t, p, inst);
+          const pT = mgApply(p, mgf);
           return (
-            <div key={t} style={{ position: "relative", overflow: "hidden", background: "#000" }}
+            <div key={t} ref={sizeRef(`${pi}:${t}`)} data-sv-mg={mgStamp(mgf)}
+                 style={{ position: "relative", overflow: "hidden", background: "#000" }}
                  onMouseDown={(e) => {
                    if (e.button !== 0 || !p.series || !inst) return;
                    if (DRAG_TOOLS.has(tool)) {
@@ -2520,9 +2576,9 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                    if (tool !== "magnify" || !p.series || !inst) return;
                    const r = e.currentTarget.getBoundingClientRect();
                    const s0 = Math.min(r.width / (inst.cols || 1), r.height / (inst.rows || 1));
-                   const s = s0 * p.zoom;
-                   const ix = (e.clientX - (r.left + r.width / 2 + p.tx)) / s + inst.cols / 2;
-                   const iy = (e.clientY - (r.top + r.height / 2 + p.ty)) / s + inst.rows / 2;
+                   const s = s0 * pT.zoom;
+                   const ix = (e.clientX - (r.left + r.width / 2 + pT.tx)) / s + inst.cols / 2;
+                   const iy = (e.clientY - (r.top + r.height / 2 + pT.ty)) / s + inst.rows / 2;
                    setMagPos({ pi, t, mx: e.clientX - r.left, my: e.clientY - r.top,
                                nx: ix / (inst.cols || 1), ny: iy / (inst.rows || 1), sc: s });
                  }}
@@ -2532,11 +2588,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                 return (
                 <>
                   <img src={instUrl(p.studyUid || pd.study_uid, p.series, inst, p.wl)} alt="" draggable={false}
+                       onLoad={(e) => mgOnImgLoad(p, inst.sop_uid, e.currentTarget)}
                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
                                 objectFit: "contain",
-                                transform: `translate(${p.tx}px,${p.ty}px) scale(${p.zoom * (p.flipH ? -1 : 1)},${p.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`,
+                                transform: `translate(${pT.tx}px,${pT.ty}px) scale(${pT.zoom * (p.flipH ? -1 : 1)},${pT.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`,
                                 filter: paneFilter(p), userSelect: "none" }} />
-                  <TileAnno inst={inst} pane={p}
+                  <TileAnno inst={inst} pane={pT}
                             annos={annos[inst.sop_uid] ?? []}
                             pend={pend?.sop === inst.sop_uid ? pend.pts : []}
                             pendTool={pend?.sop === inst.sop_uid ? tool : ""}
@@ -2973,7 +3030,29 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                  }} />
         </span>
         {toast && <span style={{ color: "#facc15" }}>{toast}</span>}
-        <span style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
+        <span style={{ display: "flex", gap: 8, marginLeft: "auto", alignItems: "center" }}>
+          {/* 2D-MG — MG 검사를 열었을 때만 노출. 체크: 좌우 사이 공기 여백 제거(흉벽 바깥 정렬) */}
+          {panes.some((pp) => (pp.series?.modality || "") === "MG") && (
+            <>
+              <label title="2D-MG — 유방 사이 빈 공간(공기)을 잘라내고 흉벽을 바깥에 붙여 배치. 해제하면 원본 그대로"
+                     style={{ display: "flex", gap: 3, alignItems: "center", color: "#f0abfc", fontWeight: 700 }}>
+                <input type="checkbox" checked={mgOn} onChange={(e) => setMgOn(e.target.checked)} />
+                2D-MG
+              </label>
+              <select value={`${panes[active]?.il.r ?? 2}x${panes[active]?.il.c ?? 2}`}
+                      title="MG 배치 — Image layout"
+                      onChange={(e) => { const v = toRC(e.target.value); setSLayout({ r: 1, c: 1 }); upd(active, { il: v }); }}
+                      style={{ fontSize: 11, padding: "0 2px" }}>
+                {MG_LAYOUTS.map((l) => <option key={l} value={l}>{l.replace("x", "×")}</option>)}
+                {!(MG_LAYOUTS as readonly string[]).includes(`${panes[active]?.il.r}x${panes[active]?.il.c}`) && (
+                  <option value={`${panes[active]?.il.r}x${panes[active]?.il.c}`}>
+                    {panes[active]?.il.r}×{panes[active]?.il.c}
+                  </option>
+                )}
+              </select>
+              <span style={{ width: 1, height: 13, background: "var(--border)" }} />
+            </>
+          )}
           {IN_CROSSLINK_MODES.map((m) => (
             <label key={m.key} title={m.desc}
                    style={{ display: "flex", gap: 3, alignItems: "center",

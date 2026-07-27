@@ -8,6 +8,7 @@ import {
 import { GridPicker } from "../lib/GridPicker";
 import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, TOOLBAR_DEFS, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
 import { IN_PALETTE } from "../lib/infiConfig";
+import { DEFAULT_MG_CFG, MG_LAYOUTS, readMgCfg, type MgCfg } from "../lib/mgHang";
 import { screenApiIssue } from "../lib/screens";
 import { SC_ACTIONS, SC_DEFAULTS, displayKey } from "../lib/shortcutDefs";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -227,6 +228,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [h2dMap, setH2dMap] = useState<Record<string, { s: string; i: string }>>({});
   const [h2dCommonOn, setH2dCommonOn] = useState(true);
   const [h2dByViewer, setH2dByViewer] = useState<Record<string, Record<string, { s: string; i: string }>>>({});
+  // 2D-MG — MG 좌우 사이 공기 여백 제거 모드(뷰어 3종 공통). viewer.prefs.mg_hang
+  const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
   // 비교(Compare) 설정 — viewer.prefs.compare (뷰어·openV2 가 소비). 편집은 판독(Reading) 탭.
   //  enabled=기능 on/off · multi_monitor=Viewer 모니터 2개+면 비교검사를 다음 모니터에(끝번→첫번 순환) · labels=M/S 녹색 라벨
@@ -411,6 +414,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       const vv = v as { hanging2d_common_on?: boolean; hanging2d_by_viewer?: Record<string, Record<string, { s: string; i: string }>> };
       if (vv.hanging2d_common_on !== undefined) setH2dCommonOn(!!vv.hanging2d_common_on);
       if (vv.hanging2d_by_viewer) setH2dByViewer(vv.hanging2d_by_viewer);
+      setMgCfg(readMgCfg((v as { mg_hang?: unknown }).mg_hang));
       if (v.reportDock !== undefined) setReportDock(v.reportDock);
       const tb = (v as { toolbar?: Record<string, boolean> }).toolbar;
       if (tb) setTbConfig(tb);
@@ -518,6 +522,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       hanging2d: h2dMap,
       hanging2d_common_on: h2dCommonOn,
       hanging2d_by_viewer: h2dByViewer,
+      mg_hang: mgCfg,
       client_viewer: clientViewer,
       compare: cmpCfg,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
@@ -1632,6 +1637,73 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   검사를 열 때 모달리티별 기본 분할 — <b>Series</b>(뷰포트 개수) + <b>Image</b>(페인 내 이미지 타일). 그리드에서 선택.
                 </div>
                 <Hanging2dEditor map={h2dMap} onChange={(m, next) => setH2dMap((p) => ({ ...p, [m]: next }))} />
+
+                {/* MG(유방촬영) 전용 — 좌우 사이 공기 여백 제거(2D-MG). 뷰어 3종 공통 설정 */}
+                <div style={{ marginTop: 14, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
+                    MG — 유방 사이 여백 제거 (2D-MG)
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 7, lineHeight: 1.7 }}>
+                    MG 검사를 열면 뷰어 우측 상단에 <b style={{ color: "#f0abfc" }}>2D-MG</b> 체크박스가 나타납니다.
+                    체크하면 좌·우 유방 사이의 빈 공간(공기)을 잘라내고 <b>흉벽을 바깥쪽 가장자리에 붙여</b> 두 영상이
+                    가운데에서 맞닿게 배치합니다. 해제하면 원본 그대로 표시합니다.
+                    (SaintView·I-View·T-View 공통 적용)
+                  </div>
+                  <Row label="기본 사용">
+                    <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="checkbox" checked={mgCfg.on}
+                             onChange={(e) => setMgCfg({ ...mgCfg, on: e.target.checked })} />
+                      MG 검사를 열 때 2D-MG 를 켠 상태로 시작
+                    </label>
+                  </Row>
+                  <Row label="Image layout">
+                    <select value={mgCfg.layout}
+                            onChange={(e) => setMgCfg({ ...mgCfg, layout: e.target.value })}>
+                      {MG_LAYOUTS.map((l) => (
+                        <option key={l} value={l}>
+                          {l.replace("x", " : ")}
+                          {l === "1x2" ? "  (좌우 2뷰)" : l === "2x2" ? "  (CC/MLO 4뷰)" : "  (6뷰)"}
+                        </option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                      4뷰가 한 시리즈에 들어 있는 검사에 이 타일 분할로 겁니다(행:열).
+                    </span>
+                  </Row>
+                  <Row label="흉벽 판정">
+                    <select value={mgCfg.detect}
+                            onChange={(e) => setMgCfg({ ...mgCfg, detect: e.target.value === "ratio" ? "ratio" : "auto" })}>
+                      <option value="auto">자동 — 영상에서 조직 경계를 찾아 잘라냄 (권장)</option>
+                      <option value="ratio">고정 비율 — 안쪽에서 정해진 비율만큼 잘라냄</option>
+                    </select>
+                  </Row>
+                  {mgCfg.detect === "auto" && (
+                    <Row label="배경 임계값">
+                      <input type="number" min={1} max={40} step={1} value={mgCfg.thr}
+                             onChange={(e) => setMgCfg({ ...mgCfg, thr: Number(e.target.value) || 12 })}
+                             style={{ width: 70 }} /> %
+                      <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                        공기로 볼 밝기 기준. 조직이 잘리면 낮추고, 여백이 남으면 높입니다.
+                      </span>
+                    </Row>
+                  )}
+                  <Row label="고정 비율">
+                    <input type="number" min={0} max={60} step={1} value={mgCfg.ratio}
+                           onChange={(e) => setMgCfg({ ...mgCfg, ratio: Number(e.target.value) || 0 })}
+                           style={{ width: 70 }} /> %
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                      자동 판정이 불가능할 때(외부 서버 영상 등) 안쪽에서 잘라낼 폭.
+                    </span>
+                  </Row>
+                  <Row label="여백">
+                    <input type="number" min={0} max={10} step={1} value={mgCfg.margin}
+                           onChange={(e) => setMgCfg({ ...mgCfg, margin: Number(e.target.value) || 0 })}
+                           style={{ width: 70 }} /> %
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                      조직이 가장자리에 딱 붙지 않도록 남기는 여백.
+                    </span>
+                  </Row>
+                </div>
               </Group>
             )}
             {(page === "viewerTy" || page === "viewerSv") && (
