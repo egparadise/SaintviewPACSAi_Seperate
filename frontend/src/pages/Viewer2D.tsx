@@ -1200,7 +1200,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const mammo = detail.modality === "MG";
       const ma = mammo ? mammoAssign(imgSeries) : null;
       const mammoSeries = ma && ma.some(Boolean) ? ma : null;   // 매칭 0이면 순서대로 폴백(빈 페인 방지)
-      if (mammo) { setLayout("2x2"); setOverlayOn(false); }
+      if (mammo) setLayout("2x2");   // 오버레이는 끄지 않는다 — 환자·검사·W/L 은 판독 필수 정보
       setSelSeries(null);   // 처음 열 때 썸네일 이미지 목록은 모두 접힘 — 더블클릭으로만 펼침
       if (imgSeries[0]) {
         // ② AI 추천 W/L 자동 적용(수동 변경 가능). 합성/비보정 데이터(PixelSpacing 없음)는
@@ -2921,10 +2921,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, cols);
     return mgRatioBox(wall, mgCfg.ratio);
   };
-  // ⚠ 맞붙임 대상 전체를 **같은 배율**로 — 좌우 유방 크기 비교가 판독의 핵심이다
-  const mgSharedZoom: number | undefined = (() => {
-    if (!mgOn) return undefined;
-    let z: number | null = null;
+  // ⚠ 맞붙임 대상 전체를 **같은 물리 배율**로 맞춘다.
+  //    배율(zoom)만 같게 하면 좌·우 촬영의 PixelSpacing 이 다를 때 화면상 크기가 달라진다
+  //    (같은 zoom 인데 RCC 와 LCC 가 다른 크기로 보이던 문제). 맘모는 좌우 크기·밀도 비교가
+  //    판독의 핵심이므로 **화면 1px 이 모든 칸에서 같은 mm** 를 가리켜야 한다.
+  //      화면px/mm = s0·zoom / PixelSpacing  → 이 값(K)을 전 칸 최소값으로 통일하고
+  //      칸마다 zoom = K·PixelSpacing / s0 로 되돌려 준다.
+  //    PixelSpacing 이 하나라도 없으면 물리 정규화를 포기하고 기존처럼 배율만 통일한다.
+  const mgShared = (() => {
+    if (!mgOn) return null;
+    let z: number | null = null;      // 화소 기준 최소 배율(폴백)
+    let K: number | null = null;      // 화면 px / mm
+    let mmOk = true;
     for (const [pid, p] of Object.entries(panes)) {
       if (!mgSeries(p)) continue;
       const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
@@ -2934,11 +2942,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         if (!inst || !size) continue;
         const c = mgZoomOf(size, { w: inst.cols, h: inst.rows },
                            mgBoxFor(p, inst, t, p.il?.c ?? 1), mgCfg);
-        if (c !== null) z = z === null ? c : Math.min(z, c);
+        if (c === null) continue;
+        z = z === null ? c : Math.min(z, c);
+        const ps = inst.pixel_spacing?.[1] ?? inst.pixel_spacing?.[0] ?? 0;
+        const s0 = Math.min(size.w / (inst.cols || 1), size.h / (inst.rows || 1));
+        if (ps > 0 && s0 > 0) { const k = (c * s0) / ps; K = K === null ? k : Math.min(K, k); }
+        else mmOk = false;
       }
     }
-    return z ?? undefined;
+    return { z, K: mmOk ? K : null };
   })();
+  /** 이 칸에 적용할 강제 배율 — 물리 정규화 가능하면 mm 기준, 아니면 화소 기준 최소 배율 */
+  const mgForceZoom = (size: { w: number; h: number }, inst: InstanceNode): number | undefined => {
+    if (!mgShared) return undefined;
+    const ps = inst.pixel_spacing?.[1] ?? inst.pixel_spacing?.[0] ?? 0;
+    const s0 = Math.min(size.w / (inst.cols || 1), size.h / (inst.rows || 1));
+    if (mgShared.K && ps > 0 && s0 > 0) return (mgShared.K * ps) / s0;
+    return mgShared.z ?? undefined;
+  };
   const mgFitFor = (pid: string, t: number, p: PaneState, inst: InstanceNode | undefined): MgFit | null => {
     if (!mgOn || !inst || !mgSeries(p)) return null;
     // 마주 볼 짝이 없는 칸은 손대지 않는다(밖으로 밀어내는 사고 방지).
@@ -2952,7 +2973,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!size) return null;                     // 실측 전 — 다음 프레임에 적용
     const box = mgBoxFor(p, inst, t, p.il?.c ?? 1);
     if (!box) return null;
-    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV, mgSharedZoom);
+    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV,
+                 mgForceZoom(size, inst));
   };
   /** 주석·측정 좌표용 — 페인 사각형만 있으면 되는 경로(단일 이미지 페인)에서 보정을 흡수 */
   const mgAt = (p: PaneState, rect: { width: number; height: number }): PaneState => {
@@ -2962,8 +2984,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!inst) return p;
     const box = mgBoxFor(p, inst, 0, 1);
     if (!box) return p;
-    return mgApply(p, mgFit({ w: rect.width, h: rect.height },
-      { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV, mgSharedZoom));
+    const sz = { w: rect.width, h: rect.height };
+    return mgApply(p, mgFit(sz, { w: inst.cols, h: inst.rows }, box, mgCfg,
+                            p.flipH, p.flipV, mgForceZoom(sz, inst)));
   };
   mgAtRef.current = mgAt;
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
@@ -3146,17 +3169,28 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                                filter: paneFilter(p),
                              }} />
                       )}
-                      {/* 타일별 정보 — Image 분할에서는 각 칸이 어느 이미지인지 스스로 밝혀야 한다.
-                          예전엔 페인 한 곳에만 "Img: 130~145/258" 범위로 떠서 칸별 식별이 안 됐다.
-                          ⚠ 이 라벨은 변환 wrapper **밖**이라 확대/이동에 딸려 움직이지 않는다(칸에 고정). */}
-                      {overlayOn && ti && (
-                        <div style={{ position: "absolute", left: 3, bottom: 2, zIndex: 3,
-                                      pointerEvents: "none", whiteSpace: "nowrap",
-                                      fontSize: Math.max(8, tyOvFont - 1.5), lineHeight: 1.3,
-                                      color: "var(--text-secondary)", textShadow: "0 0 3px #000" }}>
-                          {tIdx + 1}/{nInst}
-                        </div>
-                      )}
+                      {/* 타일별 4모서리 정보 — 분할에서는 **칸마다** 환자·검사·W/L·확대율이 보여야 한다.
+                          예전엔 페인 한 곳에만 떠서 어느 칸이 무엇인지 알 수 없었다(맘모 4뷰에서 특히).
+                          ⚠ 변환 wrapper **밖**이라 확대/이동에 딸려 움직이지 않는다(칸에 고정). */}
+                      {overlayOn && ti && (() => {
+                        const tm = studyMeta[p.studyUid] ?? detail;
+                        const tf = Math.max(8, tyOvFont - 1.5);
+                        // 화면에 실제로 적용된 배율(2D-MG 보정 포함) — 100% 가 아니면 알려 준다
+                        const zEff = (mgTiles ? mgApply(p, fk).zoom : p.zoom) * 100;
+                        return (
+                          <>
+                            <div style={ov("tl", tf)}>{tm.patient_name} ({tm.sex})<br />{tm.study_date}</div>
+                            <div style={ov("tr", tf)}>
+                              S{p.series?.series_number} {p.series?.series_desc || p.series?.modality}<br />
+                              Img: {tIdx + 1}/{nInst}
+                            </div>
+                            <div style={ov("bl", tf)}>{tm.modality} · {tm.patient_key}</div>
+                            <div style={ov("br", tf)}>
+                              Z: {zEff.toFixed(0)}%{p.wl && <><br />W/L: {p.wl}</>}
+                            </div>
+                          </>
+                        );
+                      })()}
                       {/* 키이미지 표시는 칸 단위로도 보여야 한다(현재 이미지만 보던 것을 확장) */}
                       {ti && keyMarks.has(ti.sop_uid) && (
                         <div style={{ position: "absolute", top: 2, right: 3, zIndex: 3,
@@ -3220,7 +3254,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             </div>
           );
         })()}
-        {overlayOn && p.series && (() => {
+        {overlayOn && p.series && tileCount <= 1 && (() => {
           const meta = studyMeta[p.studyUid] ?? detail;  // 페인의 검사 기준 — 다른 환자 영상에 주검사 환자명 오표기 방지
           const priorMark = isPrior && meta.patient_key === detail.patient_key;  // 같은 환자의 과거검사만 [비교/과거]
           return (
@@ -3243,7 +3277,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             </div>
             <div style={ov("bl", tyOvFont)}>{meta.modality} · {meta.patient_key}</div>
             <div style={ov("br", tyOvFont)}>
-              Z: {(p.zoom * 100).toFixed(0)}%{p.wl && <><br />W/L: {p.wl}</>}{p.fx && <><br />{p.fx}</>}
+              {/* 2D-MG 보정으로 확대된 경우도 **실제 화면 배율**을 보여 준다(100% 가 아니면 그 값) */}
+              Z: {(mgApply(p, mgFitFor(pid, 0, p, p.series?.instances[p.index])).zoom * 100).toFixed(0)}%
+              {p.wl && <><br />W/L: {p.wl}</>}{p.fx && <><br />{p.fx}</>}
             </div>
           </>
           );

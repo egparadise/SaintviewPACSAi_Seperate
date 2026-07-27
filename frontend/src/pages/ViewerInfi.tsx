@@ -676,7 +676,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
             return ma.map((x) => x ?? rest[k++] ?? null);
           })()
         : null;
-      if (mammo) setOvlVisible(false);
+      // MG 라고 오버레이를 끄지 않는다 — 환자·검사·W/L 은 판독 필수 정보(사용자 토글로 제어)
       // 4-view 가 한 시리즈에 다 들어 있는 검사(대부분의 MG)는 Series 2×2 로 걸면 3칸이 빈다.
       // 2D-MG 사용 시엔 Series 1×1 + 설정된 Image layout(1×2/2×2/2×3) 타일로 건다.
       const mgTiled = mammo && mg.on && !mammoSeries
@@ -1702,9 +1702,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   };
   // ⚠ 맞붙임 대상 전체를 **같은 배율**로 — 좌우 유방의 크기·밀도 비교가 판독의 핵심이라
   //   페인/타일마다 배율이 다르면 없는 비대칭이 보인다. 후보 배율의 최소값을 공유한다.
-  const mgSharedZoom: number | undefined = (() => {
-    if (!mgOn) return undefined;
+  // 화면 1px 이 모든 칸에서 같은 mm 를 가리키게 한다(§Viewer2D 동일 주석 참조).
+  // 배율만 통일하면 좌·우 촬영의 PixelSpacing 이 다를 때 크기가 달라 보인다.
+  const mgShared = (() => {
+    if (!mgOn) return null;
     let z: number | null = null;
+    let K: number | null = null;
+    let mmOk = true;
     panes.forEach((p, pi) => {
       if (!mgSeries(p)) return;
       for (let t = 0; t < tilesOf(p); t++) {
@@ -1712,11 +1716,23 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         const size = tileSizes[`${pi}:${t}`];
         if (!inst || !size) continue;
         const c = mgZoomOf(size, { w: inst.cols, h: inst.rows }, mgBoxAt(p, inst, t), mgCfg);
-        if (c !== null) z = z === null ? c : Math.min(z, c);
+        if (c === null) continue;
+        z = z === null ? c : Math.min(z, c);
+        const ps = inst.pixel_spacing?.[1] ?? inst.pixel_spacing?.[0] ?? 0;
+        const s0 = Math.min(size.w / (inst.cols || 1), size.h / (inst.rows || 1));
+        if (ps > 0 && s0 > 0) { const k = (c * s0) / ps; K = K === null ? k : Math.min(K, k); }
+        else mmOk = false;
       }
     });
-    return z ?? undefined;
+    return { z, K: mmOk ? K : null };
   })();
+  const mgForceZoom = (size: { w: number; h: number }, inst: InstanceNode): number | undefined => {
+    if (!mgShared) return undefined;
+    const ps = inst.pixel_spacing?.[1] ?? inst.pixel_spacing?.[0] ?? 0;
+    const s0 = Math.min(size.w / (inst.cols || 1), size.h / (inst.rows || 1));
+    if (mgShared.K && ps > 0 && s0 > 0) return (mgShared.K * ps) / s0;
+    return mgShared.z ?? undefined;
+  };
   const mgFitFor = (pi: number, t: number, p: Pane, inst: InstanceNode | undefined): MgFit | null => {
     if (!mgOn || !inst || !mgSeries(p)) return null;
     // 마주 볼 짝이 없는 칸(홀수 그리드 정가운데·그리드 바깥 변)은 손대지 않는다 —
@@ -1726,7 +1742,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
     const box = mgBoxAt(p, inst, t);
     if (!box) return null;
-    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV, mgSharedZoom);
+    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV,
+                 mgForceZoom(size, inst));
   };
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
   const mgOnImgLoad = (p: Pane, sop: string, el: HTMLImageElement) => {
