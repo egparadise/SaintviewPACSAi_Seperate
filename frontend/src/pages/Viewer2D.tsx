@@ -11,7 +11,8 @@ import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgRatioBox, mgStamp, mgWallByCol,
-  readMgCfg, toRC as toRC2, useTileSizes, type MgCfg, type MgFit, type MgProbe,
+  mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
+  type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 import { ToolIconTy } from "../components/ToolIconTy";
 import { AnatomyIcon } from "../lib/anatomyIcons";
@@ -2793,18 +2794,37 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
   const mgSeries = (p: PaneState) => (p.series?.modality || "") === "MG";
   /** 흉벽 방향: 탐지 결과 우선 → 검사명 laterality → 타일 열 위치 */
-  const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number) => {
+  const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number): MgBox | null => {
     if (mgCfg.detect === "auto") {
       const pr = mgBoxes[inst.sop_uid];
-      if (!pr) return undefined;                // 아직 탐지 전 — 원본으로 두고 완료되면 반영
-      if (pr.kind === "none") return undefined; // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다
+      if (!pr) return null;                     // 아직 탐지 전 — 원본으로 두고 완료되면 반영
+      if (pr.kind === "none") return null;      // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다
       if (pr.kind === "box") return pr.box;
+      if (!mgCfg.blind_ratio) return null;      // 근거 없는 추정 크롭 금지(기본)
     }
-    // 픽셀을 못 읽었을 때만(blind) 고정 비율
+    // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
     const lat = mammoView(p.series?.series_desc ?? "").lat;
     const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, cols);
     return mgRatioBox(wall, mgCfg.ratio);
   };
+  // ⚠ 맞붙임 대상 전체를 **같은 배율**로 — 좌우 유방 크기 비교가 판독의 핵심이다
+  const mgSharedZoom: number | undefined = (() => {
+    if (!mgOn) return undefined;
+    let z: number | null = null;
+    for (const [pid, p] of Object.entries(panes)) {
+      if (!mgSeries(p)) continue;
+      const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
+      for (let t = 0; t < tiles; t++) {
+        const inst = p.series?.instances[p.index + t];
+        const size = tiles > 1 ? tileSizes[`${pid}:${t}`] : paneSizes.current[pid];
+        if (!inst || !size) continue;
+        const c = mgZoomOf(size, { w: inst.cols, h: inst.rows },
+                           mgBoxFor(p, inst, t, p.il?.c ?? 1), mgCfg);
+        if (c !== null) z = z === null ? c : Math.min(z, c);
+      }
+    }
+    return z ?? undefined;
+  })();
   const mgFitFor = (pid: string, t: number, p: PaneState, inst: InstanceNode | undefined): MgFit | null => {
     if (!mgOn || !inst || !mgSeries(p)) return null;
     const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
@@ -2812,8 +2832,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const size = tiles > 1 ? tileSizes[`${pid}:${t}`] : paneSizes.current[pid];
     if (!size) return null;                     // 실측 전 — 다음 프레임에 적용
     const box = mgBoxFor(p, inst, t, p.il?.c ?? 1);
-    if (box === undefined) return null;
-    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV);
+    if (!box) return null;
+    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV, mgSharedZoom);
   };
   /** 주석·측정 좌표용 — 페인 사각형만 있으면 되는 경로(단일 이미지 페인)에서 보정을 흡수 */
   const mgAt = (p: PaneState, rect: { width: number; height: number }): PaneState => {
@@ -2822,9 +2842,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const inst = p.series?.instances[p.index];
     if (!inst) return p;
     const box = mgBoxFor(p, inst, 0, 1);
-    if (box === undefined) return p;
+    if (!box) return p;
     return mgApply(p, mgFit({ w: rect.width, h: rect.height },
-      { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV));
+      { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV, mgSharedZoom));
   };
   mgAtRef.current = mgAt;
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */

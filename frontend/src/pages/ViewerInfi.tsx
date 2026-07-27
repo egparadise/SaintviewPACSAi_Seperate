@@ -29,8 +29,8 @@ import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewe
 import { mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgRatioBox,
-  mgStamp, mgWallByCol, readMgCfg, toRC, useTileSizes,
-  type MgCfg, type MgFit, type MgProbe,
+  mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
+  type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 
 // 해부학 아이콘 — 심장(CTR)/척추(Spine)/측만(Cobb)/골반+다리(Limb) 그림 (em 크기 = 칩 글리프에 맞춰 확대)
@@ -1665,24 +1665,44 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
   const mgSeries = (p: Pane) => (p.series?.modality || "") === "MG";
   /** 탐지 결과가 있으면 그걸로, 없으면(canvas 오염·고정비율 모드) 검사명 laterality → 열 위치로 흉벽 추정 */
-  const mgFitFor = (pi: number, t: number, p: Pane, inst: InstanceNode | undefined): MgFit | null => {
-    if (!mgOn || !inst || !mgSeries(p)) return null;
-    const size = tileSizes[`${pi}:${t}`];
-    if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
-    let box;
+  /** 이 타일에 쓸 조직 상자 — 탐지 결과 우선, 못 읽었을 때만(설정 시) 고정 비율 */
+  const mgBoxAt = (p: Pane, inst: InstanceNode, t: number): MgBox | null => {
     if (mgCfg.detect === "auto") {
       const pr = mgBoxes[inst.sop_uid];
       if (!pr) return null;                       // 아직 탐지 전 — 원본으로 두고 완료되면 반영
       if (pr.kind === "none") return null;        // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다
-      if (pr.kind === "box") box = pr.box;
+      if (pr.kind === "box") return pr.box;
+      if (!mgCfg.blind_ratio) return null;        // 근거 없는 추정 크롭 금지(기본)
     }
-    if (!box) {
-      // 픽셀을 못 읽었을 때만(blind) 고정 비율. MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 은 왼쪽
-      const lat = mammoView(p.series?.series_desc ?? "").lat;
-      const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, p.il.c);
-      box = mgRatioBox(wall, mgCfg.ratio);
-    }
-    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV);
+    // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
+    const lat = mammoView(p.series?.series_desc ?? "").lat;
+    const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, p.il.c);
+    return mgRatioBox(wall, mgCfg.ratio);
+  };
+  // ⚠ 맞붙임 대상 전체를 **같은 배율**로 — 좌우 유방의 크기·밀도 비교가 판독의 핵심이라
+  //   페인/타일마다 배율이 다르면 없는 비대칭이 보인다. 후보 배율의 최소값을 공유한다.
+  const mgSharedZoom: number | undefined = (() => {
+    if (!mgOn) return undefined;
+    let z: number | null = null;
+    panes.forEach((p, pi) => {
+      if (!mgSeries(p)) return;
+      for (let t = 0; t < tilesOf(p); t++) {
+        const inst = p.series?.instances[p.index + t];
+        const size = tileSizes[`${pi}:${t}`];
+        if (!inst || !size) continue;
+        const c = mgZoomOf(size, { w: inst.cols, h: inst.rows }, mgBoxAt(p, inst, t), mgCfg);
+        if (c !== null) z = z === null ? c : Math.min(z, c);
+      }
+    });
+    return z ?? undefined;
+  })();
+  const mgFitFor = (pi: number, t: number, p: Pane, inst: InstanceNode | undefined): MgFit | null => {
+    if (!mgOn || !inst || !mgSeries(p)) return null;
+    const size = tileSizes[`${pi}:${t}`];
+    if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
+    const box = mgBoxAt(p, inst, t);
+    if (!box) return null;
+    return mgFit(size, { w: inst.cols, h: inst.rows }, box, mgCfg, p.flipH, p.flipV, mgSharedZoom);
   };
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
   const mgOnImgLoad = (p: Pane, sop: string, el: HTMLImageElement) => {

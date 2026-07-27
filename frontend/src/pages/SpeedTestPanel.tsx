@@ -43,6 +43,7 @@ export function SpeedTestPanel() {
     if (!sel) return;
     setBusy(true); setSteps([]); setVerdict(""); abort.current = false;
     const out: Step[] = [];
+    let srvGzip: boolean | null = null;      // 서버 압축 판정(null=판정 불가)
     const push = (s: Step) => { out.push(s); setSteps([...out]); };
     const t = () => performance.now();
     try {
@@ -93,6 +94,25 @@ export function SpeedTestPanel() {
       const mbps = kb * 8 / Math.max(tFirst - rtt, 1);   // KB→kb, ms → Mbps 근사
       push({ name: "⑥ 실효 전송속도(추정)", ms: 0, detail: `${mbps.toFixed(1)} Mbps` });
 
+      // ⑦ 서버 전송 설정 — 실서버에서 gzip 이 꺼진 채 823KB 를 그대로 보내던 사례가 있었다.
+      //    Resource Timing 의 transferSize(실제 전송) vs decodedBodySize(압축 해제 후)로 판별한다.
+      const js = performance.getEntriesByType("resource")
+        .filter((e) => /\/assets\/.*\.js$/.test(e.name)) as PerformanceResourceTiming[];
+      const big = js.slice().sort((a, b) => b.decodedBodySize - a.decodedBodySize)[0];
+      if (big && big.decodedBodySize > 0) {
+        // transferSize 0 = 캐시 적중(전송 없음) → 압축 판정 불가
+        const cached = big.transferSize === 0;
+        const ratio = cached ? 0 : big.transferSize / big.decodedBodySize;
+        const raw = big.decodedBodySize / 1024;
+        srvGzip = cached ? null : ratio < 0.85;
+        push({
+          name: "⑦ 서버 압축(gzip)", ms: 0, warn: srvGzip === false,
+          detail: cached ? `캐시 적중 — 판정 불가(강력 새로고침 후 재측정)`
+            : srvGzip ? `적용됨 — ${raw.toFixed(0)}KB → ${(big.transferSize / 1024).toFixed(0)}KB`
+            : `❌ 꺼짐 — ${raw.toFixed(0)}KB 무압축 전송`,
+        });
+      }
+
       // ── 판정 ──
       const isLive = isLiveId(sel);
       const v: string[] = [];
@@ -109,6 +129,12 @@ export function SpeedTestPanel() {
       if (isLive && tFirst > 1000) {
         v.push("🟠 Live(원격 직결) 모드입니다 — 첫 열람은 B가 A에서 원본을 받아 디코드합니다. "
              + "두 번째부터는 캐시로 빨라집니다(⑤ 참고).");
+      }
+      if (srvGzip === false) {
+        v.push("🔴 **서버 gzip 이 꺼져 있습니다** — 앱 번들이 무압축으로 전송됩니다(약 4배). "
+             + "영상 이전에 화면이 뜨는 것 자체가 늦어집니다. 서버에서 아래 한 줄이면 됩니다:\n"
+             + "  sudo sh deploy/apply_nginx.sh " + location.origin + "\n"
+             + "  (Windows nginx: powershell -File deploy\\apply_nginx.ps1 -NginxDir C:\\nginx)");
       }
       if (!v.length) v.push(`🟢 정상 — 첫 영상까지 ${fmt(tFirst)}. 목표(DR 1s·CT 3s) 내입니다.`);
       setVerdict(v.join("\n\n"));

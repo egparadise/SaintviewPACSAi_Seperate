@@ -30,14 +30,17 @@ export interface MgCfg {
   margin: number;     // 조직 주위 여백 %(0~10) — 잘림 방지
   thr: number;        // 배경(공기) 판정 임계 %(1~40) — 프레임 최소~최대 밝기 사이 비율
   detect: "auto" | "ratio";   // auto=픽셀에서 조직 경계 탐지, ratio=고정 비율(아래)
-  ratio: number;      // detect=ratio 또는 탐지 실패 시 안쪽에서 잘라낼 폭 %(0~60)
+  // ⚠ 탐지 불가(타 출처 canvas 오염 등)일 때 고정 비율로 **추정 크롭**을 할지.
+  //    기본 off — 근거 없이 맘모를 자르는 것은 조직을 숨길 수 있어 원본 유지가 안전하다.
+  blind_ratio: boolean;
+  ratio: number;      // detect=ratio 또는 blind_ratio 일 때 안쪽에서 잘라낼 폭 %(0~60)
 }
 
 /** MG 모드가 지원하는 Image layout — 사용자 요구(1:2 · 2:2 · 2:3) */
 export const MG_LAYOUTS = ["1x2", "2x2", "2x3"] as const;
 
 export const DEFAULT_MG_CFG: MgCfg = {
-  on: true, layout: "2x2", margin: 2, thr: 12, detect: "auto", ratio: 38,
+  on: true, layout: "2x2", margin: 2, thr: 12, detect: "auto", blind_ratio: false, ratio: 38,
 };
 
 /** viewer.prefs 값 → MgCfg (결측·이상값 방어) */
@@ -52,6 +55,7 @@ export function readMgCfg(v: unknown): MgCfg {
     margin: num(o.margin, DEFAULT_MG_CFG.margin, 0, 10),
     thr: num(o.thr, DEFAULT_MG_CFG.thr, 1, 40),
     detect: o.detect === "ratio" ? "ratio" : "auto",
+    blind_ratio: typeof o.blind_ratio === "boolean" ? o.blind_ratio : DEFAULT_MG_CFG.blind_ratio,
     ratio: num(o.ratio, DEFAULT_MG_CFG.ratio, 0, 60),
   };
 }
@@ -176,14 +180,39 @@ export function mgWallByCol(tileIndex: number, cols: number): "L" | "R" {
 
 export interface MgFit { mz: number; mtx: number; mty: number }
 
+/** 이 타일 하나만 놓고 봤을 때의 후보 배율. 실제 적용 배율은 호출부가 대상 전체의
+ *  **최소값**을 취해 동일하게 맞춘다(좌우 유방 크기 비교 보존). */
+export function mgZoomOf(
+  tile: { w: number; h: number },
+  img: { w: number; h: number },
+  box: MgBox | null | undefined,
+  cfg: Pick<MgCfg, "margin">,
+): number | null {
+  if (!box) return null;
+  const W = tile.w, H = tile.h, iw = img.w, ih = img.h;
+  if (!(W > 0 && H > 0 && iw > 0 && ih > 0)) return null;
+  const m = Math.max(0, Math.min(10, cfg.margin)) / 100;
+  const bw = Math.min(1, box.x1 + m) - Math.max(0, box.x0 - m);
+  const bh = Math.min(1, box.y1 + m) - Math.max(0, box.y0 - m);
+  if (bw <= 0.02 || bh <= 0.02) return null;
+  const s0 = Math.min(W / iw, H / ih);
+  const z = Math.min(W / (bw * iw * s0), H / (bh * ih * s0));
+  return isFinite(z) && z > 0 ? z : null;
+}
+
 /** 조직 상자를 타일에 맞춰 앉히는 보정값(사용자 조작이 없는 상태 기준).
- *  tile/img 는 px, box 는 0~1 정규화. flip 은 표시 좌우/상하 반전 상태. */
+ *  tile/img 는 px, box 는 0~1 정규화. flip 은 표시 좌우/상하 반전 상태.
+ *
+ *  ⚠ forceZoom: 맞붙임 대상 페인·타일은 **반드시 같은 배율**이어야 한다.
+ *  좌우 유방의 크기·밀도 비교가 판독의 핵심이라, 페인마다 배율이 다르면 없는 비대칭이
+ *  보인다. 호출부가 후보 배율(mgZoomOf)의 **최소값**을 구해 여기로 넘긴다. */
 export function mgFit(
   tile: { w: number; h: number },
   img: { w: number; h: number },
   box: MgBox | null | undefined,
   cfg: Pick<MgCfg, "margin">,
   flipH = false, flipV = false,
+  forceZoom?: number,
 ): MgFit | null {
   if (!box) return null;
   const W = tile.w, H = tile.h, iw = img.w, ih = img.h;
@@ -197,7 +226,9 @@ export function mgFit(
   // objectFit:contain 기준 배율 → zoom=1 일 때 화면에 그려지는 이미지 크기
   const s0 = Math.min(W / iw, H / ih);
   const dw = iw * s0, dh = ih * s0;
-  const mz = Math.min(W / (bw * dw), H / (bh * dh));
+  const mz = forceZoom !== undefined && forceZoom > 0
+    ? forceZoom
+    : Math.min(W / (bw * dw), H / (bh * dh));
   if (!isFinite(mz) || mz <= 0) return null;
 
   const sx = flipH ? -1 : 1, sy = flipV ? -1 : 1;

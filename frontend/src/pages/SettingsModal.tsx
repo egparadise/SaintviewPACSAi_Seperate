@@ -1687,6 +1687,16 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       </span>
                     </Row>
                   )}
+                  <Row label="탐지 불가 시">
+                    <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="checkbox" checked={mgCfg.blind_ratio}
+                             onChange={(e) => setMgCfg({ ...mgCfg, blind_ratio: e.target.checked })} />
+                      픽셀을 읽을 수 없을 때 아래 고정 비율로 잘라내기
+                    </label>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                      꺼 두면(권장) 근거가 없을 때 <b>원본을 그대로</b> 표시합니다 — 추정 크롭은 조직을 가릴 수 있습니다.
+                    </span>
+                  </Row>
                   <Row label="고정 비율">
                     <input type="number" min={0} max={60} step={1} value={mgCfg.ratio}
                            onChange={(e) => setMgCfg({ ...mgCfg, ratio: Number(e.target.value) || 0 })}

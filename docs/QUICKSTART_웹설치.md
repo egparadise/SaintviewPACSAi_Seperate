@@ -131,14 +131,30 @@ A 서버는 손대지 않습니다.
 
 | 증상 | 확인 방법 | 조치 |
 |---|---|---|
-| **JS 무압축 전송** (823KB 그대로) | 브라우저 F12 > 네트워크 > `index-*.js` 의 "전송" ≈ "크기" 면 무압축 | `deploy/nginx-viewer.conf` 의 `gzip_static on;` + `gzip on;` 적용 → **823KB → 220KB** |
+| **JS 무압축 전송** (823KB 그대로) | 브라우저 F12 > 네트워크 > `index-*.js` 의 "전송" ≈ "크기" 면 무압축 | 아래 스크립트 한 줄 → **823KB → 220KB** |
 | **자산 캐시 없음** | 응답 헤더에 `Cache-Control` 없음 | 같은 파일의 `/assets/` 블록(`immutable, max-age=1y`) 적용 → 재방문 시 재검증 0회 |
 
+**적용 (서버에서 한 줄)** — 기존 `server { }` 블록은 건드리지 않는다.
+`conf.d` 에 http 컨텍스트 드롭인 한 장만 넣고, `nginx -t` 실패 시 자동 원복한다.
+
 ```bash
-# 서버에서 확인
+sudo sh deploy/apply_nginx.sh https://<주소>
+```
+
+Windows nginx 라면:
+
+```bash
+powershell -ExecutionPolicy Bypass -File deploy/apply_nginx.ps1 -NginxDir C:/nginx -CheckUrl https://<주소>
+```
+
+스크립트가 끝나면서 압축 여부를 스스로 확인해 준다. 수동 확인은:
+
+```bash
 curl -sI https://<주소>/assets/index-XXXX.js | grep -iE "content-encoding|cache-control|content-length"
 #  → content-encoding: gzip  와  cache-control: ...immutable  이 나와야 정상
 ```
+
+되돌리기: `sudo rm /etc/nginx/conf.d/zz-saintview-gzip.conf && sudo nginx -s reload`
 
 빌드가 `.gz`/`.br` 를 함께 만들어 두므로 `gzip_static on;` 이면 **런타임 CPU 없이** 압축본이 나간다.
 
@@ -148,7 +164,11 @@ curl -sI https://<주소>/assets/index-XXXX.js | grep -iE "content-encoding|cach
 ① 서버 왕복 ② 검사 정보 ③ 시리즈 목록 ④ 첫 영상(콜드) ⑤ 재요청(웜) ⑥ 실효 전송속도
 를 **그 서버·그 회선 기준**으로 재고, 어느 구간이 병목인지와 조치를 바로 알려준다.
 
+① 서버 왕복 ② 검사 정보 ③ 시리즈 목록 ④ 첫 영상(콜드) ⑤ 재요청(웜) ⑥ 실효 전송속도
+**⑦ 서버 압축(gzip)** — 브라우저가 실제로 받은 바이트와 압축 해제 후 크기를 비교해 판정한다.
+
 자주 나오는 판정:
+- 🔴 *서버 gzip 이 꺼져 있습니다* → 위 `apply_nginx.sh` 한 줄
 - 🔴 *개발(dev) 모드로 서빙 중* → 서버에서 `start_viewer_suite.bat`(인자 없이) 재기동
 - 🔴 *첫 영상이 큰 PNG* → 설정 > 병원 설정 > 뷰어 영상 형식을 **JPEG(품질 90)** 로
 - 🟠 *서버 왕복이 큼* → 회선/거리 문제. 프리페치·캐시가 2회차부터 흡수
