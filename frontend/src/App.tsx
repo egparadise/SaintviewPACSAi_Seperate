@@ -7,6 +7,7 @@ import "./theme.css";
 import { hasToken, setToken, api, type LoginResp } from "./api";
 import { portalRole, portalUrl, type PortalTarget } from "./lib/portals";
 import { Worklist } from "./pages/Worklist";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsModal } from "./pages/SettingsModal";
 import { ViewerWindow } from "./pages/ViewerWindow";
 import { ReportWindow } from "./pages/ReportWindow";
@@ -142,8 +143,9 @@ export default function App() {
   }
 
   // 뷰어/판독 새 창 (client 포털 오리진에서 ?viewer=2d / ?report=1 그대로 동작)
-  if (IS_VIEWER_WINDOW) return <ViewerWindow />;
-  if (IS_REPORT_WINDOW) return <ReportWindow />;
+  // 화면 단위로 경계를 둔다 — 한 화면이 터져도 나머지는 살아 있고, 원인이 기록된다
+  if (IS_VIEWER_WINDOW) return <ErrorBoundary where="viewer"><ViewerWindow /></ErrorBoundary>;
+  if (IS_REPORT_WINDOW) return <ErrorBoundary where="report"><ReportWindow /></ErrorBoundary>;
 
   // Landing 포털: 세션이 있어도 콘솔/워크리스트를 열지 않고 포털 이동 안내 카드만
   if (PORTAL === "landing") {
@@ -176,11 +178,11 @@ export default function App() {
   // 관리자 모드 → 관리자 콘솔(좌측 트리 메뉴) — client 포털에서는 제외
   if (session.mode === "admin" && PORTAL !== "client") {
     return (
-      <AdminConsole
+      <ErrorBoundary where="admin"><AdminConsole
         userName={session.name}
         isSystemAdmin={session.role === "admin" && !session.hospitalId}
         onLogout={logout}
-      />
+      /></ErrorBoundary>
     );
   }
 
@@ -197,7 +199,9 @@ export default function App() {
         <button onClick={logout}>로그아웃</button>
       </header>
       {settingsOpen && <SettingsModal role={session.role} scope="viewer" onClose={() => setSettingsOpen(false)} />}
-      <main style={{ flex: 1, minHeight: 0 }}><Worklist /></main>
+      <main style={{ flex: 1, minHeight: 0 }}>
+        <ErrorBoundary where="worklist"><Worklist /></ErrorBoundary>
+      </main>
       <SessionGuard onLogout={logout} />
     </div>
   );

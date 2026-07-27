@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "viewer-suite-preview",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "preview", "--", "--port", "5185", "--strictPort"],
+      "port": 5185,
+      "url": "https://localhost:5185",
+      "cwd": "frontend"
+    }
+  ]
+}

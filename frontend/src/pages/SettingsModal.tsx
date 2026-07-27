@@ -13,6 +13,7 @@ import { screenApiIssue } from "../lib/screens";
 import { SC_ACTIONS, SC_DEFAULTS, displayKey } from "../lib/shortcutDefs";
 import { ToolIconTy } from "../components/ToolIconTy";
 import { APP_VERSION, BUILD_DATE, PRODUCT_NAME, VENDOR } from "../lib/appVersion";
+import { clearCrashLog, readCrashLog, type CrashEntry } from "../components/ErrorBoundary";
 import { SpeedTestPanel } from "./SpeedTestPanel";
 import { AnatomyIcon } from "../lib/anatomyIcons";
 import { HospitalsPanel, ModalityPanel, OverviewPanel, ServerPanel, StoragePanel, UsersPanel } from "./admin/ServerAdmin";
@@ -230,6 +231,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [h2dByViewer, setH2dByViewer] = useState<Record<string, Record<string, { s: string; i: string }>>>({});
   // 2D-MG — MG 좌우 사이 공기 여백 제거 모드(뷰어 3종 공통). viewer.prefs.mg_hang
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
+  // 오류 기록(정보 탭) — 화면 백지화 원인이 새로고침으로 사라지지 않게 보관한 것
+  const [crashes, setCrashes] = useState<CrashEntry[]>([]);
+  useEffect(() => { setCrashes(readCrashLog()); }, []);
   const [reportDock, setReportDock] = useState(false);  // 판독 도크 기본 숨김
   // 비교(Compare) 설정 — viewer.prefs.compare (뷰어·openV2 가 소비). 편집은 판독(Reading) 탭.
   //  enabled=기능 on/off · multi_monitor=Viewer 모니터 2개+면 비교검사를 다음 모니터에(끝번→첫번 순환) · labels=M/S 녹색 라벨
@@ -2251,6 +2255,41 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                               fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7 }}>
                   버전은 배포본 빌드 시점에 자동 기록됩니다(적용일자 = 빌드 일자).<br />
                   기술 지원·문의: {VENDOR}
+                </div>
+
+                {/* 오류 기록 — 화면이 죽었다가 새로고침으로 복구되면 콘솔이 함께 날아간다.
+                    그래서 예외를 localStorage 에 남겨 두고 여기서 꺼내 볼 수 있게 한다. */}
+                <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
+                    오류 기록 {crashes.length > 0 && (
+                      <span style={{ color: "#f87171" }}>({crashes.length}건)</span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 7, lineHeight: 1.7 }}>
+                    화면이 비거나 오류가 났을 때 자동으로 남는 기록입니다. <b>새로고침해도 지워지지 않습니다.</b>
+                    화면이 죽는 증상이 있으면 [복사]해서 전달해 주세요 — 어디서 무엇이 터졌는지 그대로 들어 있습니다.
+                  </div>
+                  {crashes.length === 0 ? (
+                    <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>기록된 오류가 없습니다.</div>
+                  ) : (
+                    <>
+                      <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 11,
+                                    background: "var(--bg-canvas)", border: "1px solid var(--border)",
+                                    borderRadius: 6, padding: 8, maxHeight: 220, overflow: "auto" }}>
+                        {crashes.map((c) => [
+                          `[${c.at}] ${c.where}`, c.message, c.url,
+                          ...c.stack.split(String.fromCharCode(10)).slice(0, 4),
+                        ].join(String.fromCharCode(10)))
+                          .join(String.fromCharCode(10, 10) + "──────────" + String.fromCharCode(10, 10))}
+                      </pre>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button onClick={() => void navigator.clipboard?.writeText(JSON.stringify(crashes, null, 2))}>
+                          전체 복사 (JSON)
+                        </button>
+                        <button onClick={() => { clearCrashLog(); setCrashes([]); }}>기록 비우기</button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </Group>
             )}

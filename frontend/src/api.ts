@@ -399,12 +399,23 @@ export const api = {
       `/api/hospitals/${hid}/clients/${cid}/enter`, { method: "POST" }),
   clientHeartbeat: (hid: number, cid: number) =>
     req<{ ok: boolean }>(`/api/hospitals/${hid}/clients/${cid}/heartbeat`, { method: "POST" }),
-  study: (id: number) =>
-    req<StudyDetail>(isLiveId(id) ? `${LIVE}/studies/${id}` : `/api/studies/${id}`)
-      .then((d) => {
-        if (isLiveId(id)) registerLiveStudyUid(d.study_uid);   // rendered 루트 스위칭용
-        return d;
-      }),
+  /** 검사 상세. opts.related=false 면 과거검사 목록을 빼고 받는다(뷰어 오픈 경로).
+   *  Live 는 A 의 환자별 검사 검색이 느린 사이트가 있어(실측 4.11s) 이것이 오픈을 막았다. */
+  study: (id: number, opts?: { related?: boolean }) => {
+    const skip = opts?.related === false && isLiveId(id);
+    return req<StudyDetail>(
+      isLiveId(id) ? `${LIVE}/studies/${id}${skip ? "?related=0" : ""}` : `/api/studies/${id}`,
+    ).then((d) => {
+      if (isLiveId(id)) registerLiveStudyUid(d.study_uid);   // rendered 루트 스위칭용
+      return d;
+    });
+  },
+  /** 과거검사(동일 환자) — 화면을 띄운 뒤 따로 채운다. Live 전용(로컬은 study 응답에 이미 포함). */
+  relatedExams: (id: number) =>
+    isLiveId(id)
+      ? req<{ items: StudyDetail["related_exams"] }>(`${LIVE}/studies/${id}/related`)
+          .then((r) => r.items ?? [])
+      : Promise.resolve([] as StudyDetail["related_exams"]),
   reports: (studyId: number) =>
     req<{ items: Report[] }>(isLiveId(studyId) ? `${LIVE}/studies/${studyId}/reports`
                                                : `/api/studies/${studyId}/reports`),

@@ -75,9 +75,14 @@ export function ViewerWindow() {
       }).catch(() => {});
       // Live(원격 직결) 검사: 오픈 즉시 서버측 원본 병렬 예열 킥(A→B 지연 은닉)
       if (isLiveId(studyId)) void api.livePrefetch(studyId);
-      api.study(studyId).then((d) => {
+      // ⚡ 과거검사는 빼고 받는다 — A 의 환자별 검색이 느린 사이트에서 이것 하나가
+      //    뷰어 오픈을 4초 넘게 막고 있었다(속도 측정 ② 4.11s). 화면을 먼저 띄우고 나서 채운다.
+      api.study(studyId, { related: false }).then((d) => {
         setDetail(d);
         document.title = `Saintview Viewer — ${d.modality} ${d.patient_name} ${d.study_date}`;
+        void api.relatedExams(studyId)
+          .then((items) => { if (items.length) setDetail((p) => (p ? { ...p, related_exams: items } : p)); })
+          .catch(() => {});
       }).catch((e) => setErr(e instanceof Error ? e.message : "검사 로드 실패"));
       if (addId) { if (isLiveId(addId)) void api.livePrefetch(addId); api.study(addId).then(setAddDetail).catch(() => {}); }
       if (stackId) { if (isLiveId(stackId)) void api.livePrefetch(stackId); api.study(stackId).then(setStackDetail).catch(() => {}); }

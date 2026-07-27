@@ -403,3 +403,42 @@ def test_get_instance_bytes_dedupes_concurrent_downloads(tmp_path, monkeypatch):
     assert len(calls) == 1, f"원본 다운로드가 {len(calls)}회 발생(1회여야 함)"
     assert (tmp_path / f"{sop}.dcm").read_bytes() == b"DICM-PAYLOAD"
     assert not list(tmp_path.glob("*.part")), "임시 파일이 남았다"
+
+
+def test_viewer_open_skips_slow_patient_search(client, auth_headers, live_ready, mock_remote):
+    """⚡ 뷰어 오픈 경로(related=0)는 A 의 환자별 검사 검색을 하지 않는다.
+
+    A 의 환자별 검색은 사이트에 따라 수 초가 걸린다(실측 4.11s). 예전에는 이것이
+    live_detail 안에 있어서 뷰어가 그만큼 '뷰어 로딩…' 으로 멈춰 있었다.
+    """
+    from app.services import webpacs_live as live
+
+    vid = VID_BASE + 1
+    live.invalidate_related()      # 앞선 테스트가 덥혀 놓은 캐시와 격리
+
+    def calls():
+        return httpx.get(f"{mock_remote}/__test__/state").json()["list_calls"]
+
+    # ① 오픈 경로 — 검색 0회
+    before = calls()
+    r = client.get(f"/api/webpacs/live/studies/{vid}?related=0", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["related_exams"] == []
+    assert calls() == before, "오픈 경로에서 환자별 검사 검색이 발생했다"
+
+    # ② 과거검사는 별도 경로로 받는다 — 이때만 검색
+    before = calls()
+    r = client.get(f"/api/webpacs/live/studies/{vid}/related", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert isinstance(r.json()["items"], list)
+    assert calls() == before + 1
+
+    # ③ 같은 환자 재요청은 캐시 — 추가 검색 없음
+    before = calls()
+    client.get(f"/api/webpacs/live/studies/{vid}/related", headers=auth_headers)
+    assert calls() == before, "환자 단위 캐시가 동작하지 않는다"
+
+    # ④ 기본(related 생략)은 기존 계약 유지 — related_exams 가 채워진다
+    r = client.get(f"/api/webpacs/live/studies/{vid}", headers=auth_headers)
+    assert r.status_code == 200
+    assert "related_exams" in r.json()

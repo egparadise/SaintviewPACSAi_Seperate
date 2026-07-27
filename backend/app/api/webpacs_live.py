@@ -63,8 +63,20 @@ def worklist(
 
 
 @router.get("/studies/{vid}")
-def study_detail(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    return _wrap(lambda: live.live_detail(db, vid, user))
+def study_detail(vid: int, related: int = 1, db: Session = Depends(get_db),
+                 user: dict = Depends(current_user)):
+    """related=0 이면 과거검사 조회를 건너뛴다 — 뷰어 오픈은 이 경로를 쓴다.
+
+    A 의 환자별 검사 검색이 사이트에 따라 수 초(실측 4.11s)라서, 예전에는 뷰어가
+    그 시간만큼 '뷰어 로딩…' 상태로 멈춰 있었다. 과거검사는 화면이 뜬 뒤 따로 받는다.
+    """
+    return _wrap(lambda: live.live_detail(db, vid, user, with_related=bool(related)))
+
+
+@router.get("/studies/{vid}/related")
+def study_related(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    """과거검사(동일 환자) — 뷰어가 화면을 띄운 뒤 별도로 받아 채운다. 환자 단위 60초 캐시."""
+    return {"items": _wrap(lambda: live.live_related(db, vid, user))}
 
 
 @router.get("/studies/{vid}/series-tree")

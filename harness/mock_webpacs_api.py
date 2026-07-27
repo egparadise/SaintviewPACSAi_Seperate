@@ -171,6 +171,7 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
                    patient_name: str | None = None, study_modality: str | None = None,
                    study_search: str | None = None, order_json: str | None = None,
                    authorization: str | None = Header(default=None)):
+        state["list_calls"] = state.get("list_calls", 0) + 1
         _auth(authorization)
         rows = studies
         if patient_id:
@@ -419,7 +420,8 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
         return {"logins": state["logins"],
                 "rendered_calls": state.get("rendered_calls", 0),
                 "rendered_prebaked": state.get("rendered_prebaked", 0),
-                "instance_calls": state.get("instance_calls", 0)}
+                "instance_calls": state.get("instance_calls", 0),
+                "list_calls": state.get("list_calls", 0)}
 
     return app
 

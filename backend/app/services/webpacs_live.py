@@ -295,41 +295,91 @@ def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None)
     return {"items": items, "total": total}
 
 
-def live_detail(db: Session, vid: int, user: dict | None = None) -> dict:
-    """StudyDetail 동형 — related_exams 는 동일 환자의 다른 A 검사(vid)."""
+# 과거검사(동일 환자) 캐시 — A 의 환자별 검사 검색이 느린 사이트가 있어(실측 4.1초)
+# 뷰어 오픈 경로에서 떼어냈다. 같은 환자를 다시 열 때는 이 캐시로 즉답한다.
+_REL_CACHE: OrderedDict[str, tuple[float, list]] = OrderedDict()
+_REL_TTL = 60.0
+_REL_MAX = 256
+_REL_LOCK = threading.Lock()
+
+
+def live_related(db: Session, vid: int, user: dict | None = None,
+                 row: dict | None = None) -> list[dict]:
+    """동일 환자의 다른 A 검사 목록(과거검사).
+
+    ⚠ **뷰어 오픈 경로에 두면 안 된다.** A 의 환자별 검사 검색은 사이트에 따라 수 초가 걸리는데
+    (실측 4.11초), 예전에는 이것이 live_detail 안에 있어서 뷰어가 그만큼 검은 화면으로 대기했다.
+    지금은 별도 엔드포인트이고, 프론트는 화면을 띄운 뒤 따로 불러 채운다.
+    """
+    client = live_client(db, user)
+    idx = to_remote_idx(vid)
+    # row 가 오면 상세를 다시 받지 않는다 — live_detail 에서 이미 받은 것을 재사용
+    r = row if row is not None else client.study_detail(idx)
+    if not r:
+        return []
+    pid = str(r.get("patient_id") or "")
+    if not pid:
+        return []
+    ck = f"{getattr(client, 'base_url', '')}|{pid}"
+    now = time.time()
+    with _REL_LOCK:
+        hit = _REL_CACHE.get(ck)
+        if hit and now - hit[0] < _REL_TTL:
+            return [x for x in hit[1] if x["id"] != vid]
+    out: list[dict] = []
+    try:
+        others = client.list_studies({
+            "patient_id": pid, "limit": "30",
+            "order_json": json.dumps([{"key": "study_idx", "order": "desc"}]),
+        })
+        for o in others:
+            od, _ = _split_datetime(str(o.get("study_datetime") or ""))
+            st, _, _ = _map_status(str(o.get("study_status") or ""))
+            out.append({
+                "id": to_vid(int(o.get("study_idx"))),
+                "study_uid": str(o.get("study_instance_uid") or ""),
+                "study_date": od,
+                "modality": str(o.get("study_modality") or ""),
+                "study_desc": str(o.get("study_description") or ""),
+                "status": st,
+            })
+    except Exception:  # noqa: BLE001 — 과거검사 실패는 화면을 막지 않는다
+        return []
+    with _REL_LOCK:
+        _REL_CACHE[ck] = (now, out)
+        _REL_CACHE.move_to_end(ck)
+        while len(_REL_CACHE) > _REL_MAX:
+            _REL_CACHE.popitem(last=False)
+    return [x for x in out if x["id"] != vid]
+
+
+def invalidate_related(patient_key: str = "") -> None:
+    """과거검사 캐시 무효화 — 새 검사가 들어와 목록이 바뀌었을 때/테스트 격리용.
+    patient_key 를 주면 그 환자만, 비우면 전체."""
+    with _REL_LOCK:
+        if not patient_key:
+            _REL_CACHE.clear()
+            return
+        for k in [k for k in _REL_CACHE if k.endswith(f"|{patient_key}")]:
+            _REL_CACHE.pop(k, None)
+
+
+def live_detail(db: Session, vid: int, user: dict | None = None,
+                with_related: bool = True) -> dict:
+    """StudyDetail 동형.
+
+    with_related=False 면 과거검사 조회를 건너뛴다 — 뷰어 오픈 경로 전용(§live_related 주석).
+    """
     client = live_client(db, user)
     idx = to_remote_idx(vid)
     r = client.study_detail(idx)
     if not r:
         raise WebPacsError("원격 검사를 찾을 수 없습니다")
     row = _row_of(r)
-    related: list[dict] = []
-    pid = str(r.get("patient_id") or "")
-    if pid:
-        try:
-            others = client.list_studies({
-                "patient_id": pid, "limit": "30",
-                "order_json": json.dumps([{"key": "study_idx", "order": "desc"}]),
-            })
-            for o in others:
-                if int(o.get("study_idx")) == idx:
-                    continue
-                od, _ = _split_datetime(str(o.get("study_datetime") or ""))
-                st, _, _ = _map_status(str(o.get("study_status") or ""))
-                related.append({
-                    "id": to_vid(int(o.get("study_idx"))),
-                    "study_uid": str(o.get("study_instance_uid") or ""),
-                    "study_date": od,
-                    "modality": str(o.get("study_modality") or ""),
-                    "study_desc": str(o.get("study_description") or ""),
-                    "status": st,
-                })
-        except Exception:  # noqa: BLE001 — 과거검사 실패는 상세 자체를 막지 않음
-            pass
     row["clinical_info"] = str(r.get("study_comment") or r.get("report_study_comment") or "")
     row["orthanc_id"] = ""
     row["series"] = []
-    row["related_exams"] = related
+    row["related_exams"] = live_related(db, vid, user, row=r) if with_related else []
     return row
 
 
