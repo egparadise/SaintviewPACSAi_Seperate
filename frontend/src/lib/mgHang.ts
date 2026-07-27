@@ -28,7 +28,9 @@ export interface MgCfg {
   on: boolean;        // 기본 사용(뷰어 진입 시 2D-MG 체크 상태)
   layout: string;     // MG 기본 Image layout ("1x2" | "2x2" | "2x3")
   margin: number;     // 조직 주위 여백 %(0~10) — 잘림 방지
-  thr: number;        // 배경(공기) 판정 임계 %(1~40) — 프레임 최소~최대 밝기 사이 비율
+  // 배경과 '다르다'고 볼 밝기 차이(0~255). 프레임 네 모서리에서 잰 배경 밝기 기준이라
+  // MONOCHROME1(공기가 흰색)처럼 반전된 영상도 그대로 처리된다.
+  thr: number;
   detect: "auto" | "ratio";   // auto=픽셀에서 조직 경계 탐지, ratio=고정 비율(아래)
   // ⚠ 탐지 불가(타 출처 canvas 오염 등)일 때 고정 비율로 **추정 크롭**을 할지.
   //    기본 off — 근거 없이 맘모를 자르는 것은 조직을 숨길 수 있어 원본 유지가 안전하다.
@@ -53,7 +55,7 @@ export function readMgCfg(v: unknown): MgCfg {
     layout: (MG_LAYOUTS as readonly string[]).includes(o.layout ?? "")
       ? (o.layout as string) : DEFAULT_MG_CFG.layout,
     margin: num(o.margin, DEFAULT_MG_CFG.margin, 0, 10),
-    thr: num(o.thr, DEFAULT_MG_CFG.thr, 1, 40),
+    thr: num(o.thr, DEFAULT_MG_CFG.thr, 1, 80),
     detect: o.detect === "ratio" ? "ratio" : "auto",
     blind_ratio: typeof o.blind_ratio === "boolean" ? o.blind_ratio : DEFAULT_MG_CFG.blind_ratio,
     ratio: num(o.ratio, DEFAULT_MG_CFG.ratio, 0, 60),
@@ -80,9 +82,9 @@ export type MgProbe =
 
 // 캐시 키에 임계값을 포함한다 — 설정에서 배경 임계값을 바꾸면 다시 탐지해야 한다
 const BOXES = new Map<string, MgProbe>();
-const PROBE_MAX = 192;      // 샘플링 해상도(긴 변) — 경계상자 정밀도엔 이 정도면 충분
-const RUN = 3;              // 유효 시작/끝으로 인정할 연속 칸 수 — 번인 문자·점 노이즈 무시
-const FILL = 0.04;          // 한 줄이 '조직'이려면 임계 초과 픽셀이 4% 이상
+const PROBE_MAX = 256;      // 샘플링 해상도(긴 변) — 경계상자 정밀도엔 이 정도면 충분
+const MIN_FRAC = 0.005;     // 한 줄이 '조직'이려면 배경과 다른 픽셀이 0.5% 이상(최소 2칸)
+const PAD = 0.006;          // 조직 경계 여유(가장자리 잘림 방지) — 프레임 대비 비율
 
 const _key = (sop: string, thrPct: number) => `${sop}|${Math.round(thrPct)}`;
 
@@ -90,12 +92,37 @@ export function mgBoxOf(sop: string, thrPct: number): MgProbe | undefined {
   return BOXES.get(_key(sop, thrPct));
 }
 
-/** 화면에 뜬 <img> 에서 조직 경계상자 산출(동기, SOP+임계 캐시). */
-export function mgProbe(sop: string, img: HTMLImageElement, thrPct: number): MgProbe {
-  if (!sop) return { kind: "blind" };
-  const ck = _key(sop, thrPct);
-  const hit = BOXES.get(ck);
-  if (hit !== undefined) return hit;
+/** 네 모서리 8×8 패치의 중앙값 = 배경(공기) 밝기.
+ *  절대 밝기가 아니라 **배경과의 차이**로 판정하므로 MONOCHROME1(공기가 흰색) 영상도
+ *  그대로 처리된다. 예전에는 프레임 최소~최대 사이 비율을 썼는데, 반전 영상에서는
+ *  공기가 '가장 밝은 값'이라 조직/배경이 통째로 뒤바뀌었다. */
+function cornerBg(d: Uint8ClampedArray, w: number, h: number): number {
+  const n = Math.min(8, w, h);
+  const vals: number[] = [];
+  for (const [ox, oy] of [[0, 0], [w - n, 0], [0, h - n], [w - n, h - n]]) {
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) vals.push(d[((oy + y) * w + (ox + x)) * 4]);
+    }
+  }
+  vals.sort((a, b) => a - b);
+  return vals[vals.length >> 1] ?? 0;
+}
+
+/** 조직이 가장 두꺼운 줄에서 좌·우(위·아래)로 연속 확장한 범위.
+ *  가장자리에서부터 훑지 않는 것이 핵심 — 공기 영역에 떠 있는 번인 마커(R/L 표식 등)는
+ *  사이의 빈 줄에서 확장이 끊겨 저절로 제외된다. */
+function grow(n: Int32Array, len: number, minCount: number): [number, number] | null {
+  let peak = 0;
+  for (let i = 1; i < len; i++) if (n[i] > n[peak]) peak = i;
+  if (n[peak] < minCount) return null;               // 조직 없음
+  let a = peak, b = peak;
+  while (a > 0 && n[a - 1] >= minCount) a--;
+  while (b < len - 1 && n[b + 1] >= minCount) b++;
+  return [a, b];
+}
+
+/** 로드된 이미지 한 장을 분석 — 엘리먼트 경로(mgProbe)와 URL 경로(mgProbeUrl)가 공유한다. */
+function analyze(img: HTMLImageElement, thr: number): MgProbe {
   let out: MgProbe = { kind: "blind" };
   try {
     const iw = img.naturalWidth, ih = img.naturalHeight;
@@ -108,57 +135,72 @@ export function mgProbe(sop: string, img: HTMLImageElement, thrPct: number): MgP
       if (ctx) {
         ctx.drawImage(img, 0, 0, w, h);
         const d = ctx.getImageData(0, 0, w, h).data;   // 타 출처면 여기서 SecurityError
-        const lum = new Float32Array(w * h);
-        let lo = 255, hi = 0;
-        for (let i = 0, k = 0; k < w * h; k++, i += 4) {
-          const v = (d[i] + d[i + 1] + d[i + 2]) / 3;
-          lum[k] = v;
-          if (v < lo) lo = v;
-          if (v > hi) hi = v;
+        const bg = cornerBg(d, w, h);
+        const t = Math.max(1, Math.min(80, thr));
+        const colN = new Int32Array(w), rowN = new Int32Array(h);
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            if (Math.abs(d[((y * w) + x) * 4] - bg) > t) { colN[x]++; rowN[y]++; }
+          }
         }
-        if (hi - lo > 12) {          // 완전 균일 프레임은 대상 아님
-          const thr = lo + (hi - lo) * (Math.max(1, Math.min(40, thrPct)) / 100);
-          const colN = new Int32Array(w), rowN = new Int32Array(h);
-          for (let y = 0; y < h; y++) {
-            for (let x = 0; x < w; x++) {
-              if (lum[y * w + x] > thr) { colN[x]++; rowN[y]++; }
-            }
-          }
-          const span = (n: Int32Array, len: number, other: number): [number, number] => {
-            const on = (i: number) => n[i] >= Math.max(1, other * FILL);
-            let a = -1, b = -1;
-            for (let i = 0; i <= len - RUN; i++) {
-              let ok = true;
-              for (let k = 0; k < RUN; k++) if (!on(i + k)) { ok = false; break; }
-              if (ok) { a = i; break; }
-            }
-            for (let i = len - 1; i >= RUN - 1; i--) {
-              let ok = true;
-              for (let k = 0; k < RUN; k++) if (!on(i - k)) { ok = false; break; }
-              if (ok) { b = i; break; }
-            }
-            return [a, b];
-          };
-          const [cx0, cx1] = span(colN, w, h);
-          const [ry0, ry1] = span(rowN, h, w);
-          if (cx0 >= 0 && cx1 > cx0 && ry0 >= 0 && ry1 > ry0) {
-            const x0 = cx0 / w, x1 = (cx1 + 1) / w, y0 = ry0 / h, y1 = (ry1 + 1) / h;
-            // 잘라낼 공기가 거의 없으면(가로 97% 이상 차지) **보정하지 않는다**(none).
-            // 고정 비율 폴백으로 흘려보내면 안 된다 — 꽉 찬 프레임을 38% 잘라먹는다.
-            out = x1 - x0 < 0.97
-              // 흉벽 = 조직이 프레임 가장자리에 붙은 쪽(유두 쪽엔 공기가 넓게 남는다)
-              ? { kind: "box", box: { x0, y0, x1, y1, wall: x0 <= 1 - x1 ? "L" : "R" } }
-              : { kind: "none" };
-          }
+        const cs = grow(colN, w, Math.max(2, Math.round(h * MIN_FRAC)));
+        const rs = grow(rowN, h, Math.max(2, Math.round(w * MIN_FRAC)));
+        if (cs && rs) {
+          const x0 = Math.max(0, cs[0] / w - PAD), x1 = Math.min(1, (cs[1] + 1) / w + PAD);
+          const y0 = Math.max(0, rs[0] / h - PAD), y1 = Math.min(1, (rs[1] + 1) / h + PAD);
+          // 잘라낼 공기가 거의 없으면(가로 97% 이상 차지) **보정하지 않는다**(none).
+          // 고정 비율 폴백으로 흘려보내면 안 된다 — 꽉 찬 프레임을 38% 잘라먹는다.
+          out = x1 - x0 < 0.97 && x1 > x0 && y1 > y0
+            // 흉벽 = 조직이 프레임 가장자리에 붙은 쪽(유두 쪽엔 공기가 넓게 남는다)
+            ? { kind: "box", box: { x0, y0, x1, y1, wall: x0 <= 1 - x1 ? "L" : "R" } }
+            : { kind: "none" };
+        } else {
+          out = { kind: "none" };      // 조직을 못 찾음 — 추정해서 자르지 않는다
         }
       }
     }
   } catch {
-    out = { kind: "blind" };    // canvas 오염(타 출처 DICOMweb) 등 — 고정 비율 폴백으로
+    out = { kind: "blind" };    // canvas 오염(타 출처 DICOMweb) 등
   }
+  return out;
+}
+
+function _remember(ck: string, out: MgProbe): MgProbe {
   if (BOXES.size > 2000) BOXES.clear();
   BOXES.set(ck, out);
   return out;
+}
+
+/** 화면에 이미 뜬 <img> 에서 조직 경계상자 산출(동기, 추가 네트워크 0. SOP+임계 캐시). */
+export function mgProbe(sop: string, img: HTMLImageElement, thr: number): MgProbe {
+  if (!sop) return { kind: "blind" };
+  const ck = _key(sop, thr);
+  const hit = BOXES.get(ck);
+  if (hit !== undefined) return hit;
+  return _remember(ck, analyze(img, thr));
+}
+
+// URL 경로의 동시 요청 합류 — 같은 프레임을 여러 페인이 동시에 물으면 한 번만 로드한다
+const _urlInflight = new Map<string, Promise<MgProbe>>();
+
+/** URL 로 조직 경계상자 산출(비동기). 화면 엘리먼트를 직접 못 잡는 통합 지점용.
+ *  브라우저 캐시에 이미 있는 프레임이면 네트워크 왕복 없이 끝난다. */
+export function mgProbeUrl(url: string, thr: number): Promise<MgProbe> {
+  const ck = _key(url, thr);
+  const hit = BOXES.get(ck);
+  if (hit !== undefined) return Promise.resolve(hit);
+  const cur = _urlInflight.get(ck);
+  if (cur) return cur;
+  const pr = new Promise<MgProbe>((resolve) => {
+    const im = new Image();
+    im.crossOrigin = "anonymous";        // 동일 출처 프록시 — 캔버스 오염 없음
+    im.onload = () => resolve(_remember(ck, analyze(im, thr)));
+    // 로드 실패는 **캐시하지 않는다** — 일시 오류가 영구 고착되지 않게
+    im.onerror = () => resolve({ kind: "blind" });
+    im.src = url;
+  }).finally(() => { _urlInflight.delete(ck); });
+  _urlInflight.set(ck, pr);
+  return pr;
 }
 
 /** 탐지 실패/비활성 시 쓰는 고정 비율 상자 — 안쪽(유두 쪽)에서 ratio% 를 잘라낸다 */
@@ -176,9 +218,37 @@ export function mgWallByCol(tileIndex: number, cols: number): "L" | "R" {
   return (tileIndex % cols) < cols / 2 ? "R" : "L";
 }
 
+/** 이 칸의 조직을 어느 변에 붙일지 — 붙일 짝이 없으면 null(= 손대지 않는다).
+ *
+ *  맞붙임은 **마주 볼 상대가 있을 때만** 의미가 있다. 짝이 없는데 밀어붙이면
+ *  영상을 화면 바깥쪽으로 밀어내는 꼴이 된다. 두 경우를 막는다:
+ *   · 홀수 그리드의 정가운데 열(3열의 가운데 등) — 마주 볼 상대가 없다
+ *   · 붙일 방향이 그리드의 바깥 변인 경우(맨 왼쪽 칸을 왼쪽으로) */
+export function mgInnerSide(lat: "R" | "L" | "", ci: number, cols: number): "left" | "right" | null {
+  if (cols < 2) return null;
+  let side: "left" | "right" | null = null;
+  if (lat === "R") side = "right";          // 우유방은 화면 왼쪽 열 → 오른쪽(가운데)으로
+  else if (lat === "L") side = "left";
+  else if (ci < (cols - 1) / 2) side = "right";
+  else if (ci > (cols - 1) / 2) side = "left";
+  if (!side) return null;                   // 홀수 그리드 정가운데 — 짝 없음
+  if (side === "right" && ci === cols - 1) return null;
+  if (side === "left" && ci === 0) return null;
+  return side;
+}
+
+/** 이미 적용된 변환과 사실상 같은지 — 불필요한 setState(리렌더 루프) 방지 */
+export const mgSameXf = (
+  a: { zoom: number; tx: number; ty: number },
+  b: { zoom: number; tx: number; ty: number },
+) => Math.abs(a.zoom - b.zoom) < 1e-4 && Math.abs(a.tx - b.tx) < 0.5 && Math.abs(a.ty - b.ty) < 0.5;
+
 // ── 변환 계산 ─────────────────────────────────────────────────────────────
 
 export interface MgFit { mz: number; mtx: number; mty: number }
+
+/** 배율 상한 — 탐지가 지나치게 작은 상자를 내놓아도 화면이 폭주하지 않게 */
+export const MG_MAX_ZOOM = 4;
 
 /** 이 타일 하나만 놓고 봤을 때의 후보 배율. 실제 적용 배율은 호출부가 대상 전체의
  *  **최소값**을 취해 동일하게 맞춘다(좌우 유방 크기 비교 보존). */
@@ -196,7 +266,7 @@ export function mgZoomOf(
   const bh = Math.min(1, box.y1 + m) - Math.max(0, box.y0 - m);
   if (bw <= 0.02 || bh <= 0.02) return null;
   const s0 = Math.min(W / iw, H / ih);
-  const z = Math.min(W / (bw * iw * s0), H / (bh * ih * s0));
+  const z = Math.min(W / (bw * iw * s0), H / (bh * ih * s0), MG_MAX_ZOOM);
   return isFinite(z) && z > 0 ? z : null;
 }
 
@@ -228,7 +298,7 @@ export function mgFit(
   const dw = iw * s0, dh = ih * s0;
   const mz = forceZoom !== undefined && forceZoom > 0
     ? forceZoom
-    : Math.min(W / (bw * dw), H / (bh * dh));
+    : Math.min(W / (bw * dw), H / (bh * dh), MG_MAX_ZOOM);
   if (!isFinite(mz) || mz <= 0) return null;
 
   const sx = flipH ? -1 : 1, sy = flipV ? -1 : 1;
@@ -242,6 +312,21 @@ export function mgFit(
   const ey0 = sy * mz * (y0 - 0.5) * dh, ey1 = sy * mz * (y1 - 0.5) * dh;
   const mty = -(Math.min(ey0, ey1) + Math.max(ey0, ey1)) / 2;
   return { mz, mtx, mty };
+}
+
+/** 조직의 안쪽 경계를 페인의 안쪽 변에 붙이는 tx (페인 상태에 직접 써 넣는 통합용).
+ *  화면 x = paneW/2 + (px − cols/2)·s·dir + tx  — 뷰어의 translate→scale 합성과 동일. */
+export function mgTxFor(g: {
+  paneW: number; paneH: number; cols: number; rows: number;
+  bbox: { x0: number; x1: number }; side: "left" | "right"; flipH: boolean; zoom: number;
+}): number {
+  const s0 = Math.min(g.paneW / g.cols, g.paneH / g.rows);
+  const s = s0 * g.zoom;
+  const wantRight = g.side === "right";
+  // 좌우 반전 상태면 화면상 '안쪽'이 되는 bbox 모서리가 뒤집힌다
+  const xIn = ((g.flipH ? !wantRight : wantRight) ? g.bbox.x1 : g.bbox.x0) * g.cols;
+  const dir = g.flipH ? -1 : 1;
+  return (wantRight ? g.paneW : 0) - g.paneW / 2 - (xIn - g.cols / 2) * s * dir;
 }
 
 /** 페인 상태에 MG 보정을 합성한 pEff — 뷰어의 transform·주석 좌표 수학이 그대로 쓴다.

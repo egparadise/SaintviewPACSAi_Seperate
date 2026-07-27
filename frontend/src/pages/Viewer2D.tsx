@@ -11,7 +11,7 @@ import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgRatioBox, mgStamp, mgWallByCol,
-  mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
+  mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -2827,6 +2827,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   })();
   const mgFitFor = (pid: string, t: number, p: PaneState, inst: InstanceNode | undefined): MgFit | null => {
     if (!mgOn || !inst || !mgSeries(p)) return null;
+    // 마주 볼 짝이 없는 칸은 손대지 않는다(밖으로 밀어내는 사고 방지).
+    // Series 분할로 걸린 MG 는 페인 그리드의 열 위치로 판정한다.
+    const gCols = (p.il?.c ?? 1) > 1 ? p.il!.c : LAYOUTS[layout].cols;
+    const gi = (p.il?.c ?? 1) > 1 ? t : PANE_IDS.indexOf(pid) % LAYOUTS[layout].cols;
+    if (!mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, gi, gCols)) return null;
     const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
     // 단일 이미지 페인은 페인 자체가 타일 — 기존 페인 실측(ResizeObserver)을 그대로 쓴다
     const size = tiles > 1 ? tileSizes[`${pid}:${t}`] : paneSizes.current[pid];

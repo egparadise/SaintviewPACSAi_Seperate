@@ -1679,11 +1679,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   </Row>
                   {mgCfg.detect === "auto" && (
                     <Row label="배경 임계값">
-                      <input type="number" min={1} max={40} step={1} value={mgCfg.thr}
+                      <input type="number" min={1} max={80} step={1} value={mgCfg.thr}
                              onChange={(e) => setMgCfg({ ...mgCfg, thr: Number(e.target.value) || 12 })}
-                             style={{ width: 70 }} /> %
+                             style={{ width: 70 }} /> (0~255)
                       <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
-                        공기로 볼 밝기 기준. 조직이 잘리면 낮추고, 여백이 남으면 높입니다.
+                        프레임 네 모서리에서 잰 <b>배경 밝기와의 차이</b>가 이 값을 넘으면 조직으로 봅니다.
+                        조직이 잘리면 낮추고, 여백이 남으면 높입니다.
                       </span>
                     </Row>
                   )}

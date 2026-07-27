@@ -29,7 +29,7 @@ import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewe
 import { mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgRatioBox,
-  mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
+  mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 
@@ -1698,6 +1698,9 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   })();
   const mgFitFor = (pi: number, t: number, p: Pane, inst: InstanceNode | undefined): MgFit | null => {
     if (!mgOn || !inst || !mgSeries(p)) return null;
+    // 마주 볼 짝이 없는 칸(홀수 그리드 정가운데·그리드 바깥 변)은 손대지 않는다 —
+    // 밀어붙이면 영상을 화면 바깥쪽으로 밀어내는 꼴이 된다
+    if (!mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, t % p.il.c, p.il.c)) return null;
     const size = tileSizes[`${pi}:${t}`];
     if (!size) return null;                       // 실측 전 — 다음 프레임에 적용
     const box = mgBoxAt(p, inst, t);
