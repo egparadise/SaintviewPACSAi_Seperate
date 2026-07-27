@@ -17,6 +17,7 @@ import { api, openViewer, type Anno, type GspsItem, type InstanceNode, type Seri
 import { annoLabel, measureAnno } from "../lib/annotations";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
+import { clampPage, lastPage, pageLabel } from "../lib/seriesPage";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -355,6 +356,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [keyMarks, setKeyMarks] = useState<Set<string>>(new Set());
   const [activeExam, setActiveExam] = useState(0);
   const [sLayout, setSLayout] = useState<{ r: number; c: number }>({ r: 1, c: 1 });
+  // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
+  const [srsPage, setSrsPage] = useState(0);
   const [panes, setPanes] = useState<Pane[]>([initPane()]);
   const [active, setActive] = useState(0);
   const [tool, setTool] = useState<Tool>("select");
@@ -2105,11 +2108,45 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Series 페이지 넘김 ────────────────────────────────────────────────
+  // 시리즈 수가 Series 분할(페인 수)보다 많으면 뒤쪽 시리즈가 화면에 안 나온다.
+  // **Shift + 마우스 휠**로 페이지를 넘긴다 — 일반 휠(슬라이스 스크롤)은 그대로 둔다.
+  // ⚠ 비교(과거검사) 페인은 건드리지 않는다 — 현재 검사(또는 빈) 페인만 슬롯으로 쓴다
+  const srsVis = Math.max(1, sLayout.r * sLayout.c);
+  const srsSlots = panes.slice(0, srsVis)
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => !p.series || p.studyUid === curD.study_uid)
+    .map(({ i }) => i);
+  const srsPageSize = Math.max(1, srsSlots.length);
+  const srsPageMax = lastPage(series.length, srsPageSize);
+  const srsPageStep = (dir: number) => {
+    if (srsPageMax <= 0) { setToast("표시할 다음 시리즈가 없습니다"); return; }
+    const pg = clampPage(srsPage + dir, series.length, srsPageSize);
+    if (pg === srsPage) return;
+    setSrsPage(pg);
+    setPanes((prev) => prev.map((p, i) => {
+      const slot = srsSlots.indexOf(i);
+      if (slot < 0) return p;                          // 비교 페인·화면 밖 페인은 그대로
+      const s = series[pg * srsPageSize + slot] ?? null;   // 시리즈는 순서대로
+      return applyPStateToPane({ ...initPane(curD.study_uid), series: s, il: p.il });
+    }));
+    if (srsSlots[0] !== undefined) setActive(srsSlots[0]);
+    setToast(`시리즈 ${pageLabel(pg, series.length, srsPageSize)}`);
+  };
+
+  useEffect(() => { setSrsPage(0); }, [curD.id, sLayout.r, sLayout.c, series]);
+
   const onWheel = (e: React.WheelEvent, i: number) => {
     if (tHeld.current) {   // T+스크롤 — 오버레이 글자 크기 (계정 저장)
       const nf = Math.min(24, Math.max(6, ovlFont + (e.deltaY < 0 ? 0.5 : -0.5)));
       setOvlFont(nf);
       persistPrefs({ infi_overlay_font: nf });
+      return;
+    }
+    // Shift+휠 = Series 페이지 넘김. ⚠ Shift 시 세로 휠이 가로(deltaX)로 오는 환경이 있다
+    if (e.shiftKey) {
+      const d = e.deltaY || e.deltaX;
+      if (d) srsPageStep(d > 0 ? 1 : -1);
       return;
     }
     if (e.ctrlKey) {

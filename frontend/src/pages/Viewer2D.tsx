@@ -22,6 +22,7 @@ import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu
 import { IN_MOUSE_OPS } from "../lib/infiConfig";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
+import { clampPage, lastPage, pageLabel } from "../lib/seriesPage";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
@@ -491,7 +492,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [series, setSeries] = useState<SeriesNode[]>([]);
   const [layout, setLayout] = useState<keyof typeof LAYOUTS>("1x1");
   // Image Layout — 페인 내부 이미지 분할(연속 이미지 N×M 타일, UBPACS)
-  const [imgLay, setImgLay] = useState({ r: 1, c: 1 });   // 콤보 표시용 — 실제 적용은 페인별 il
+  const [imgLay, setImgLay] = useState({ r: 1, c: 1 });
+  // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
+  const [srsPage, setSrsPage] = useState(0);   // 콤보 표시용 — 실제 적용은 페인별 il
   // 2D 행잉(모달리티→Image 분할) 기본 il — 검사 열 때 페인에 적용(prefs 로드에서 해석)
   const hang2dImgRef = useRef<{ r: number; c: number } | null>(null);
   // 페인 최대화(더블클릭 토글) + 페인 경계 스플리터 분율 (In Viewer 이식)
@@ -1066,6 +1069,37 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /* 2D-MG 행잉 — 4-view 가 한 시리즈에 다 들어 있는 MG 검사(대부분)는 Series 2×2 로 걸면 3칸이 빈다.
      설정(뷰어 공통 > 2D 행잉 > MG)의 Image layout(1×2/2×2/2×3) 타일로 건다.
      시리즈·설정이 둘 다 준비된 뒤 실행되므로 로드 순서 경합이 없다. */
+  // ── Series 페이지 넘김 ────────────────────────────────────────────────
+  // 시리즈 수가 Series 분할(페인 수)보다 많으면 뒤쪽 시리즈가 화면에 안 나온다.
+  // **Shift + 마우스 휠**로 페이지를 넘긴다 — 일반 휠(슬라이스 스크롤)은 그대로 둔다.
+  // ⚠ 비교(과거검사) 페인은 건드리지 않는다 — 비교 배치를 날려버리면 안 된다.
+  //    현재 검사(또는 빈) 페인만 '슬롯'으로 보고 그 개수를 페이지 크기로 쓴다.
+  const srsSlots = PANE_IDS.slice(0, LAYOUTS[layout].count)
+    .filter((pid) => !panes[pid]?.series || panes[pid]?.studyUid === detail.study_uid);
+  const srsPageSize = Math.max(1, srsSlots.length);
+  const srsPageMax = lastPage(series.length, srsPageSize);
+  const applySrsPage = useCallback((page: number, slots: string[]) => {
+    const size = Math.max(1, slots.length);
+    const pg = clampPage(page, series.length, size);
+    setSrsPage(pg);
+    setPanes((prev) => {
+      const next = { ...prev };
+      slots.forEach((pid, i) => {
+        const s = series[pg * size + i];             // 시리즈는 순서대로
+        next[pid] = s
+          ? applyPState({ ...initPane(detail.study_uid), series: s,
+                          index: Math.floor(s.instances.length / 2),
+                          il: hang2dImgRef.current ?? undefined })
+          : initPane(detail.study_uid);              // 남는 칸은 빈 페인(마지막 시리즈 반복 금지)
+      });
+      return next;
+    });
+    if (slots[0]) setActivePane(slots[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [series, detail.study_uid]);
+  // 검사·분할이 바뀌면 1페이지로
+  useEffect(() => { setSrsPage(0); }, [detail.id, layout, series]);
+
   const mgHungRef = useRef("");
   const mgHangTo = (lk: string) => {
     // ⚠ **Image 타일이 아니라 Series 분할**로 건다. T-View/SaintView 는 타일(il>1) 페인에
@@ -1515,6 +1549,15 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // ── 휠 rAF 코얼레싱 — 이벤트를 프레임 단위로 모아 스텝 '누적' 적용(요청은 최종 프레임 1장만).
   //    스텝 수를 보존하므로 프리스핀 휠·트랙패드의 주파 속도(조작감)도 기존과 동일. ──
   const wheelRaf = useRef<{ pid: string; net: number; raf: number } | null>(null);
+  /** Shift+휠 한 칸 — 페이지가 하나뿐이면 아무 일도 하지 않는다(끝에서 순환하지 않음) */
+  const srsPageStep = useCallback((dir: number) => {
+    if (srsPageMax <= 0) { setStatus("표시할 다음 시리즈가 없습니다"); return; }
+    const pg = Math.max(0, Math.min(srsPageMax, srsPage + dir));
+    if (pg === srsPage) return;
+    applySrsPage(pg, srsSlots);
+    setStatus(`시리즈 ${pageLabel(pg, series.length, srsPageSize)}`);
+  }, [srsPage, srsPageMax, applySrsPage, srsSlots, srsPageSize, series.length]);
+
   const wheelStep = useCallback((pid: string, dir: number) => {
     const w = wheelRaf.current;
     if (w) { w.pid = pid; w.net += dir; return; }   // 이번 프레임 예약됨 — 스텝 누적
@@ -2905,6 +2948,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                persistPrefsPatch({ ty_overlay_font: nf });
                return;
              }
+             // Shift+휠 = Series 페이지 넘김(분할에 안 들어간 뒤쪽 시리즈 보기).
+             // ⚠ Shift 를 누르면 브라우저가 세로 휠을 가로(deltaX)로 바꿔 보내는 환경이 있다.
+             if (e.shiftKey) {
+               const d = e.deltaY || e.deltaX;
+               if (d) srsPageStep(d > 0 ? 1 : -1);
+               return;
+             }
              wheelStep(pid, e.deltaY > 0 ? 1 : -1);
            }}
            onDoubleClick={() => {
@@ -2983,6 +3033,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   const u = renderedUrlAt(p, p.index + k);
                   const ti = p.series?.instances[p.index + k];
                   const fk = mgTiles ? mgFitFor(pid, k, p, ti) : null;
+                  const tIdx = p.index + k;          // 이 타일이 실제로 보여 주는 이미지 번호
+                  const nInst = p.series?.instances.length ?? 0;
                   return (
                     <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)}
                          style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0 }}>
@@ -3002,6 +3054,22 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                                transform: mgTiles ? xf(mgApply(p, fk)) : undefined,
                                filter: paneFilter(p),
                              }} />
+                      )}
+                      {/* 타일별 정보 — Image 분할에서는 각 칸이 어느 이미지인지 스스로 밝혀야 한다.
+                          예전엔 페인 한 곳에만 "Img: 130~145/258" 범위로 떠서 칸별 식별이 안 됐다.
+                          ⚠ 이 라벨은 변환 wrapper **밖**이라 확대/이동에 딸려 움직이지 않는다(칸에 고정). */}
+                      {overlayOn && ti && (
+                        <div style={{ position: "absolute", left: 3, bottom: 2, zIndex: 3,
+                                      pointerEvents: "none", whiteSpace: "nowrap",
+                                      fontSize: Math.max(8, tyOvFont - 1.5), lineHeight: 1.3,
+                                      color: "var(--text-secondary)", textShadow: "0 0 3px #000" }}>
+                          {tIdx + 1}/{nInst}
+                        </div>
+                      )}
+                      {/* 키이미지 표시는 칸 단위로도 보여야 한다(현재 이미지만 보던 것을 확장) */}
+                      {ti && keyMarks.has(ti.sop_uid) && (
+                        <div style={{ position: "absolute", top: 2, right: 3, zIndex: 3,
+                                      pointerEvents: "none", fontSize: 10 }}>🔑</div>
                       )}
                     </div>
                   );
@@ -3075,7 +3143,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             </div>
             <div style={ov("tr", tyOvFont)}>
               S{p.series.series_number} {p.series.series_desc || p.series.modality}<br />
-              Img: {p.index + 1}{tileCount > 1 && `~${Math.min(p.index + tileCount, p.series.instances.length)}`}/{p.series.instances.length}
+              {/* 분할(타일)에서는 칸마다 번호가 붙으므로 여기선 총 장수만 — 중복 표기 제거 */}
+              {tileCount > 1
+                ? `Img: ${p.series.instances.length}장`
+                : `Img: ${p.index + 1}/${p.series.instances.length}`}
             </div>
             <div style={ov("bl", tyOvFont)}>{meta.modality} · {meta.patient_key}</div>
             <div style={ov("br", tyOvFont)}>
@@ -4200,6 +4271,19 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           );
         })()}
         <span>Series {LAYOUTS[layout].rows}×{LAYOUTS[layout].cols} · Image {(panes[activePane]?.il ?? { r: 1, c: 1 }).r}×{(panes[activePane]?.il ?? { r: 1, c: 1 }).c} (활성 페인)</span>
+        {/* 시리즈가 분할보다 많을 때만 — Shift+휠로 넘길 수 있다는 것을 보이게 */}
+        {srsPageMax > 0 && (
+          <span style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 10 }}
+                title="Shift + 마우스 휠 — 분할에 안 들어간 뒤쪽 시리즈 보기">
+            <button onClick={() => srsPageStep(-1)} disabled={srsPage === 0}
+                    style={{ padding: "0 5px", fontSize: 11 }}>◀</button>
+            <b style={{ fontSize: 11.5 }}>
+              Srs {pageLabel(srsPage, series.length, srsPageSize)}
+            </b>
+            <button onClick={() => srsPageStep(1)} disabled={srsPage === srsPageMax}
+                    style={{ padding: "0 5px", fontSize: 11 }}>▶</button>
+          </span>
+        )}
       </div>
 
       {skin === "saint" && prefs.paletteSide === "top" && saintBar}
