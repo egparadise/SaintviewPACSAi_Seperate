@@ -281,6 +281,11 @@ export interface RelatedExam {
   modality: string;
   study_desc: string;
   status: string;
+  // ↓ Compare 후보(compareCandidates)에만 실린다. 판독의사 기준은 **다른 환자**가 섞이므로
+  //   환자명을 반드시 함께 보여 줘야 한다(같은 환자로 오인하면 위험하다).
+  body_part?: string;
+  patient_name?: string;
+  patient_key?: string;
 }
 
 export interface StudyDetail extends StudyRow {
@@ -547,6 +552,12 @@ export const api = {
   webpacsImportStatus: (remoteIdx: number) =>
     req<{ status: string; study_id?: number | null; total?: number; done?: number;
           failed?: number; error?: string | null }>(`/api/webpacs/import/${remoteIdx}/status`),
+  /** Compare 후보 — 환자 기준/판독의사 기준. Live(vid) 든 로컬이든 같은 계약. */
+  compareCandidates: (studyId: number, query: string) =>
+    req<{ items: RelatedExam[]; basis: string; period: string;
+          by_modality: boolean; by_body_part: boolean }>(
+      (isLiveId(studyId) ? `${LIVE}/studies/${studyId}/compare-candidates`
+                         : `/api/studies/${studyId}/compare-candidates`) + `?${query}`),
   seriesTree: (studyId: number) =>
     req<{ study_uid: string; series: SeriesNode[] }>(
       isLiveId(studyId) ? `${LIVE}/studies/${studyId}/series-tree`

@@ -1,7 +1,7 @@
 // Saintview 2D 뷰어 — WADO-RS /rendered 기반(픽셀 보장) + Zetta/INFINITT 레이아웃
 // 설정 연동: 팔레트/썸네일 방향·크기, 썸네일 모드(시리즈/전체), 행잉(모달리티→분할), 판독 도크
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, openViewer, type Anno, type InstanceNode, type SeriesNode, type StudyDetail } from "../api";
+import { api, openViewer, type Anno, type InstanceNode, type SeriesNode, type StudyDetail, type RelatedExam} from "../api";
 import { annoLabel, contentRect, measureAnno, refLineOn, screenToImage } from "../lib/annotations";
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
@@ -24,6 +24,7 @@ import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageForma
 import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { TileGridLines } from "../components/TileGridLines";
+import { ComparePicker, useCompareDefault } from "../components/ComparePicker";
 import { CORNERS, cornerLines, cornersFor, type OverlaySource } from "../lib/overlayFields";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
@@ -715,6 +716,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const mediaInputRef = useRef<HTMLInputElement>(null);
   // TY-3(9): Compare 모달 — 같은 환자 과거검사 다중 선택 비교
   const [cmpOpen, setCmpOpen] = useState(false);
+  // Compare 기준 기본값(설정 > 판독 > 기본설정). 창 안에서 바꿀 수 있고 그 변경은 저장하지 않는다.
+  const cmpDefault = useCompareDefault();
+  // 고른 후보의 원본 행 — 비교 열기에서 study id 만으로는 부족한 경우를 대비해 보관
+  const cmpRowsRef = useRef<Map<number, RelatedExam>>(new Map());
   const [cmpSel, setCmpSel] = useState<Set<number>>(new Set());
   // 비교 역할 라벨 — 다중 모니터 slave 창은 URL cmprole(S1/S2…), master 는 비교 시작 시 "M" 설정.
   //  값이 있으면 창 전체가 그 역할(중앙 상단 녹색 라벨). 단일 모니터 인플레이스 비교는 페인별로 파생.
@@ -4682,34 +4687,20 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
                         width: "min(560px, 94vw)", maxHeight: "80vh", overflow: "auto", padding: 16 }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-              <b style={{ fontSize: 13 }}>⇄ Compare — {detail.patient_name} 의 과거검사</b>
+              <b style={{ fontSize: 13 }}>⇄ Compare — {detail.patient_name} · {detail.modality} {detail.body_part || ""}</b>
               <button style={{ marginLeft: "auto" }} onClick={() => setCmpOpen(false)}>✕</button>
             </div>
-            {(detail.related_exams ?? []).length === 0 && (
-              <div style={{ fontSize: 12.5, color: "var(--text-secondary)", padding: 8 }}>
-                이 환자의 과거검사가 없습니다.<br />
-                다른 환자와 비교하려면 워크리스트의 <b>＋Add</b> 버튼을 사용하세요(명시적 비교 — 환자 혼합 방지).
-              </div>
-            )}
-            {(detail.related_exams ?? []).map((re) => (
-              <label key={re.id}
-                     style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 6px",
-                              borderRadius: 4, fontSize: 12.5, cursor: "pointer",
-                              background: cmpSel.has(re.id) ? "var(--bg-elevated)" : undefined }}>
-                <input type="checkbox" checked={cmpSel.has(re.id)}
-                       onChange={(e) => setCmpSel((s) => {
-                         const n = new Set(s);
-                         if (e.target.checked) n.add(re.id); else n.delete(re.id);
-                         return n;
-                       })} />
-                <span style={{ width: 78 }}>{re.study_date}</span>
-                <span style={{ width: 36 }}>{re.modality}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {re.study_desc}
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{re.status}</span>
-              </label>
-            ))}
+            <ComparePicker studyId={detail.id} modality={detail.modality}
+                           bodyPart={detail.body_part} patientKey={detail.patient_key}
+                           initial={cmpDefault} selected={cmpSel}
+                           onToggle={(id, on, row) => {
+                             cmpRowsRef.current.set(id, row);
+                             setCmpSel((s) => {
+                               const n = new Set(s);
+                               if (on) n.add(id); else n.delete(id);
+                               return n;
+                             });
+                           }} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="primary" disabled={!cmpSel.size} onClick={() => void openCompare()}>
                 비교 열기 ({cmpSel.size}건)

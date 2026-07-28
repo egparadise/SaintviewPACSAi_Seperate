@@ -92,6 +92,23 @@ def _no_cred_client():
 
 
 VID1 = VID_BASE + 1
+
+
+@pytest.fixture(autouse=True)
+def _isolate_live_caches():
+    """테스트마다 Live 캐시를 비운다.
+
+    webpacs_live 는 모듈 수준 캐시를 세 벌 들고 있다(_TREE_CACHE 30초 · _REL_CACHE ·
+    디코드/인코드). 모의 A 서버는 호출마다 **새 UID 를 생성**하므로, 앞 테스트가 덥혀 놓은
+    트리가 남아 있으면 뒤 테스트에서 detail 의 UID 와 tree 의 UID 가 달라져 엉뚱하게 깨진다
+    (실제로 test_live_detail_and_tree 가 그렇게 실패했다).
+    개별 테스트에서 손으로 비우던 것을 여기로 올려 다시는 새지 않게 한다.
+    """
+    from app.services import webpacs_live as live
+
+    live.invalidate_tree()
+    live.invalidate_related()
+    yield
 VID2 = VID_BASE + 2
 VID3 = VID_BASE + 3
 
@@ -596,6 +613,7 @@ def test_viewer_open_skips_slow_patient_search(client, auth_headers, live_ready,
 
     vid = VID_BASE + 1
     live.invalidate_related()      # 앞선 테스트가 덥혀 놓은 캐시와 격리
+    live.invalidate_tree()         # 시리즈 트리도 vid 키 30초 캐시라 같이 비운다
 
     def calls():
         return httpx.get(f"{mock_remote}/__test__/state").json()["list_calls"]

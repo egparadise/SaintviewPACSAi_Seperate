@@ -88,6 +88,20 @@ def study_detail(vid: int, related: int = 1, db: Session = Depends(get_db),
     return _wrap(lambda: live.live_detail(db, vid, user, with_related=bool(related)))
 
 
+@router.get("/studies/{vid}/compare-candidates")
+def live_compare_candidates(vid: int, basis: str = "patient",
+                            modality: int = 0, body_part: int = 0, period: str = "all",
+                            db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    """Live Compare 후보 — 로컬 경로와 같은 계약(basis/modality/body_part/period)."""
+    from app.services import compare_basis
+
+    items = _wrap(lambda: compare_basis.live_candidates(
+        db, vid, user, basis=basis,
+        by_modality=bool(modality), by_body_part=bool(body_part), period=period))
+    return {"items": items, "basis": basis, "period": period,
+            "by_modality": bool(modality), "by_body_part": bool(body_part)}
+
+
 @router.get("/studies/{vid}/related")
 def study_related(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
     """과거검사(동일 환자) — 뷰어가 화면을 띄운 뒤 별도로 받아 채운다. 환자 단위 60초 캐시."""

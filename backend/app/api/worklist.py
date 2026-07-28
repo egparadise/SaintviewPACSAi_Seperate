@@ -262,6 +262,25 @@ def _cached_series_tree(client, orthanc_id: str) -> list:
     return tree
 
 
+@router.get("/studies/{study_id}/compare-candidates")
+def compare_candidates(study_id: int, basis: str = "patient",
+                       modality: int = 0, body_part: int = 0, period: str = "all",
+                       db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    """Compare 후보 — 환자 기준(기본) / 판독의사 기준.
+
+    설정 > 판독 > 기본설정의 Compare 항목이 기본값을 정하고, 뷰어에서 그 자리에서 바꿀 수도 있다.
+    basis=patient 는 같은 환자의 과거 검사, basis=reader 는 **내가 판독한** 과거 검사가 모집단이다.
+    modality·body_part 는 '지금 검사와 같은 것만' 으로 좁히는 체크(0/1), period 는 기간이다.
+    """
+    from app.services import compare_basis
+
+    items = compare_basis.candidates(
+        db, study_id, user, basis=basis,
+        by_modality=bool(modality), by_body_part=bool(body_part), period=period)
+    return {"items": items, "basis": basis, "period": period,
+            "by_modality": bool(modality), "by_body_part": bool(body_part)}
+
+
 @router.get("/studies/{study_id}/series-tree")
 def series_tree(study_id: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
     """시리즈→인스턴스 트리 + 썸네일 URL — 자체 뷰어 세로 썸네일용."""

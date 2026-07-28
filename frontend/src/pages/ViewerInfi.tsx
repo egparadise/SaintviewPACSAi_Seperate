@@ -21,6 +21,7 @@ import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage
 import { TileGridLines } from "../components/TileGridLines";
 import { CORNERS, cornerLines, cornersFor, type OverlaySource } from "../lib/overlayFields";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
+import { ComparePicker, useCompareDefault } from "../components/ComparePicker";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
 import { GridPicker } from "../lib/GridPicker";
@@ -411,6 +412,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [show3d, setShow3d] = useState(false);   // 정보바 3D 버튼 — 현재 검사 MPR/MIP
   // Compare — 같은 환자 과거검사 선택 비교 (선택 검사들을 페인으로 추가 + Sync With Other Exams)
   const [cmpOpen, setCmpOpen] = useState(false);
+  // Compare 기준 기본값(설정 > 판독 > 기본설정) — 창 안에서 바꾼 것은 저장하지 않는다
+  const cmpDefault = useCompareDefault();
   const [cmpSel, setCmpSel] = useState<Set<number>>(new Set());
   // 비교 역할 라벨(M / S1…) — 다중 모니터 slave 는 URL cmprole, master 는 비교 시작 시 "M" (중앙 상단 녹색)
   const [cmpRole, setCmpRole] = useState<string>(() => new URLSearchParams(window.location.search).get("cmprole") || "");
@@ -3591,34 +3594,17 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
                         width: "min(560px, 94vw)", maxHeight: "80vh", overflow: "auto", padding: 16 }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
-              <b style={{ fontSize: 13 }}>⇄ Compare — {curD.patient_name} 의 과거검사</b>
+              <b style={{ fontSize: 13 }}>⇄ Compare — {curD.patient_name} · {curD.modality} {curD.body_part || ""}</b>
               <button style={{ marginLeft: "auto" }} onClick={() => setCmpOpen(false)}>✕</button>
             </div>
-            {(curD.related_exams ?? []).length === 0 && (
-              <div style={{ fontSize: 12.5, color: "var(--text-secondary)", padding: 8 }}>
-                이 환자의 과거검사가 없습니다.<br />
-                다른 환자와 비교하려면 워크리스트의 <b>＋Add</b> 버튼을 사용하세요(명시적 비교).
-              </div>
-            )}
-            {(curD.related_exams ?? []).map((re) => (
-              <label key={re.id}
-                     style={{ display: "flex", gap: 8, alignItems: "center", padding: "5px 6px",
-                              borderRadius: 4, fontSize: 12.5, cursor: "pointer",
-                              background: cmpSel.has(re.id) ? "var(--accent-subtle)" : undefined }}>
-                <input type="checkbox" checked={cmpSel.has(re.id)}
-                       onChange={(e) => setCmpSel((s) => {
-                         const n = new Set(s);
-                         if (e.target.checked) n.add(re.id); else n.delete(re.id);
-                         return n;
-                       })} />
-                <span style={{ width: 78 }}>{re.study_date}</span>
-                <span style={{ width: 36 }}>{re.modality}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {re.study_desc}
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{re.status}</span>
-              </label>
-            ))}
+            <ComparePicker studyId={curD.id} modality={curD.modality}
+                           bodyPart={curD.body_part} patientKey={curD.patient_key}
+                           initial={cmpDefault} selected={cmpSel}
+                           onToggle={(id, on) => setCmpSel((sel) => {
+                             const n = new Set(sel);
+                             if (on) n.add(id); else n.delete(id);
+                             return n;
+                           })} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="primary" disabled={!cmpSel.size}
                       onClick={() => {

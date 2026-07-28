@@ -6,6 +6,10 @@ import {
   INFI_COLUMNS, SV_COLUMNS, SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
+import {
+  BASIS_LABEL, DEFAULT_COMPARE, PERIODS, PERIOD_LABEL, readCompareCfg,
+  type CompareBasisKind, type CompareCfg, type ComparePeriod,
+} from "../lib/compareBasis";
 import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, TOOLBAR_DEFS, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
 import { IN_PALETTE } from "../lib/infiConfig";
 import { DEFAULT_MG_CFG, MG_LAYOUTS, readMgCfg, type MgCfg } from "../lib/mgHang";
@@ -278,6 +282,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [rptAutoApply, setRptAutoApply] = useState(true);
   // 판독(Reading) 페이지 — 기본/단축키/템플릿 3탭 + 레포트 옵션(report.prefs)
   const [rdTab, setRdTab] = useState<"basic" | "shortcut" | "template">("basic");
+  // Compare 기준 — report.prefs.compare. 뷰어 3종이 이 값을 기본값으로 쓴다.
+  // (이름이 cmpCfg 가 아닌 이유: 그 이름은 이미 Compare **표시 방식**(다중모니터·라벨) 설정이 쓴다)
+  const [cmpBasis, setCmpBasis] = useState<CompareCfg>(DEFAULT_COMPARE);
   const [rdOpts, setRdOpts] = useState<Record<string, unknown>>({
     always_report_window: false, phrase_backup_min: 10,
     open_next_after_save: false, save_alert: false, auto_insert_prior: false,
@@ -486,6 +493,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       const v = r.value as { ai_panel?: boolean; auto_apply?: boolean } & Record<string, unknown>;
       if (v.ai_panel !== undefined) setRptAiPanel(v.ai_panel);
       if (v.auto_apply !== undefined) setRptAutoApply(v.auto_apply);
+      setCmpBasis(readCompareCfg(v.compare));
       setRdOpts((prev) => ({ ...prev, ...v }));
     }).catch(() => {});
     api.getSetting("mode.profiles").then((r) => {
@@ -600,7 +608,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       drop_menu: dropMenu,
     }, "user");
     await api.putSetting("report.prefs",
-      { ...rdOpts, ai_panel: rptAiPanel, auto_apply: rptAutoApply }, "user");
+      { ...rdOpts, ai_panel: rptAiPanel, auto_apply: rptAutoApply, compare: cmpBasis }, "user");
     if (isAdmin) {
       // 서버 네트워크(공유 루트 등)도 OK(저장)로 함께 저장 — '서버 설정 저장' 버튼을 몰라도 반영
       if (snDir.trim() || snWeb.ip || snWeb.port || snWeb.name || snWeb.ae_title) {
@@ -1205,6 +1213,56 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           await api.putProfile(profName, profLicense);
                           setSaved("판독의 정보 저장됨 — 이후 확정(서명)부터 적용");
                         }}>판독의 정보 저장</button>
+                      </div>
+                    </Group>
+                    <Group title="Compare — 비교할 과거 검사를 어디서 고를까">
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {(["patient", "reader"] as CompareBasisKind[]).map((k) => (
+                          <label key={k} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                            <input type="radio" name="cmpbasis" checked={cmpBasis.basis === k}
+                                   onChange={() => setCmpCfg((c) => ({ ...c, basis: k }))}
+                                   style={{ marginTop: 3 }} />
+                            <span>
+                              <b style={{ fontSize: 12.5 }}>{BASIS_LABEL[k]}</b>
+                              <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                                {k === "patient"
+                                  ? "같은 환자(차트번호)의 과거 검사에서 고릅니다. 판독 비교의 기본입니다."
+                                  : "내가 판독했던 검사 전체에서 고릅니다 — 환자가 달라도 됩니다. "
+                                    + "내가 이미 판독하며 본 검사만 모집단이라 새로 열리는 자료는 없습니다."}
+                              </div>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+
+                      <Row label="좁히기">
+                        <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                            <input type="checkbox" checked={cmpBasis.by_modality}
+                                   onChange={(e) => setCmpCfg((c) => ({ ...c, by_modality: e.target.checked }))} />
+                            Modality
+                          </label>
+                          <label style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                            <input type="checkbox" checked={cmpBasis.by_body_part}
+                                   onChange={(e) => setCmpCfg((c) => ({ ...c, by_body_part: e.target.checked }))} />
+                            Bodypart
+                          </label>
+                        </span>
+                      </Row>
+                      <Row label="기간">
+                        <select value={cmpBasis.period}
+                                onChange={(e) => setCmpCfg((c) => ({ ...c, period: e.target.value as ComparePeriod }))}>
+                          {PERIODS.map((p) => <option key={p} value={p}>{PERIOD_LABEL[p]}</option>)}
+                        </select>
+                      </Row>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                        체크한 축만 <b>지금 보는 검사와 같은 것</b>으로 좁힙니다. 아무것도 체크하지 않으면 모집단 전체입니다.
+                        <br />예) Chest CT 판독 중 · 판독의사 기준 · 둘 다 체크 → 내가 판독한 <b>Chest CT</b>들.
+                        Bodypart 만 체크 → <b>Chest X-ray · Chest MRI</b> 까지 (환자 무관).
+                        <br />기간의 기준점은 오늘이 아니라 <b>지금 보는 검사의 검사일</b>입니다 — 예전 검사를 되짚어
+                        판독할 때 '오늘로부터 1년'은 의미가 없기 때문입니다.
+                        <br />이 값은 <b>뷰어가 시작할 때의 기본값</b>입니다. 뷰어 Compare 창에서 그 자리에서 바꿀 수 있고,
+                        그 변경은 저장되지 않습니다.
                       </div>
                     </Group>
                     <Group title="레포트 옵션">

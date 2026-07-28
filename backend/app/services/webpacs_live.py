@@ -353,6 +353,22 @@ def live_related(db: Session, vid: int, user: dict | None = None,
     return [x for x in out if x["id"] != vid]
 
 
+def invalidate_tree(vid: int = 0) -> None:
+    """시리즈 트리 캐시 무효화 — vid 를 주면 그 검사만, 비우면 전체.
+
+    왜 필요한가: _TREE_CACHE 는 vid 키로 30초 TTL 이다. 그런데 A 에 시리즈가 추가되면
+    (촬영이 이어지는 검사는 흔하다) SSE 로 '바뀌었다'는 신호는 받으면서도 트리는 최대
+    30초 동안 옛 것을 내준다 — 뷰어에 새 시리즈가 안 보인다.
+    related·instance 는 이미 무효화 통로가 있는데 트리만 없어서 만들었다.
+    테스트 격리에도 쓴다(앞선 테스트가 덥혀 놓은 트리가 다음 테스트로 새는 것을 막는다).
+    """
+    with _TREE_LOCK:
+        if not vid:
+            _TREE_CACHE.clear()
+            return
+        _TREE_CACHE.pop(vid, None)
+
+
 def invalidate_related(patient_key: str = "") -> None:
     """과거검사 캐시 무효화 — 새 검사가 들어와 목록이 바뀌었을 때/테스트 격리용.
     patient_key 를 주면 그 환자만, 비우면 전체."""

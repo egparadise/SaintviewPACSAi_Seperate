@@ -18,7 +18,9 @@ Live(vid) 검사도 같은 계약으로 처리한다 — 원본 bytes 를 A 에�
 from __future__ import annotations
 
 import io
+import os
 import re
+import tempfile
 import zipfile
 from typing import Iterator
 
@@ -39,6 +41,25 @@ def _safe(s: str, fallback: str = "X") -> str:
     """경로 조각 정리 — 한글·공백·구분자가 섞여도 어느 OS 에서나 열리는 이름으로."""
     out = _SAFE.sub("_", str(s or "")).strip("._") or fallback
     return out[:48]
+
+
+def _study_dir(d: dict, study_id: int) -> str:
+    """검사 폴더 이름 — 날짜_모달리티만으로는 **겹친다**.
+
+    같은 환자가 같은 날 같은 모달리티로 두 건을 찍는 것은 흔하다(예: DX 09:51 CHEST 와
+    DX 09:51 ABDOMEN). 예전 규칙(날짜_모달리티)이면 두 검사가 **같은 폴더**로 떨어져
+      · ZIP  : 같은 이름이 두 번 들어가 앞 검사를 못 꺼낸다(뒤엣것만 읽힌다)
+      · 폴더 : 뒤 검사가 앞 검사를 덮어쓴다(조용한 소실)
+      · ISO  : Joliet 이 같은 경로에 **바이트를 이어붙여** 손상된 DICOM 이 구워진다
+    그래서 검사마다 유일한 꼬리표를 붙인다. StudyInstanceUID 는 검사의 전역 고유 식별자라
+    뒤 8자면 충분하고, UID 가 없으면 내부 id 로 떨어진다(항상 유일).
+    """
+    date = _safe(d.get("study_date"), "00000000")
+    mod = _safe(d.get("modality"), "OT")
+    # 영숫자만 남긴다 — 점을 남기면 폴더 이름이 '4.export' 처럼 확장자처럼 보인다
+    uid = re.sub(r"[^A-Za-z0-9]", "", str(d.get("study_uid") or ""))
+    tag = uid[-8:] if len(uid) >= 4 else str(study_id)
+    return f"{date}_{mod}_{tag}"
 
 
 def _entries(db: Session, study_id: int, user: dict) -> tuple[dict, list[dict]]:
@@ -67,8 +88,7 @@ def _entries(db: Session, study_id: int, user: dict) -> tuple[dict, list[dict]]:
                 "series": _cached_series_tree(OrthancClient(), st.orthanc_id or "")}
         src = "orthanc"
 
-    base = f"DICOM/{_safe(d.get('patient_key'), 'NOID')}/" \
-           f"{_safe(d.get('study_date'), '00000000')}_{_safe(d.get('modality'), 'OT')}"
+    base = f"DICOM/{_safe(d.get('patient_key'), 'NOID')}/{_study_dir(d, study_id)}"
     files: list[dict] = []
     for s in tree.get("series", []):
         sn = int(s.get("series_number") or 0)
@@ -85,6 +105,51 @@ def _entries(db: Session, study_id: int, user: dict) -> tuple[dict, list[dict]]:
     return d, files
 
 
+class _ZipDrain(io.RawIOBase):
+    """ZipFile 이 쓴 바이트를 모아 두었다가 내보낸 만큼 버리는 싱크.
+
+    ⚠ 왜 BytesIO 를 되감으면 안 되는가 — 예전 구현은 4MB 마다
+    `yield buf.getvalue(); buf.seek(0); buf.truncate(0)` 을 했다. 그런데 ZipFile 은
+    **tell() 값을 로컬 헤더 오프셋으로 중앙 디렉터리에 적는다.** 되감는 순간 그 오프셋이
+    실제 스트림 위치와 어긋나 ZIP 이 깨진다.
+    실측: 1MB × 6개를 넣으면 스트림이 22MB 로 부풀고 `BadZipFile: Bad magic number for
+    file header` 로 열리지 않았다. 즉 **4MB 를 넘는 반출은 전부 깨진 ZIP** 이었다
+    (실제 DICOM 반출은 사실상 전부 여기 해당한다).
+
+    그래서 tell() 은 **스트림 시작부터의 절대 위치**를 그대로 유지하고, 이미 내보낸
+    바이트만 버린다. seekable() 이 False 라 ZipFile 은 되감기가 필요 없는 스트리밍 경로
+    (data descriptor)를 쓴다 — 이것이 원래 의도했던 동작이다.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self._pos = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def write(self, b) -> int:            # noqa: ANN001 — bytes-like
+        data = bytes(b)
+        self._buf += data
+        self._pos += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self._pos
+
+    def pending(self) -> int:
+        """아직 안 내보낸 바이트 수 — 메모리 상한 판정에 쓴다."""
+        return len(self._buf)
+
+    def drain(self) -> bytes:
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+
 def _read(db: Session, f: dict) -> bytes:
     if f["src"] == "live":
         client = live.service_client(db)
@@ -92,6 +157,29 @@ def _read(db: Session, f: dict) -> bytes:
     from app.dicom.orthanc import OrthancClient
 
     return OrthancClient().instance_file(f["orthanc_id"])
+
+
+def _dedupe(collected: list[tuple[dict, list[dict]]]) -> None:
+    """선택한 검사 **전체**에서 경로 유일성을 강제한다(제자리 수정).
+
+    _study_dir 로 이미 검사 폴더가 갈라지지만, 그것 하나에 기대면 규칙이 바뀌거나
+    UID 가 비는 자료가 섞였을 때 다시 조용한 덮어쓰기로 돌아간다. 반출은 조용히 틀리면
+    받는 쪽이 알아챌 방법이 없는 기능이라, 마지막 관문을 하나 더 둔다.
+    겹치면 확장자 앞에 _2, _3 을 붙여 **모든 영상이 반드시 살아남게** 한다.
+    """
+    used: set[str] = set()
+    for _d, files in collected:
+        for f in files:
+            path = f["path"]
+            if path not in used:
+                used.add(path)
+                continue
+            stem, _, ext = path.rpartition(".")
+            n = 2
+            while f"{stem}_{n}.{ext}" in used:
+                n += 1
+            f["path"] = f"{stem}_{n}.{ext}"
+            used.add(f["path"])
 
 
 def _ids(study_ids: str) -> list[int]:
@@ -115,10 +203,11 @@ def _ids(study_ids: str) -> list[int]:
 def manifest(study_ids: str = Query(...), db: Session = Depends(get_db),
              user: dict = Depends(current_user)):
     """내보낼 파일 목록 — 폴더/USB 저장은 이 목록으로 한 장씩 받아 기록한다(진행률 표시)."""
+    collected = [_entries(db, sid, user) for sid in _ids(study_ids)]
+    _dedupe(collected)
     studies = []
     total = 0
-    for sid in _ids(study_ids):
-        d, files = _entries(db, sid, user)
+    for sid, (d, files) in zip(_ids(study_ids), collected):
         total += len(files)
         studies.append({
             "id": sid, "patient_key": d.get("patient_key"), "patient_name": d.get("patient_name"),
@@ -166,6 +255,7 @@ def package(study_ids: str = Query(...), format: str = "zip",
     """
     ids = _ids(study_ids)
     collected: list[tuple[dict, list[dict]]] = [_entries(db, sid, user) for sid in ids]
+    _dedupe(collected)
     infos = [{"patient_name": d.get("patient_name"), "patient_key": d.get("patient_key"),
               "study_date": d.get("study_date"), "modality": d.get("modality"),
               "study_desc": d.get("study_desc"), "count": len(fs)} for d, fs in collected]
@@ -180,13 +270,37 @@ def package(study_ids: str = Query(...), format: str = "zip",
                 status_code=501,
                 detail="ISO 생성 모듈(pycdlib)이 설치돼 있지 않습니다. "
                        "서버에서 `pip install pycdlib` 후 다시 시도하거나, ZIP 으로 내보내세요.")
+        # ⚠ ISO 를 메모리에 만들면 안 된다. 실측: 페이로드 100MB 에 파이썬 peak 206MB
+        #   (이미지 한 벌 + 반환 bytes 한 벌). CT 한 건이 수백 MB~수 GB 라 여러 건을 고르면
+        #   단일 워커 프로세스가 그대로 죽고 서비스 전체가 멎는다.
+        #   임시 파일에 만들고 흘려보낸 뒤 지운다 — 메모리는 청크 크기로 고정된다.
+        tmp = tempfile.TemporaryFile()
+        try:
+            _build_iso(db, collected, infos, tmp)
+        except Exception:
+            tmp.close()
+            raise
+        tmp.seek(0)
+        size = os.fstat(tmp.fileno()).st_size
+
+        def iso_stream() -> Iterator[bytes]:
+            try:
+                while True:
+                    chunk = tmp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                tmp.close()   # TemporaryFile 은 닫으면 사라진다
+
         return StreamingResponse(
-            io.BytesIO(_build_iso(db, collected, infos)), media_type="application/x-iso9660-image",
-            headers={"Content-Disposition": f'attachment; filename="{base_name}.iso"'})
+            iso_stream(), media_type="application/x-iso9660-image",
+            headers={"Content-Disposition": f'attachment; filename="{base_name}.iso"',
+                     "Content-Length": str(size)})
 
     def gen() -> Iterator[bytes]:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:   # DICOM 은 이미 압축 — 재압축 무의미
+        sink = _ZipDrain()
+        with zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED) as zf:  # DICOM 은 이미 압축 — 재압축 무의미
             zf.writestr("INDEX.txt", _index_txt(infos))
             for _, files in collected:
                 for f in files:
@@ -194,10 +308,9 @@ def package(study_ids: str = Query(...), format: str = "zip",
                         zf.writestr(f["path"], _read(db, f))
                     except Exception:  # noqa: BLE001 — 한 장 실패가 전체를 막지 않는다
                         continue
-                    if buf.tell() > 4 * 1024 * 1024:   # 4MB 마다 흘려보내 메모리 상한 유지
-                        yield buf.getvalue()
-                        buf.seek(0); buf.truncate(0)
-        yield buf.getvalue()
+                    if sink.pending() > 4 * 1024 * 1024:   # 4MB 마다 흘려보내 메모리 상한 유지
+                        yield sink.drain()
+        yield sink.drain()
 
     return StreamingResponse(gen(), media_type="application/zip",
                              headers={"Content-Disposition": f'attachment; filename="{base_name}.zip"'})
@@ -206,7 +319,7 @@ def package(study_ids: str = Query(...), format: str = "zip",
 _ISO_BAD = re.compile(r"[^A-Z0-9_]")
 
 
-def _build_iso(db: Session, collected, infos) -> bytes:
+def _build_iso(db: Session, collected, infos, out) -> None:
     """ISO9660(Joliet) 이미지 — 굽기는 OS 가 한다(브라우저는 광학 드라이브를 못 만진다).
 
     이름이 두 벌인 이유: ISO9660 식별자는 **A-Z 0-9 _ 만** 허용한다. 환자ID의 하이픈 하나로도
@@ -257,7 +370,5 @@ def _build_iso(db: Session, collected, infos) -> bytes:
             idir = mkdirs(f["path"])
             iso.add_fp(io.BytesIO(data), len(data),
                        iso_path=f"{idir}/{n:08d}.DCM;1", joliet_path=f"/{f['path']}")
-    out = io.BytesIO()
     iso.write_fp(out)
     iso.close()
-    return out.getvalue()
