@@ -74,12 +74,36 @@ export function ensureToken(timeoutMs = 3000): Promise<boolean> {
   });
 }
 
+/** 서버 로그아웃 — 세션 종료 + 픽셀 쿠키(sv_pix) 폐기.
+ *  픽셀 쿠키는 HttpOnly 라 JS 가 지울 수 없다. 서버가 지우지 않으면 '로그아웃했는데
+ *  브라우저에 영상 열람 자격이 남는' 상태가 되므로 토큰을 버릴 때 반드시 함께 호출한다.
+ *  ⚠ req() 를 쓰지 않는다 — req 의 401 처리기가 다시 setToken(null) 을 불러 무한 재귀한다.
+ *  실패는 무시한다(로그아웃은 로컬 상태 정리가 우선). */
+function serverLogout(prevToken: string) {
+  try {
+    void fetch(`${BASE}/api/auth/logout`, {
+      method: "POST",
+      credentials: "include",
+      headers: { Authorization: `Bearer ${prevToken}` },
+    }).catch(() => { /* 오프라인·서버 다운 — 무시 */ });
+  } catch { /* 무시 */ }
+}
+
 export function setToken(t: string | null, remember = false) {
+  const prev = token;
   token = t;
   window.__svToken = t;
   sessionStorage.removeItem("sv_token");
   localStorage.removeItem("sv_token");
   if (t) (remember ? localStorage : sessionStorage).setItem("sv_token", t);
+  // ⚠ 토큰이 **있었을 때만** 서버 로그아웃을 보낸다.
+  //   예전에는 prev 가 null 이어도 자격증명 없는 POST /api/auth/logout 을 보냈다. 그 응답의
+  //   Set-Cookie 가 sv_pix 를 지우는데, 쿠키 항아리는 브라우저 단위(탭 공유)라 **다른 탭의
+  //   영상이 조용히 죽었다**: 로그인 화면에서 비번을 한 번 틀리면(401 → reqRaw 가 setToken(null))
+  //   판독 중이던 탭의 <img> 만 401 이 된다(JWT 는 그 탭 sessionStorage 에 멀쩡해서 JSON API 는
+  //   200 → 화면에 오류가 뜨지 않는다). 토큰이 없던 호출자는 서버에 끊을 세션도 없으므로
+  //   logout 을 보낼 이유가 애초에 없다. 서버도 같은 원인을 막는다(auth.logout has_credential).
+  else if (prev) serverLogout(prev);
 }
 
 export function hasToken() {
@@ -130,6 +154,10 @@ async function reqRaw<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       res = await fetch(`${BASE}${path}`, {
         ...init,
+        // 픽셀 쿠키(sv_pix, HttpOnly) 수신·전송용. 같은 출처(VITE_API_BASE 빈값 = 기본 배치)
+        // 에서는 fetch 기본값과 동작이 같아 무해하고, API 를 다른 호스트에 둔 배치에서는
+        // 이게 없으면 로그인 응답의 Set-Cookie 가 통째로 버려져 영상이 401 이 된다.
+        credentials: "include",
         headers: {
           ...(isForm ? {} : { "Content-Type": "application/json" }),
           ...(token ? { Authorization: `Bearer ${token}` } : {}),

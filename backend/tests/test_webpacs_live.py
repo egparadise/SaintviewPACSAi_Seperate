@@ -62,6 +62,35 @@ def live_ready(mock_remote):
     return mock_remote
 
 
+@pytest.fixture(scope="module")
+def pixel_client(live_ready):
+    """브라우저처럼 픽셀 쿠키(sv_pix)만으로 영상을 받는 클라이언트.
+
+    Authorization 헤더를 **쓰지 않는다** — <img src> 가 헤더를 붙일 수 없다는 것이
+    이 기능의 전제이므로, 테스트도 그 조건에서만 통과해야 의미가 있다.
+    base_url 이 https 인 이유: 쿠키가 Secure 라 http 로는 쿠키 자체가 되돌아가지 않는다
+    (개발·운영 모두 HTTPS 라는 설계 전제를 테스트에서도 그대로 지킨다).
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    c = TestClient(app, base_url="https://testserver")
+    r = c.post("/api/auth/webpacs-login", json={"user_id": "dr_kim", "user_passwd": "kim1234"})
+    assert r.status_code == 200, r.text
+    assert c.cookies.get("sv_pix"), "로그인이 픽셀 쿠키를 발급하지 않았다"
+    return c
+
+
+def _no_cred_client():
+    """자격증명이 전혀 없는 새 클라이언트(쿠키 항아리 비어 있음)."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    return TestClient(app, base_url="https://testserver")
+
+
 VID1 = VID_BASE + 1
 VID2 = VID_BASE + 2
 VID3 = VID_BASE + 3
@@ -104,7 +133,7 @@ def test_live_detail_and_tree(client, auth_headers, live_ready):
     assert r.status_code == 200 and len(r.json()["items"]) == 3
 
 
-def test_live_prefetch_and_decode_cache(client, auth_headers, live_ready):
+def test_live_prefetch_and_decode_cache(client, auth_headers, live_ready, pixel_client):
     """속도 개선: 프리페치(병렬 원본 예열) + 디코드 캐시(재요청 디코드 생략)."""
     import time as _t
 
@@ -124,9 +153,10 @@ def test_live_prefetch_and_decode_cache(client, auth_headers, live_ready):
     with wl._DECODE_LOCK:
         wl._DECODE_CACHE.clear()
     t0 = _t.perf_counter()
-    r1 = client.get(url, params={"window": "40,400"})
+    r1 = pixel_client.get(url, params={"window": "40,400"})
     t1 = _t.perf_counter()
-    r2 = client.get(url, params={"window": "80,500"})   # 다른 W/L — 디코드는 캐시, 윈도잉만
+    # 다른 W/L — 디코드는 캐시, 윈도잉만
+    r2 = pixel_client.get(url, params={"window": "80,500"})
     t2 = _t.perf_counter()
     assert r1.status_code == 200 and r2.status_code == 200
     assert r1.content[:8] == b"\x89PNG\r\n\x1a\n"
@@ -140,15 +170,16 @@ def test_live_prefetch_and_decode_cache(client, auth_headers, live_ready):
     sop = s["instances"][0]["sop_uid"]
     url = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
            f"/series/{s['series_uid']}/instances/{sop}/rendered")
-    r = client.get(url, params={"window": "500,1000,linear"})   # 무인증(<img> 계약)
+    # 헤더 없이 쿠키만으로(<img> 계약)
+    r = pixel_client.get(url, params={"window": "500,1000,linear"})
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "image/png"
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
     # JPEG 형식 파라미터
-    r = client.get(url, params={"accept": "image/jpeg", "quality": 80})
+    r = pixel_client.get(url, params={"accept": "image/jpeg", "quality": 80})
     assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
     # 썸네일
-    r = client.get(s["instances"][0]["preview_url"])
+    r = pixel_client.get(s["instances"][0]["preview_url"])
     assert r.status_code == 200 and r.headers["content-type"].startswith("image/")
 
 
@@ -237,12 +268,28 @@ def test_live_empty_approve_blocked(client, auth_headers, live_ready):
     assert "빈 판독" in r.json()["detail"]
 
 
-def test_live_bad_uid_rejected(client, live_ready):
-    """UID 인젝션 차단(적대검증 #7) — ?/ 등으로 원본 인스턴스 노출 방지."""
-    r = client.get("/api/webpacs/live/thumb/1.2.3/1.2.3/1.2.3%3Ffoo")
-    assert r.status_code == 400
-    r = client.get("/api/webpacs/live/dicom-web/studies/bad-uid/series/1.2/instances/1.2/rendered")
-    assert r.status_code == 400
+def test_live_bad_uid_rejected(client, live_ready, pixel_client):
+    """UID 인젝션 차단(적대검증 #7) — ?/ 등으로 원본 인스턴스 노출 방지.
+
+    ⚠ 상태코드 순서가 바뀌었다(픽셀 인증 도입). 예전에는 자격 없이 잘못된 UID 를 보내면
+      400 이었지만, 지금은 인증 의존성이 함수 본문보다 먼저 실행되므로 401 이다.
+      '자격이 없으면 예외 없이 401' 을 택했다 — 무자격자가 UID 판정으로 엔드포인트를
+      탐침하지 못하게 하고, 규칙에 예외를 두지 않기 위해서다.
+      인증된 호출자에 대한 400 계약은 그대로다. 아래에서 양쪽을 모두 고정한다.
+    """
+    # ① 자격 있음 → 기존 400 계약 유지
+    r = pixel_client.get("/api/webpacs/live/thumb/1.2.3/1.2.3/1.2.3%3Ffoo")
+    assert r.status_code == 400, r.text
+    r = pixel_client.get(
+        "/api/webpacs/live/dicom-web/studies/bad-uid/series/1.2/instances/1.2/rendered")
+    assert r.status_code == 400, r.text
+
+    # ② 자격 없음 → 400 이 아니라 401(인증이 형식 검증보다 먼저)
+    anon = _no_cred_client()
+    assert anon.get("/api/webpacs/live/thumb/1.2.3/1.2.3/1.2.3%3Ffoo").status_code == 401
+    assert anon.get(
+        "/api/webpacs/live/dicom-web/studies/bad-uid/series/1.2/instances/1.2/rendered"
+    ).status_code == 401
 
 
 def test_live_claim_bad_vid_not_500(client, auth_headers, live_ready):
@@ -326,7 +373,8 @@ def test_live_sse_status_endpoint(client, auth_headers, live_ready):
     # 미연결이어도 프론트가 폴링으로 폴백하므로 기능 손실 없음
 
 
-def test_live_preview_uses_prebaked_render(client, auth_headers, live_ready, mock_remote):
+def test_live_preview_uses_prebaked_render(client, auth_headers, live_ready, mock_remote,
+                                           pixel_client):
     """⚡ 첫 화면용 저해상 미리보기 — A 가 미리 만들어 둔 512×512 q80 JPEG 을 그대로 전달.
 
     핵심은 '원본 DICOM 을 받지 않는다'는 것. 예전 경로는 프레임 1장을 띄우려고 수 MB DICOM 을
@@ -342,7 +390,7 @@ def test_live_preview_uses_prebaked_render(client, auth_headers, live_ready, moc
     before = httpx.get(f"{mock_remote}/__test__/state").json()
     url = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
            f"/series/{s0['series_uid']}/instances/{sop}/rendered?preview=1")
-    r = client.get(url)
+    r = pixel_client.get(url)
     assert r.status_code == 200, r.text
     assert r.headers["content-type"] == "image/jpeg"
     assert r.content[:2] == b"\xff\xd8"          # JPEG SOI
@@ -353,7 +401,7 @@ def test_live_preview_uses_prebaked_render(client, auth_headers, live_ready, moc
     assert after["instance_calls"] == before["instance_calls"]
 
 
-def test_live_rendered_etag_304(client, auth_headers, live_ready):
+def test_live_rendered_etag_304(client, auth_headers, live_ready, pixel_client):
     """rendered 는 (SOP·윈도우·형식·품질)이 불변이므로 ETag 로 304 — 재방문 재다운로드 제거."""
     from app.services.webpacs_live import VID_BASE
 
@@ -362,13 +410,146 @@ def test_live_rendered_etag_304(client, auth_headers, live_ready):
     s0 = tree["series"][0]
     url = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
            f"/series/{s0['series_uid']}/instances/{s0['instances'][0]['sop_uid']}/rendered")
-    r = client.get(url)
+    r = pixel_client.get(url)
     assert r.status_code == 200, r.text
     etag = r.headers.get("ETag")
+    # 쿠키 방식(A)을 택한 이유 중 하나 — URL 이 그대로라 ETag/304·캐시 수명이 살아 있다
     assert etag and "max-age=3600" in r.headers.get("Cache-Control", "")
-    r2 = client.get(url, headers={"If-None-Match": etag})
+    r2 = pixel_client.get(url, headers={"If-None-Match": etag})
     assert r2.status_code == 304
     assert r2.headers.get("ETag") == etag
+
+
+# ─────────────── 픽셀 인증(PHI) — deps.pixel_user ───────────────
+@pytest.fixture(scope="module")
+def pixel_urls(client, auth_headers, live_ready):
+    """실제로 픽셀이 나오는 rendered·thumb URL 한 쌍(존재하는 UID)."""
+    tree = client.get(f"/api/webpacs/live/studies/{VID1}/series-tree",
+                      headers=auth_headers).json()
+    s0 = tree["series"][0]
+    i0 = s0["instances"][0]
+    rendered = (f"/api/webpacs/live/dicom-web/studies/{tree['study_uid']}"
+                f"/series/{s0['series_uid']}/instances/{i0['sop_uid']}/rendered")
+    return {"rendered": rendered, "thumb": i0["preview_url"]}
+
+
+def test_pixel_requires_credentials_401(pixel_urls):
+    """자격 없이 픽셀 GET → 401. (예전 계약: 200 + PHI 픽셀)
+
+    이 테스트가 '공허하지 않다'는 근거: webpacs_live.rendered/thumb 에서
+    Depends(pixel_user) 를 떼면 그 즉시 200 이 돌아와 실패한다.
+    """
+    anon = _no_cred_client()
+    for key in ("rendered", "thumb"):
+        r = anon.get(pixel_urls[key])
+        assert r.status_code == 401, f"{key}: 자격 없이 {r.status_code} — PHI 픽셀이 열려 있다"
+        assert not r.headers.get("content-type", "").startswith("image/")
+
+
+def test_pixel_forged_or_expired_credentials_401(pixel_urls):
+    """위조/만료 자격은 모두 401 — 조용히 통과하는 경로가 없어야 한다."""
+    import time as _t
+    from datetime import datetime, timedelta, timezone
+
+    import jwt as _jwt
+
+    from app.config import get_settings
+
+    anon = _no_cred_client()
+    url = pixel_urls["rendered"]
+
+    # ① 존재하지 않는 sid 쿠키
+    assert anon.get(url, headers={"Cookie": "sv_pix=" + "0" * 32}).status_code == 401
+    # ② 비어 있지 않지만 형식만 그럴싸한 쿠키(길이 초과 포함)
+    assert anon.get(url, headers={"Cookie": "sv_pix=" + "a" * 200}).status_code == 401
+    # ③ 다른 키로 서명한 JWT(위조)
+    forged = _jwt.encode({"sub": "attacker", "role": "admin",
+                          "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+                         "not-the-real-secret", algorithm="HS256")
+    assert anon.get(url, headers={"Authorization": f"Bearer {forged}"}).status_code == 401
+    # ④ 올바른 키로 서명했지만 만료된 JWT
+    st = get_settings()
+    expired = _jwt.encode({"sub": "admin", "role": "admin", "exp": int(_t.time()) - 60},
+                          st.jwt_secret, algorithm=st.jwt_algorithm)
+    assert anon.get(url, headers={"Authorization": f"Bearer {expired}"}).status_code == 401
+    # ⑤ 쿠키를 JWT 로 채워도 통하지 않는다 — 쿠키 값은 불투명 sid 여야 한다
+    valid = _jwt.encode({"sub": "admin", "role": "admin",
+                         "exp": datetime.now(timezone.utc) + timedelta(hours=1)},
+                        st.jwt_secret, algorithm=st.jwt_algorithm)
+    assert anon.get(url, headers={"Cookie": f"sv_pix={valid}"}).status_code == 401
+
+
+def test_pixel_cookie_grants_access(pixel_client, pixel_urls):
+    """정상 자격(로그인이 심어 준 HttpOnly 쿠키) → 200 + 실제 픽셀. 헤더는 쓰지 않는다."""
+    assert "authorization" not in {k.lower() for k in pixel_client.headers}
+    r = pixel_client.get(pixel_urls["rendered"])
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("image/")
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+    r = pixel_client.get(pixel_urls["thumb"])
+    assert r.status_code == 200 and r.headers["content-type"].startswith("image/")
+
+
+def test_pixel_bearer_path_still_works(pixel_urls, auth_headers):
+    """기존 Bearer 경로 유지 — 쿠키 없이 헤더만으로도 200(다른 호출자·테스트가 쓴다)."""
+    anon = _no_cred_client()
+    r = anon.get(pixel_urls["rendered"], headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("image/")
+
+
+def test_logout_revokes_pixel_cookie(live_ready, pixel_urls):
+    """로그아웃하면 같은 쿠키로 더 이상 픽셀을 못 받는다(취소 가능한 자격증명).
+
+    JWT 를 쿠키에 담았다면 이 테스트는 통과할 수 없다 — 서명이 유효한 동안 계속 열린다.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    c = TestClient(app, base_url="https://testserver")
+    r = c.post("/api/auth/webpacs-login", json={"user_id": "dr_lee", "user_passwd": "lee1234"})
+    assert r.status_code == 200, r.text
+    sid = c.cookies.get("sv_pix")
+    assert sid
+    assert c.get(pixel_urls["rendered"]).status_code == 200
+
+    # 프론트와 동일하게 Bearer 를 실어 보낸다 — 픽셀 쿠키는 Path=/api/webpacs/live 라
+    # /api/auth/logout 에는 전송되지 않으므로 세션 식별은 토큰이 한다(auth.logout 주석 참조).
+    tok = r.json()["token"]
+    assert c.post("/api/auth/logout", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+    # ① 서버가 Set-Cookie 로 지웠고
+    assert not c.cookies.get("sv_pix")
+    # ② 쿠키 값을 손으로 되살려도 세션이 없어 401 이다(서버측 취소가 실체)
+    assert c.get(pixel_urls["rendered"], headers={"Cookie": f"sv_pix={sid}"}).status_code == 401
+
+
+def test_pixel_cookie_dies_when_session_revoked(db, live_ready, pixel_urls):
+    """중복 로그인 인계로 취소된 세션의 쿠키는 카운트다운 후 401.
+
+    다른 브라우저에 남아 있던 구 세션 쿠키가 살아 있으면 인계가 무의미해진다.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from app.main import app
+    from app.models import ActiveSession
+
+    c = TestClient(app, base_url="https://testserver")
+    r = c.post("/api/auth/webpacs-login", json={"user_id": "dr_kim", "user_passwd": "kim1234"})
+    assert r.status_code == 200, r.text
+    sid = c.cookies.get("sv_pix")
+    assert c.get(pixel_urls["rendered"]).status_code == 200
+
+    # 인계(force)와 같은 상태를 만든다 — 카운트다운이 이미 지난 시점
+    row = db.execute(select(ActiveSession).where(ActiveSession.session_id == sid)).scalar_one()
+    row.revoke_deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
+    row.revoke_reason = "다른 곳에서 로그인됨"
+    db.commit()
+
+    assert c.get(pixel_urls["rendered"]).status_code == 401
 
 
 def test_get_instance_bytes_dedupes_concurrent_downloads(tmp_path, monkeypatch):

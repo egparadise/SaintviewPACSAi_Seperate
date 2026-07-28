@@ -3,6 +3,12 @@
 // 여기 등록해 두면 페인 단위(비교·Combine 혼합 포함)로 라이브/로컬 루트를 정확히 가른다.
 // (cornerstone.ts 가 아닌 독립 모듈 — api.ts 가 cornerstone 번들을 끌지 않게)
 
+// 인증: 이 URL 들에는 자격증명이 **들어 있지 않다**. 서버가 로그인 때 심어 둔 HttpOnly 쿠키
+// (sv_pix, Path=/api/webpacs/live)를 브라우저가 자동으로 싣는다(backend deps.pixel_user).
+// 그래서 URL 이 안정적이고 ETag/304·캐시·preview=1 이 전부 그대로 산다.
+// ⚠ crossOrigin="anonymous" 로 읽는 캔버스 경로(pixelTools.samplePixels·mgHang.mgProbeUrl)는
+//   자격증명 모드가 'same-origin' 이라 같은 출처에서는 쿠키가 실린다. API 를 다른 호스트에
+//   둔 배치에서는 실리지 않으므로 그 배치에서는 이 캔버스 기능만 동작하지 않는다.
 export const LIVE_DICOMWEB_ROOT = "/api/webpacs/live/dicom-web";
 
 const uids = new Set<string>();

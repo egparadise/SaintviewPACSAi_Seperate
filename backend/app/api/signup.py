@@ -1,7 +1,17 @@
-"""가입(공개) — 병원 + 초기 관리자 계정 + 라이선스/결재 등록.
+"""가입(공개) — 병원 + 초기 관리자 계정 + 라이선스/결재 등록 **신청**.
 
-흐름: 홈(소개) → 가입 → 로그인 → 병원별 페이지.
-가입 시 병원(Hospital)과 그 병원의 초기 관리자(Account, role=admin)를 함께 생성한다.
+흐름: 홈(소개) → 가입 신청 → **운영자 승인** → 로그인 → 병원별 페이지.
+가입 시 병원(Hospital)과 그 병원의 초기 관리자(Account, role=admin)를 함께 만들되
+둘 다 `enabled=False`(승인 대기)로 만든다. 승인은 관리자 콘솔에서 한다
+(PUT /api/admin/hospitals/{id}, PUT /api/admin/accounts/{id} 의 enabled=true).
+
+⚠ 왜 즉시 활성이 아닌가 — 이 엔드포인트는 의존성이 get_db 뿐인 **무인증** 경로다.
+  예전에는 여기서 만든 계정이 곧바로 로그인 가능했고, 로그인은 Live 픽셀 쿠키(sv_pix)를
+  발급한다. 즉 익명 공격자가 `POST /api/signup` → `POST /api/auth/login` 두 번으로
+  A 의 모든 Live 검사 PHI 픽셀을 받을 수 있었다(인증이 셀프서비스 = 실질 무인증).
+  이제 승인 전 계정은 authenticate() 가 `enabled is False` 로 거부하고, 병원도 비활성이라
+  client-login 이 401 이다 → 자가가입만으로는 어떤 자격증명도 얻지 못한다.
+  추가로 스위치 기본값이 0(비활성)이고 prod 기동 게이트가 켜진 상태를 거부한다(app/config.py).
 ⚠ 주민번호는 앞 6자리(생년월일)만 저장. 카드 전체번호 저장 금지(마지막 4자리만).
 """
 from __future__ import annotations
@@ -96,7 +106,8 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
         license_clients=max(0, h.license_clients), modality_limit=max(0, h.modality_limit),
         max_accounts=0, billing_method=body.billing.method,
         billing_card_last4=re.sub(r"\D", "", body.billing.card_last4)[-4:],
-        enabled=True,
+        enabled=False,   # 승인 대기 — 활성 전에는 client-login 이 401
+        note="공개 가입 신청 — 운영자 승인 대기",
     )
     db.add(hospital)
     db.flush()
@@ -108,19 +119,22 @@ def signup(body: SignupBody, db: Session = Depends(get_db)):
         role="admin",  # 초기 가입자 = admin (요청 사양)
         hospital_id=hospital.id, display_name=r.name.strip()[:64], email=r.email.strip()[:128],
         title=r.title.strip()[:64], sex=r.sex.strip()[:8], birth6=r.birth6.strip()[:6],
-        phone=r.phone.strip()[:32], mobile=r.mobile.strip()[:32], enabled=True,
+        phone=r.phone.strip()[:32], mobile=r.mobile.strip()[:32],
+        enabled=False,   # 승인 대기 — authenticate() 가 거부하므로 픽셀 쿠키도 발급되지 않는다
     )
     db.add(admin)
     db.flush()
     db.add(AuditLog(account_id=admin.id, action="signup", target_type="hospital",
                     target_id=str(hospital.id),
                     detail={"hospital": hospital.name, "code": hospital.code,
-                            "admin": admin.username, "license_clients": hospital.license_clients}))
+                            "admin": admin.username, "license_clients": hospital.license_clients,
+                            "pending_approval": True}))
     db.commit()
     return {
-        "ok": True, "hospital_id": hospital.id, "hospital_code": hospital.code,
+        "ok": True, "pending": True, "hospital_id": hospital.id, "hospital_code": hospital.code,
         "username": admin.username,
-        "message": f"가입 완료 — '{hospital.name}'({hospital.code}) 관리자 계정 '{admin.username}'로 로그인하세요.",
+        "message": (f"가입 신청 접수 — '{hospital.name}'({hospital.code}) 관리자 계정 "
+                    f"'{admin.username}'. 운영자 승인 후 로그인할 수 있습니다."),
     }
 
 

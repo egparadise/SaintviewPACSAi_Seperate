@@ -1,2 +1,14 @@
 # cmd 파서는 LF 배치에서 오동작 — *.bat 는 항상 CRLF
 *.bat text eol=crlf
+# PowerShell 도 같은 계열이라 CRLF 로 고정한다(현재 작업 트리 상태와도 일치).
+*.ps1 text eol=crlf
+
+# ⚠ 셸 스크립트는 **반드시 LF**. core.autocrlf=true 인 윈도우 클론에서 체크아웃이
+#   CRLF 로 바꿔 놓으면 Debian/Ubuntu 의 dash·bash 가 첫 실행문에서 죽는다:
+#     $ sh update_server.sh --help
+#     update_server.sh: 64: set: Illegal option -        (rc=2)
+#   셔뱅도 `#!/bin/sh\r` 이 되어 직접 실행은 rc=127(required file not found)이다.
+#   deploy/update_server.sh 는 make_dist.py 가 바이트 그대로 패키지에 담으므로,
+#   이 규칙이 없으면 '패키지 하나만 서버에 올리면 된다' 는 계약이 통째로 거짓이 된다.
+#   (make_dist.py 에도 개행 정규화 + 'CR 0건' 빌드 게이트를 두어 두 겹으로 막는다)
+*.sh text eol=lf

@@ -290,7 +290,7 @@ postgresql://saintview:saintview_dev@<host>:5434/saintview     # pgvector/pg16
 | `SAINTVIEW_AI_DRAFT_ENABLED` | (미설정) | **AI 판독 초안 보류(기본 OFF)** — 활성화는 설정 `ai.policy.draft_enabled`(GUI), env 는 테스트 오버라이드. 비활성 중 `/analyze` 409 |
 | `SAINTVIEW_MWL_DIR` | `../deploy/worklists` | Orthanc 마운트와 일치시킬 것 |
 | `SAINTVIEW_MPPS_ENABLED/PORT/AET` | `1`/`11112`/`SAINTVIEW` | 스위트: `11113`/`SVVIEWER` |
-| `SAINTVIEW_SIGNUP_ENABLED` | `1` | 공개 가입 on/off |
+| `SAINTVIEW_SIGNUP_ENABLED` | `0` | 공개 자가가입 on/off. **기본 OFF** — 켜면 무인증으로 병원+관리자 계정이 생성되고, 그 계정으로 로그인하면 Live 픽셀 쿠키(sv_pix)가 나온다(= PHI 픽셀 게이트 우회). `prod` 는 켜져 있으면 기동을 거부한다(`validate_for_prod`). 켠 상태에서도 생성된 병원·계정은 `enabled=False`(승인 대기)라 운영자가 관리자 콘솔에서 활성화해야 로그인된다. |
 
 ### compose (`deploy/docker-compose.yml`)
 

@@ -78,6 +78,36 @@ IGNORE = shutil.ignore_patterns(
 )
 
 
+# 서버(Linux)에서 sh 로 실행되는 파일 — 반드시 LF 로 담아야 한다.
+# 왜 여기서도 막는가: .gitattributes 규칙은 **다음 체크아웃부터** 듣는다. 이미 CRLF 로
+# 체크아웃돼 있는 작업 트리에서 지금 빌드하면 shutil.copy2 가 CR 을 그대로 패키지에
+# 넣고, 서버에서는 `sh update_server.sh --apply` 가 64행 `set -eu` 에서
+# "set: Illegal option -" 로 즉사한다(직접 실행은 셔뱅이 `/bin/sh\r` 이라 rc=127).
+# 빌드가 마지막 관문이므로 여기서 정규화하고, 아래에서 'CR 0건' 을 단정한다.
+LF_SUFFIXES = {".sh"}
+
+
+def copy_file(src, dst) -> None:  # noqa: ANN001 — copytree(copy_function=) 이 str 을 넘긴다
+    """텍스트 스크립트는 개행을 LF 로 정규화해 복사(실행 비트 포함 메타데이터 보존)."""
+    s, d = Path(src), Path(dst)
+    if d.is_dir():                       # copytree 관례상 대상이 디렉터리일 수 있다
+        d = d / s.name
+    if s.suffix in LF_SUFFIXES:
+        d.write_bytes(s.read_bytes().replace(b"\r\n", b"\n"))
+        shutil.copystat(s, d)            # 실행 비트·mtime 보존(copy2 와 동일한 메타데이터)
+    else:
+        shutil.copy2(s, d)
+
+
+def assert_no_crlf(root: Path) -> list[str]:
+    """패키지 안의 셸 스크립트에 CR 이 한 바이트도 없음을 단정한다."""
+    bad = []
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and p.suffix in LF_SUFFIXES and b"\r" in p.read_bytes():
+            bad.append(str(p.relative_to(root)))
+    return bad
+
+
 def git_short_hash() -> str:
     try:
         return subprocess.run(
@@ -105,7 +135,7 @@ def main() -> int:
         if not s.exists():
             print(f"WARN: {src} 없음 — 건너뜀")
             continue
-        shutil.copytree(s, out / dst, ignore=IGNORE)
+        shutil.copytree(s, out / dst, ignore=IGNORE, copy_function=copy_file)
     for f in INCLUDE_FILES:
         s = ROOT / f
         if not s.exists():
@@ -113,7 +143,7 @@ def main() -> int:
             continue
         d = out / f
         d.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(s, d)
+        copy_file(s, d)
 
     # compose 가 마운트하는 런타임 디렉토리 자리 확보(빈 폴더)
     (out / "deploy/worklists").mkdir(parents=True, exist_ok=True)
@@ -136,6 +166,14 @@ def main() -> int:
         print(f"ERROR: 시크릿 의심 파일 포함 — 중단: {leaked}", file=sys.stderr)
         shutil.rmtree(out)
         return 2
+
+    # 개행 게이트 — CRLF 셸 스크립트는 서버에서 첫 실행문부터 죽으므로 패키지를 내보내지
+    # 않는다(운영자가 보는 것은 "set: Illegal option -" 한 줄뿐이라 원인 추적이 어렵다).
+    crlf = assert_no_crlf(out)
+    if crlf:
+        print(f"ERROR: CRLF 셸 스크립트 포함 — 중단(서버에서 실행 불가): {crlf}", file=sys.stderr)
+        shutil.rmtree(out)
+        return 3
 
     # zip
     zip_path = ROOT / "build" / f"{name}.zip"

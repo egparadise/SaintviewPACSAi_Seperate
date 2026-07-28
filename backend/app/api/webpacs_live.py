@@ -4,9 +4,24 @@
 응답 스키마는 기존 로컬 계약(/api/worklist·/api/studies/{id}/…·/api/reports/…)과 동형 —
 뷰어/판독 컴포넌트는 무수정으로 동작합니다. 데이터 원본은 전적으로 A(복사 없음).
 
-픽셀(rendered/thumb)은 <img>·Cornerstone 이 Authorization 헤더 없이 요청하므로
-인증 의존성을 걸지 않는다(개발 기본 — 기존 Orthanc /dicom-web 프록시와 동일 자세.
-운영은 리버스 프록시에서 접근 통제 — docs/INTEGRATION_WEBPACS.md).
+픽셀(rendered/thumb)은 <img> 가 Authorization 헤더를 붙일 수 없어 예전에는 무인증이었다
+(운영은 리버스 프록시에서 통제한다고 적어 두었으나 deploy/nginx-viewer.conf 에 그런 통제는
+없었다 — /api/ 를 그대로 백엔드로 프록시한다). 지금은 deps.pixel_user 로 인증한다:
+Authorization 헤더가 있으면 그대로 쓰고, 없으면 HttpOnly 픽셀 쿠키(sv_pix=불투명 sid)를
+받는다. URL 은 한 글자도 바뀌지 않으므로 ETag/304·캐시·미리보기(preview=1)가 모두 그대로다.
+선택 근거와 버린 대안(서명 URL·쿼리 토큰)은 app/api/deps.py 의 주석에 있다.
+
+⚠ 남은 한계(인가): 인증만 있고 인가는 없다 — 로그인한 사용자면 UID 를 아는 어떤 검사의
+픽셀도 받을 수 있다(워크리스트/series-tree 에도 병원 스코프가 없다). Live 는 A 단일 원본이고
+브리지 설정(webpacs.bridge)이 전역 1개(base_url·서비스 계정)라 B 에는 'A 의 이 검사가 어느
+가입 병원 것인가'를 판정할 근거 자체가 없다 — 스코프를 넣으려면 A↔병원 매핑을 먼저 설계해야
+하므로 이번 변경 범위 밖이다. 후속으로 '그 세션이 series-tree 로 연 study_uid 집합'을 기록해
+스코프를 좁힌다.
+  ※ 다만 '누구나 로그인 자격을 자가 발급'하던 경로는 막았다 — 공개 가입은 기본 OFF 이고
+    (SAINTVIEW_SIGNUP_ENABLED 기본 0, prod 는 켜져 있으면 기동 거부), 켜더라도 가입으로
+    만들어진 병원·계정은 승인 전까지 enabled=False 라 로그인 자체가 안 된다.
+⚠ 범위 밖(더 큰 구멍): 비-Live 모드의 preview_url(/orthanc/instances/*/preview)과
+/dicom-web/* 는 여전히 무인증으로 Orthanc·OHIF nginx 에 직결 프록시된다. 별도 항목으로 처리.
 """
 from __future__ import annotations
 
@@ -19,7 +34,7 @@ from fastapi import (
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import current_user, require_effective
+from app.api.deps import current_user, pixel_user, require_effective
 from app.db import get_db
 from app.services.webpacs_bridge import WebPacsConflict, WebPacsError
 from app.services import webpacs_live as live
@@ -322,12 +337,19 @@ def _render_with_retry(db: Session, study_uid: str, series_uid: str, sop_uid: st
                                     fmt=fmt, quality=quality, sop_uid=sop_uid)
 
 
-# ── 픽셀 (무인증 — <img>/Cornerstone 헤더 없는 요청. 모듈 독스트링 참조) ──
+# ── 픽셀 (PHI — pixel_user: Bearer 또는 HttpOnly 픽셀 쿠키. 모듈 독스트링 참조) ──
 @router.get("/dicom-web/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/rendered")
 def rendered(study_uid: str, series_uid: str, sop_uid: str, request: Request,
              window: str = "", accept: str = "", quality: int = 90, preview: int = 0,
-             db: Session = Depends(get_db)):
-    """뷰어 rendered 동형 — window=C,W[,linear] 서버측 윈도잉. Orthanc 프록시 대체."""
+             db: Session = Depends(get_db), user: dict = Depends(pixel_user)):
+    """뷰어 rendered 동형 — window=C,W[,linear] 서버측 윈도잉. Orthanc 프록시 대체.
+
+    ⚠ 상태코드 순서 — 인증(401)이 UID 형식 검증(400)보다 먼저다. FastAPI 는 의존성을 모두
+      푼 뒤에야 함수 본문을 실행하므로 자격 없이 잘못된 UID 를 보내면 400 이 아니라 401 이
+      나온다. 이 순서를 택한 이유: '자격이 없으면 언제나 401' 이 예외 없이 성립해야
+      추론이 쉽고, 무자격자가 UID 형식 판정으로 엔드포인트 동작을 탐침하지 못한다.
+      인증된 호출자에 대한 400 계약은 그대로다(test_live_bad_uid_rejected 가 양쪽을 고정).
+    """
     _uid(study_uid, series_uid, sop_uid)   # UID 인젝션 차단(원본 DICOM 노출 방지)
     wc = ww = None
     if window:
@@ -375,8 +397,12 @@ def rendered(study_uid: str, series_uid: str, sop_uid: str, request: Request,
 
 
 @router.get("/thumb/{study_uid}/{series_uid}/{sop_uid}")
-def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(get_db)):
-    """썸네일 — A v2 사전생성 썸네일 프록시(실패 시 렌더 폴백)."""
+def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(get_db),
+          user: dict = Depends(pixel_user)):
+    """썸네일 — A v2 사전생성 썸네일 프록시(실패 시 렌더 폴백).
+
+    rendered 와 같은 이유로 pixel_user 를 쓴다(썸네일 <img> 도 헤더를 못 붙인다).
+    응답 URL 은 series-tree 의 preview_url 그대로 — 프론트 11개 소비 지점 수정 0."""
     _uid(study_uid, series_uid, sop_uid)   # UID 인젝션 차단(?/ 로 인스턴스 원본 노출 방지)
     key = f"th|{sop_uid}"
     hit = live.encoded_get(key)       # B 측 캐시 — 예전엔 썸네일마다 A 왕복을 그대로 했다

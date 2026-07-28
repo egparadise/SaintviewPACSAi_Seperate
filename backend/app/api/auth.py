@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import jwt as pyjwt
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import current_user
+from app.api.deps import PIXEL_COOKIE, clear_pixel_cookie, current_user, set_pixel_cookie
 from app.db import get_db
-from app.services.auth_service import authenticate, create_token
+from app.services.auth_service import authenticate, create_token, decode_token
 
 
 def _client_ip(request: Request) -> str:
@@ -28,13 +29,25 @@ class LoginResponse(BaseModel):
     hospital_name: str = ""
 
 
+# 관리자 콘솔 세션의 username 접두사 — 중복 로그인(인계) 판정에서 제외하기 위한 네임스페이스.
+# 왜: 픽셀 쿠키에는 취소 가능한 sid 가 필요해서 이 경로도 세션을 등록해야 하는데,
+# 같은 이름·같은 병원으로 등록하면 find_live 가 이를 '살아있는 Client 세션'으로 보고
+# 이후 client-login 이 없던 중복 프롬프트를 띄운다. 접두사를 붙여 기존 동작을 그대로 둔다
+# (status()/end() 는 sid 로 조회하므로 접두사와 무관하게 정상 동작한다).
+_CONSOLE_PREFIX = "console:"
+
+
 @router.post("/login", response_model=LoginResponse)
-def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
+def login(body: LoginRequest, request: Request, response: Response,
+          db: Session = Depends(get_db)) -> LoginResponse:
     """관리자/서버 운영 로그인 (홈 페이지 Login) — 관리 콘솔용.
 
     레인 S 보안 훅: 계정·IP 연속 실패 잠금(security.policy) — 잠금 중 401, 성공 시 카운터 리셋.
+
+    이 경로도 픽셀 쿠키를 발급한다: Client 포털은 admin 모드 세션이라도 hospitalId 가 있으면
+    Worklist→뷰어로 들어가므로(App.tsx), 여기서 빠뜨리면 그 사용자만 영상이 401 이 된다.
     """
-    from app.services import security_service
+    from app.services import security_service, session_service
 
     ip = _client_ip(request)
     security_service.ensure_login_allowed(db, body.username, ip)
@@ -43,8 +56,11 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)) -
         security_service.record_login_failure(db, body.username, ip)
         raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
     security_service.reset_login_failures(body.username, ip)
-    return LoginResponse(token=create_token(account), username=account.username, role=account.role,
-                         hospital_id=account.hospital_id)
+    sid = session_service.register(db, account.hospital_id, _CONSOLE_PREFIX + account.username)
+    db.commit()
+    set_pixel_cookie(response, sid)
+    return LoginResponse(token=create_token(account, sid=sid), username=account.username,
+                         role=account.role, hospital_id=account.hospital_id)
 
 
 class ClientLoginRequest(BaseModel):
@@ -91,12 +107,13 @@ def _resolve_client(body: ClientLoginRequest, request: Request, db: Session):
     return account, hospital
 
 
-def _client_login_ok(db: Session, account, hospital) -> dict:
-    """세션 등록 + 토큰 발급(sid 포함)."""
+def _client_login_ok(db: Session, account, hospital, response: Response) -> dict:
+    """세션 등록 + 토큰 발급(sid 포함) + 픽셀 쿠키(sv_pix=sid) 발급."""
     from app.services import session_service
 
     sid = session_service.register(db, hospital.id, account.username)
     db.commit()
+    set_pixel_cookie(response, sid)
     return {"token": create_token(account, hospital_id=hospital.id, sid=sid),
             "username": account.username, "role": account.role,
             "hospital_id": hospital.id, "hospital_name": hospital.name,
@@ -105,7 +122,8 @@ def _client_login_ok(db: Session, account, hospital) -> dict:
 
 
 @router.post("/client-login")
-def client_login(body: ClientLoginRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+def client_login(body: ClientLoginRequest, request: Request, response: Response,
+                 db: Session = Depends(get_db)) -> dict:
     """Client 뷰어 로그인 — 병원 ID/이름 + 개별 ID + Password.
 
     같은 병원·같은 ID 로 이미 살아있는 세션이 있으면 토큰 대신 {duplicate:true} 를 반환한다
@@ -116,19 +134,70 @@ def client_login(body: ClientLoginRequest, request: Request, db: Session = Depen
     account, hospital = _resolve_client(body, request, db)
     if session_service.find_live(db, hospital.id, account.username):
         return {"duplicate": True, "hospital_name": hospital.name}
-    return _client_login_ok(db, account, hospital)
+    return _client_login_ok(db, account, hospital, response)
 
 
 @router.post("/client-login/force")
-def client_login_force(body: ClientLoginRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+def client_login_force(body: ClientLoginRequest, request: Request, response: Response,
+                       db: Session = Depends(get_db)) -> dict:
     """중복 로그인 인계 — 기존 세션에 종료 카운트다운을 걸고 새 세션으로 로그인."""
     from app.services import session_service
 
     account, hospital = _resolve_client(body, request, db)
     live = session_service.find_live(db, hospital.id, account.username)
     if live:
+        # 구 세션은 카운트다운 후 무효 — pixel_session 이 revoke_deadline 을 보므로
+        # 다른 브라우저에 남아 있던 구 sv_pix 쿠키도 그 시점부터 401 이 된다.
         session_service.revoke(db, live, "다른 곳에서 로그인됩니다. 10초 뒤에 종료됩니다.")
-    return _client_login_ok(db, account, hospital)
+    return _client_login_ok(db, account, hospital, response)
+
+
+@router.post("/logout")
+def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
+    """로그아웃 — 서버 세션 종료 + 픽셀 쿠키 폐기.
+
+    왜 신설했나: 지금까지 프론트 로그아웃은 저장소의 JWT 만 지웠다(api.ts setToken(null)).
+    픽셀 쿠키는 HttpOnly 라 JS 가 지울 수 없으므로, 서버가 지우지 않으면
+    '로그아웃했는데 브라우저에는 픽셀 열람 자격이 남는' 상태가 된다.
+
+    자격이 없거나 만료돼도 200 을 준다(401 로 막지 않는다): 이 엔드포인트는 파괴만 하고,
+    만료된 토큰으로 로그아웃하는 경우에도 쿠키는 반드시 지워져야 하기 때문이다.
+    sid 를 아는 주체만 그 세션을 끊을 수 있으므로 남의 세션을 끊는 데는 쓸 수 없다.
+
+    ⚠ 세션 식별은 사실상 **Bearer 토큰**이 한다. 픽셀 쿠키는 Path=/api/webpacs/live 로
+      스코프돼 있어 이 경로(/api/auth/logout)로는 전송되지 않기 때문이다 — 그 좁은 스코프가
+      쿠키 노출면을 줄이는 핵심이라 넓히지 않았다.
+      request.cookies 조회를 남겨 둔 것은 Path 를 넓힌 배치·비브라우저 호출자 대비다.
+
+    ⚠ 쿠키 폐기는 '자격증명을 하나라도 제시한 요청'에만 한다(has_credential).
+      예전에는 무조건 지웠는데, 그러면 **자격이 0인 요청이 남의 쿠키를 지우는** 무인증 DoS 가
+      된다. 쿠키 항아리는 브라우저 단위(탭 공유)인데 JWT 는 sessionStorage(탭별)라, B 탭에서
+      로그인 비번을 한 번 틀리면(401 → 프론트 setToken(null) → 자격 없는 logout) 판독 중인
+      A 탭의 sv_pix 가 지워져 **영상만 조용히 401** 이 됐다(JSON API 는 JWT 로 200 이라
+      화면에 오류도 안 뜬다). 만료 토큰으로 로그아웃해도 쿠키가 지워져야 한다는 원래 요구는
+      그대로다 — 만료여도 Authorization 헤더는 실려 있으므로 has_credential 이 True 다.
+      프론트도 같은 원인을 막는다(api.ts setToken: prev 토큰이 있을 때만 serverLogout).
+    """
+    from app.services import session_service, webpacs_session
+
+    sid = ""
+    auth = request.headers.get("authorization", "")
+    has_bearer = auth.lower().startswith("bearer ") and bool(auth[7:].strip())
+    if has_bearer:
+        try:
+            sid = str(decode_token(auth[7:].strip()).get("sid") or "")
+        except pyjwt.PyJWTError:
+            sid = ""   # 만료·위조 토큰 — 쿠키 폐기는 그래도 진행한다
+    cookie_sid = request.cookies.get(PIXEL_COOKIE) or ""
+    sid = sid or cookie_sid
+    if sid:
+        session_service.end(db, sid)
+        db.commit()
+        webpacs_session.clear(sid)   # 보관 중이던 A 토큰도 함께 폐기
+    has_credential = has_bearer or bool(cookie_sid)
+    if has_credential:
+        clear_pixel_cookie(response)
+    return {"ok": True, "cleared": has_credential}
 
 
 @router.get("/session-status")
@@ -154,7 +223,8 @@ class WebpacsLoginRequest(BaseModel):
 
 
 @router.post("/webpacs-login")
-def webpacs_login(body: WebpacsLoginRequest, request: Request, db: Session = Depends(get_db)) -> dict:
+def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Response,
+                  db: Session = Depends(get_db)) -> dict:
     """★ 원격 PACS(A: webpacs_api) 계정으로 직접 로그인 (per-user A 로그인 키스톤).
 
     사용자가 자기 A 계정 자격을 제시하면 A `/api/user/auth/login` 으로 검증하고, 성공 시
@@ -218,6 +288,7 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, db: Session = Dep
         "a_user_id": body.user_id, "a_user_idx": a_user_idx, "a_user_name": a_name,
         "group_level": group_level, "verify_ssl": bool(cfg.get("verify_ssl", True)), "sid": sid,
     })
+    set_pixel_cookie(response, sid)   # <img> 픽셀 GET 용 — deps.pixel_user 참조
     return {"token": token, "username": body.user_id, "role": role,
             "a_user_name": a_name, "a_user_idx": a_user_idx}
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -55,19 +56,79 @@ try:
     from app.api import security as security_api
 except ImportError:
     security_api = None
-from app.config import get_settings
+from app.config import MULTI_WORKER_MESSAGE, detect_worker_plan, get_settings
 from app.db import SessionLocal, init_db
+from app.services import worker_guard
 from app.services.auth_service import ensure_default_admin
 from app.workers.ai_worker import worker_loop
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("saintview")
 
+# 런타임 백스톱이 형제 워커를 세기까지의 유예(초). 2번째 워커가 마커를 쓴 뒤여야 참이 되므로
+# 기동 직후에 세면 항상 1이 나온다 — uvicorn/gunicorn 이 워커를 모두 띄우고도 남는 시간을 준다.
+_WORKER_GUARD_DELAY = float(os.getenv("SAINTVIEW_WORKER_GUARD_DELAY", "12"))
+
+
+def _warn_worker_plan() -> None:
+    """기동 선언(argv+env)에 근거한 다중 워커 경고 — dev 에서는 여기까지만 한다.
+
+    prod 는 Settings.validate_for_prod() 가 이미 예외를 던졌다(certain 인 경우) —
+    즉 이 줄에 도달했다는 것은 dev 이거나 certain=False 라는 뜻이다.
+    --log-level warning 으로 뜨는 현행 기동 방식에서도 보이도록 error 레벨을 쓴다.
+    """
+    plan = detect_worker_plan()
+    if plan["workers"] >= 2:
+        logger.error("[다중 워커 감지] %s workers=%d (근거=%s, 확실=%s). %s",
+                     plan["server"], plan["workers"], plan["source"],
+                     plan["certain"], MULTI_WORKER_MESSAGE)
+    elif not plan["certain"]:
+        logger.warning(
+            "워커 수를 확정할 수 없다(%s, 근거=%s) — 설정 파일이 workers 를 정하고 있을 수 있다. "
+            "이 백엔드는 단일 워커가 배포 계약이니 workers=1 인지 직접 확인하라.",
+            plan["server"], plan["source"])
+
+
+def _warn_pixel_cookie_placement() -> None:
+    """교차 호스트 배치 경고 — 픽셀 쿠키(sv_pix)가 붙지 않는 조합을 기동 시 알린다.
+
+    조용한 실패를 막기 위한 장치다: SameSite=Lax 쿠키는 API 를 다른 사이트에 둔 배치에서
+    <img> 요청에 실리지 않는다. 그러면 판독 화면에 오류 없이 '빈 화면'이 뜨는데,
+    판독에서 빈 화면은 오진 위험이다. SAINTVIEW_CORS_ORIGINS 가 설정돼 있다는 것은
+    다른 출처에서 이 API 를 부르겠다는 선언이므로, 그때 SameSite 를 점검하라고 알린다.
+    """
+    if not os.getenv("SAINTVIEW_CORS_ORIGINS", "").strip():
+        return
+    if os.getenv("SAINTVIEW_PIXEL_COOKIE_SAMESITE", "lax").strip().lower() == "none":
+        return
+    logger.warning(
+        "SAINTVIEW_CORS_ORIGINS 가 설정돼 있는데 픽셀 쿠키가 SameSite=Lax 다. "
+        "프론트와 API 가 다른 사이트에 있으면 Live 영상(<img>)이 401 로 뜬다 — "
+        "그 배치라면 SAINTVIEW_PIXEL_COOKIE_SAMESITE=none 으로 두라(HTTPS 필수).")
+
+
+async def _worker_guard_backstop(delay: float) -> None:
+    """미탐(gunicorn 설정 파일 / 프로그램적 uvicorn.run) 백스톱 — 경고만 한다."""
+    try:
+        await asyncio.sleep(delay)
+        worker_guard.check_once()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — 백스톱이 서버를 흔들면 본말전도다
+        logger.debug("worker_guard 백스톱 실패(무시)", exc_info=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    settings.validate_for_prod()  # prod 보안 게이트 (§8)
+    # prod 보안 게이트 (§8). ⚠ 여기는 **워커 자식 프로세스**다 — 다중 워커일 때 예외만 던지면
+    # 마스터가 워커를 계속 다시 띄워 무한 재기동 루프가 된다. 그래서 게이트가 예외 전에
+    # 마스터에게 SIGTERM 을 보낸다(config.terminate_worker_master, 실측 근거는 docs §3-1).
+    settings.validate_for_prod()
+    _warn_worker_plan()
+    _warn_pixel_cookie_placement()
+    worker_guard.write_marker()
+    guard_task = asyncio.create_task(_worker_guard_backstop(_WORKER_GUARD_DELAY))
     init_db()
     with SessionLocal() as db:
         ensure_default_admin(db)
@@ -85,6 +146,12 @@ async def lifespan(app: FastAPI):
     logger.info("Saintview PACS AI 시작 (AI mode=%s)", settings.ai_mode)
     yield
     stop_event.set()
+    guard_task.cancel()
+    # 취소를 실제로 회수한다 — 그냥 cancel() 만 하고 두면 종료 시
+    # "Task was destroyed but it is pending" 이 로그에 남는다.
+    with contextlib.suppress(asyncio.CancelledError):
+        await guard_task
+    worker_guard.remove_marker()
     await worker_task
     if mpps is not None:
         _, server = mpps
@@ -163,6 +230,8 @@ def status():
             client.close()
     except Exception:  # noqa: BLE001 — 상태 표시용, 실패는 down으로
         orthanc_alive = False
+    # 단일 워커 배포 계약 위반 노출(감지된 경우에만 True) — 운영자가 화면에서 볼 수 있게.
+    guard = worker_guard.snapshot()
     return {
         "api": True,
         "orthanc": orthanc_alive,
@@ -170,4 +239,6 @@ def status():
         "ai_mode": s.ai_mode,
         "mpps": s.mpps_enabled,
         "version": app.version,
+        "multi_worker": guard["multi_worker"],
+        "worker_count": guard["worker_count"],
     }

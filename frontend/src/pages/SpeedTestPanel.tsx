@@ -76,7 +76,19 @@ export function SpeedTestPanel() {
       const url = `${root}/studies/${tree.study_uid}/series/${s0.series_uid}/instances/${mid.sop_uid}/rendered`
                 + renderedParams(false);
       t0 = t();
-      const r1 = await fetch(url + (url.includes("?") ? "&" : "?") + `_t=${Date.now()}`, { cache: "no-store" });
+      // credentials: 픽셀 GET 은 HttpOnly 쿠키(sv_pix)로 인증한다 — 같은 출처면 기본값과
+      // 동작이 같지만, 명시해 두면 API 를 다른 호스트에 둔 배치에서도 자격이 붙는다.
+      const r1 = await fetch(url + (url.includes("?") ? "&" : "?") + `_t=${Date.now()}`,
+                             { cache: "no-store", credentials: "include" });
+      if (!r1.ok) {   // 401 을 '느린 영상'으로 위장하지 않는다 — 원인을 그대로 표시
+        push({ name: "④ 첫 영상(콜드)", ms: t() - t0, warn: true,
+               detail: r1.status === 401 ? "401 인증 실패 — 다시 로그인하세요" : `HTTP ${r1.status}` });
+        setVerdict(r1.status === 401
+          ? "영상 자격증명이 만료됐습니다. 로그아웃 후 다시 로그인하세요."
+          : `영상 요청이 실패했습니다 (HTTP ${r1.status}).`);
+        setBusy(false);
+        return;
+      }
       const blob = await r1.blob();
       const tFirst = t() - t0;
       const kb = blob.size / 1024;

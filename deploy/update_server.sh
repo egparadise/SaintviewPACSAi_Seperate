@@ -7,6 +7,16 @@
 #   [1] 사전 점검 → [2] 설치 경로 발견 → [3] 백업 → [4] 파일 교체 →
 #   [5] 파이썬 신규 의존성 → [6] nginx 드롭인(patch_nginx.sh 위임) →
 #   [7] 백엔드 재시작 → [8] 검증
+#   (단계는 8개다. --migrate 를 주면 [5] 뒤에 번호 없는 'DB 마이그레이션' 블록이 하나 낀다)
+#
+# 진단은 항상·무료·읽기전용이다
+#   [2] 끝에서 DB 체제를 읽기만 한다: DB URL(마스킹) · 패키지 head 리비전 ·
+#       DB 의 alembic 스탬프 · 미적용 리비전 목록 · 이번 패키지가 migrations/ 를
+#       바꾸는지 여부. 아무것도 쓰지 않으며, 실패는 전부 '판정 불가' 로 내려앉는다
+#       (DB·파이썬 판정 실패가 배포를 막지 않는다).
+#   [7] 에서 백엔드가 도커 컨테이너면 bind mount 를 **증명**한다. 증명된 경우에만
+#       docker restart 하고(그때는 systemctl restart 와 의미가 같다), 코드가 이미지
+#       안이라고 증명되면 재시작하지 않고 '이번 갱신은 백엔드에 무효' 로 확정 실패시킨다.
 #
 # 불변식(이 스크립트의 핵심 규약)
 #   [3] 백업 집합 == [4] 쓰기 집합 == [롤백] 복구 집합 == 지문 검증 범위.
@@ -35,11 +45,22 @@
 #   옵션:  --prefix <설치루트>  --port <백엔드포트(기본 8010)>  --url <검증용 공개주소>
 #          --pybin <백엔드가 쓰는 파이썬>   (venv 자동판정이 어긋날 때만)
 #          --skip-nginx  --skip-restart
+#          --migrate   DB 마이그레이션(alembic upgrade head)을 **허용**한다. 기본은 하지 않는다.
+#                      ⚠ 이 스크립트의 핵심 불변식(백업 집합 = 쓰기 집합 = 복구 집합)이
+#                        깨지는 유일한 지점이다 — **--rollback 은 DB 를 되돌리지 못한다**.
+#                      다음 경우에는 플래그를 줘도 **거부한다**(거부가 기능이다):
+#                        · DB 에 alembic_version 이 없음(= init_db() 가 만든 미스탬프 스키마).
+#                          초기 리비전부터 재생돼 이미 있는 테이블에서 터진다. stamp 는
+#                          사람이 스키마를 대조한 뒤 내리는 판단이지 배포 스크립트의 몫이 아니다.
+#                        · head 가 여러 개(머지 필요) / DB 리비전이 패키지에 없음 / 판정 불가
+#                        · SV_DB_BACKUP_DONE=1 이 없음(DB 백업 사실을 사람이 명시해야 한다)
+#                      거부하면 파일 갱신은 그대로 끝내고 exit 2(요청 작업 미완료)로 보고한다.
 #
 #   환경변수:  SV_BACKUP_DIR  SV_BACKEND_LOG
 #              SV_KEEP_BACKUPS=<개수> (기본 5 — 갱신 1회당 백업이 10MB 를 넘는다)
 #              SV_FORCE_KILL=1  (종료 대기 초과 시 kill -9 를 허용 — 기본은 하지 않는다)
 #              SV_TERM_WAIT=<초> (기본 30)
+#              SV_DB_BACKUP_DONE=1  (--migrate 전용 — DB 백업을 마쳤다는 명시적 확인)
 set -eu
 
 PORT=8010
@@ -52,6 +73,31 @@ SKIP_NGINX=0
 SKIP_RESTART=0
 PYBIN_SET=""      # --pybin 으로 사람이 명시한 값(추론이 덮지 않는다)
 PYDEPS_FAIL=0     # [5] 의 실패를 [8]·최종 배너까지 전파한다
+MIGRATE=0            # --migrate: 마이그레이션을 '허용' 받았는가(허용받아도 거부할 수 있다)
+MIGRATE_FAIL=0       # upgrade 를 실제로 돌렸는데 실패했다 → 확정 실패(exit 1)
+MIGRATE_DONE=0       # upgrade 를 실제로 적용했다 → 배너에서 '롤백으로 못 되돌린다' 고 못 박는다
+MIGRATE_INCOMPLETE=0 # --migrate 를 줬으나 거부했다 → 요청 작업 미완료(exit 2)
+MIGRATE_UNVERIFIED=0 # upgrade 는 돌았는데 적용 후 리비전을 **읽지 못했다** → 미검증(exit 2)
+
+# ── [2] 의 DB 진단 결과(읽기전용). 전 단계가 이 값을 근거로 말한다 ──────────
+# ⚠ set -u 아래이므로 **반드시 여기서 초기화**한다(진단이 통째로 건너뛰어도 참조된다).
+DB_URL_SHOWN=""      # 마스킹된 DB URL(원문은 어디에도 출력하지 않는다)
+DB_KIND=""           # PostgreSQL | SQLite | 기타 | ?
+DB_HEAD=""           # migrations/ 의 head 리비전(파일에서만 얻는다 — 출처는 DB_HEAD_SRC)
+DB_HEAD_SRC=""       # "패키지" | "설치 트리" — head/미적용 목록을 **어느 트리에서** 읽었는가
+ALEM_DIR=""          # 위 head/history 를 실행한 alembic 트리(= alembic.ini 가 있는 디렉터리)
+DB_CURRENT=""        # DB 의 alembic 스탬프
+DB_PENDING=""        # 미적용 리비전 목록(줄바꿈 구분)
+DB_PENDING_N=0
+DB_NOTE=""
+DB_VERDICT="skip"    # latest|behind|unstamped|unknown-rev|multihead|undetermined|skip
+MIG_VERDICT="unknown"  # same|changed|unknown — 이번 패키지가 migrations/ 를 바꾸는가
+
+# ── [7] 의 런타임 판정. [8] 이 '왜 구버전인가' 를 귀속시키는 근거 ────────────
+UNIT=""; CID=""; RUNTIME_CG=""; RUNTIME_UNCERTAIN=0
+RUNTIME_CG_UNIT=""   # cgroup 에서 뽑혔지만 '백엔드 유닛이 아니다' 로 버린 이름(안내용)
+DOCKER_VERDICT=""    # bind | image | unknown  (빈 값 = 도커가 아님)
+DOCKER_NOTE=""; DOCKER_BIND_EVID=""
 BACKUP_ROOT="${SV_BACKUP_DIR:-/var/backups/saintview-viewer}"
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 TS="$(date +%Y%m%d%H%M%S)"
@@ -114,6 +160,7 @@ while [ $# -gt 0 ]; do
                 case "$PYBIN_SET" in -*|"") die "--pybin 에 파이썬 실행파일 경로가 필요합니다" ;; *) shift ;; esac ;;
     --skip-nginx)   SKIP_NGINX=1 ;;
     --skip-restart) SKIP_RESTART=1 ;;
+    --migrate)      MIGRATE=1 ;;
     -h|--help)  MODE=help ;;
     *)          outln "알 수 없는 인자: $1"; MODE=help ;;
   esac
@@ -184,6 +231,22 @@ extra_hash() {
     done
   } | "$HASHER" 2>/dev/null | awk '{print $1}'
 }
+# migrations/ 만의 지문. extra_hash 의 부분집합이지만 **따로** 필요하다:
+# '이번 갱신이 스키마를 건드리는가' 라는 질문은 migrations/ 하나로 답이 나오는데,
+# extra_hash 는 tools/·requirements.txt 변경까지 섞여 있어 그 질문에 답할 수 없다.
+# 이 값을 쓰면 '이번 릴리스는 스키마를 안 바꾼다' 는 사실을 주석이 아니라 **계산**으로
+# 말하게 되고, 다음 릴리스에서 자동으로 참/거짓이 갱신돼 안내문이 썩지 않는다.
+# $1 = 루트(설치 트리 또는 패키지의 backend/)
+mig_hash() {
+  if [ -z "$HASHER" ]; then pick_hasher || { printf 'nohasher'; return 0; }; fi
+  MH="$1"
+  if [ ! -d "$MH/migrations" ]; then printf 'none'; return 0; fi
+  find "$MH/migrations" -type f ! -path '*/__pycache__/*' 2>/dev/null | LC_ALL=C sort \
+  | while IFS= read -r f; do
+      printf '%s ' "${f#"$MH"/}"; "$HASHER" "$f" 2>/dev/null | awk '{print $1}'
+    done | "$HASHER" 2>/dev/null | awk '{print $1}'
+}
+
 # 지문 비교. 0=같음 1=다름 2=비교불가(해시 도구 없음)
 fp_same() {  # $1=assetA $2=hashA $3=assetB $4=hashB
   case "$2$4" in *nohasher*)
@@ -228,6 +291,45 @@ unsafe_target() {
 realdir() {
   [ -n "${1:-}" ] || { printf ''; return 0; }
   ( cd "$1" 2>/dev/null && pwd -P ) 2>/dev/null || printf '%s' "$1"
+}
+
+# ── 외부 명령 시간 제한 ────────────────────────────────────────────────────
+# DB 접속과 docker inspect 는 네트워크·데몬 사정으로 무한정 멈출 수 있다. 진단 하나가
+# 배포창을 통째로 잡아먹는 일은 없어야 한다. timeout(coreutils)이 있으면 쓰고,
+# 없다고 진단 자체를 포기하지는 않는다(그냥 실행한다).
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || true)"
+to_run() {  # $1=초  $2...=명령
+  TR_S="$1"; shift
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$TR_S" "$@"; else "$@"; fi
+}
+
+# ── DB URL 마스킹 ──────────────────────────────────────────────────────────
+# 실서버 backend/.env 의 SAINTVIEW_DATABASE_URL 에는 Postgres 비밀번호가 그대로
+# 박혀 있다. 원문을 찍으면 배포 로그·운영자 스크롤백·ssh 세션 기록에 유출된다 —
+# 마스킹은 미관이 아니라 요건이다. 스킴 + host:port/dbname 만 남긴다.
+mask_url() {
+  MU="${1:-}"
+  case "$MU" in
+    '')    printf '(빈 값)'; return 0 ;;
+    *://*) ;;
+    *)     printf '(형식 불명 — 출력하지 않습니다)'; return 0 ;;
+  esac
+  MU_S="${MU%%://*}"                                    # 스킴
+  MU_R="${MU#*://}"
+  MU_R="${MU_R%%\?*}"                                   # 쿼리스트링 제거(여기에도 암호가 온다)
+  # ⚠ authority 와 path 를 **먼저** 가른 뒤 authority 안에서만 자격증명을 지운다.
+  #   · `${x#*@}`(최단 일치)만 쓰면 비밀번호에 '@' 가 섞였을 때 첫 '@' 까지만 지워
+  #     뒷부분이 그대로 나간다(sv:p@ss@host → ***@ss@host — 비밀번호 유출).
+  #   · 그렇다고 통째로 `##*@`(최장 일치)를 쓰면 path 의 '@'(RFC 3986 에서 합법)까지
+  #     먹어 host:port 가 통째로 사라진다(...@host:5432/db@archive → ***@archive).
+  #   → 분리한 뒤 authority 안에서만 최장 일치. 두 오류가 동시에 닫힌다.
+  MU_A="${MU_R%%/*}"
+  case "$MU_R" in
+    */*) MU_P="/${MU_R#*/}" ;;
+    *)   MU_P="" ;;
+  esac
+  case "$MU_A" in *@*) MU_A="***@${MU_A##*@}" ;; esac    # 자격증명 통째 제거(마지막 '@' 까지)
+  printf '%s://%s%s' "$MU_S" "$MU_A" "$MU_P"
 }
 
 chown_back() {  # $1=경로 $2="user:group"
@@ -469,6 +571,324 @@ resolve_pybin() {
   fi
 }
 
+# ── 런타임 판별(읽기전용) ──────────────────────────────────────────────────
+# cgroup 한 줄에서 systemd 유닛과 docker 컨테이너 ID 를 뽑는다. [7] 안에 박아 두면
+# dry-run 이 같은 사실을 말할 수 없어서(그리고 [8] 이 원인을 귀속시킬 수 없어서)
+# 밖으로 뺐다. 아무것도 바꾸지 않는다.
+# ⚠ 세 번째 결과가 중요하다: cgroup 에 컨테이너 흔적은 있는데 docker CID 로 특정하지
+#   못한 경우(podman/containerd/k8s). 이것을 '맨 프로세스' 로 흘려보내면 컨테이너 안
+#   프로세스에 kill -TERM 을 보내는 셈이 되어, 컨테이너가 통째로 죽고 재기동 정책에
+#   따라 **구 이미지로 다시 뜬다**. 그래서 별도 '판정 불가' 로 가른다.
+detect_runtime() {
+  UNIT=""; CID=""; RUNTIME_CG=""; RUNTIME_UNCERTAIN=0; RUNTIME_CG_UNIT=""
+  [ -n "${BPID:-}" ] || return 0
+  [ -r "/proc/$BPID/cgroup" ] || return 0
+  RUNTIME_CG="$(cat "/proc/$BPID/cgroup" 2>/dev/null || true)"
+  # cgroup v1/v2, 시스템/사용자 유닛, docker/k8s 로 형태가 제각각이라
+  # 단일 정규식으로는 반드시 어딘가 틀린다 → 두 패턴을 각각 시도한다.
+  UNIT="$(printf '%s' "$RUNTIME_CG" | sed -n 's#.*[:/]\([A-Za-z0-9@._-]\{1,\}\.service\).*#\1#p' | head -1)"
+  CID="$(printf '%s' "$RUNTIME_CG" | sed -n 's#.*/docker[-/]\([0-9a-f]\{12,64\}\).*#\1#p' | head -1)"
+  if [ -z "$CID" ]; then
+    case "$RUNTIME_CG" in
+      */docker*|*kubepods*|*libpod*|*/crio-*|*containerd*|*/lxc*) RUNTIME_UNCERTAIN=1 ;;
+    esac
+  fi
+  # ⚠ UNIT 과 RUNTIME_UNCERTAIN 은 **동시에** 참일 수 있다. 컨테이너의 cgroup 경로에는
+  #   그 컨테이너를 담고 있는 상위 유닛이 그대로 박혀 있기 때문이다:
+  #     podman rootless : /user.slice/user-1000.slice/user@1000.service/.../libpod-*.scope
+  #     containerd      : /system.slice/containerd.service/kubepods-pod*.slice
+  #     lxc             : /lxc/web01/system.slice/<컨테이너 안 유닛>.service
+  #   여기서 뽑히는 `.service` 는 **백엔드의 유닛이 아니다**. 그대로 두면 do_restart 의
+  #   UNIT 분기가 '판정 불가' 가드보다 먼저 이겨서 호스트의 containerd.service /
+  #   user@1000.service 를 재시작하고(= 그 머신의 컨테이너 전부가 내려간다) '✅ 재시작
+  #   완료' 라는 거짓 성공을 찍는다. 근거가 없으므로 후보에서 지운다.
+  if [ "$RUNTIME_UNCERTAIN" = "1" ] && [ -n "$UNIT" ]; then
+    RUNTIME_CG_UNIT="$UNIT"; UNIT=""
+  else
+    RUNTIME_CG_UNIT=""
+  fi
+  # 공개 포트 배포에서 ss 가 docker-proxy 를 집으면 UNIT 이 런타임 데몬으로 잡힌다.
+  # 이름만으로 명백히 '백엔드 유닛이 아닌' 것은 컨테이너 흔적이 없어도 거른다.
+  case "$UNIT" in
+    docker.service|containerd.service|crio.service|podman.service|user@*.service|init.scope)
+      RUNTIME_CG_UNIT="$UNIT"; UNIT=""; RUNTIME_UNCERTAIN=1 ;;
+  esac
+  return 0
+}
+
+# ── 도커 bind mount '증명' ─────────────────────────────────────────────────
+# 예전에는 여기서 안내문만 찍고 return 1 했다(정답 명령을 출력하면서 실행은 사람에게
+# 떠넘겼다). 그 결과 도커로 도는 서버는 매번 수동이었고, 더 나쁘게는 '왜 구버전인가'
+# 를 [8] 이 몰라서 '재시작 누락 의심' 이라는 **틀린 원인**을 찍었다.
+#   bind mount 가 증명된 restart 는 systemctl restart 와 의미가 정확히 같다(코드는
+#   진짜로 교체됐다) → 거부할 이유가 없다. 거부해야 하는 것은 '증명 못 한' 경우다.
+# ⚠ Source 비교는 결국 문자열 비교다. 심볼릭 링크·`..` 는 realdir 로 풀지만, 해석에
+#   실패하면 **'없음' 이 아니라 '판정 불가'** 로 떨어뜨린다(안전한 쪽 오류).
+#   '마운트 있음' 으로 잘못 판정하면 이미지 내장인데도 restart 하고 '완료' 를 찍는
+#   가장 나쁜 사고가 재현된다.
+# 결과: DOCKER_VERDICT = bind | image | unknown  (+ DOCKER_NOTE / DOCKER_BIND_EVID)
+docker_verdict() {  # $1 = 컨테이너 ID
+  DOCKER_VERDICT="unknown"; DOCKER_NOTE=""; DOCKER_BIND_EVID=""
+  DV_CID="${1:-}"
+  [ -n "$DV_CID" ] || { DOCKER_NOTE="컨테이너 ID 를 얻지 못했습니다"; return 0; }
+  if ! command -v docker >/dev/null 2>&1; then
+    DOCKER_NOTE="docker CLI 가 PATH 에 없습니다"; return 0
+  fi
+  DV_TGT="$(realdir "${BACKEND_DIR:-}")"
+  case "$DV_TGT" in /?*) ;; *) DOCKER_NOTE="설치 경로를 정규화하지 못했습니다: ${BACKEND_DIR:-}"; return 0 ;; esac
+  [ -d "$DV_TGT" ] || { DOCKER_NOTE="설치 경로가 디렉터리가 아닙니다: $DV_TGT"; return 0; }
+
+  DVRC=0
+  DV_M="$(to_run 20 docker inspect \
+            --format '{{range .Mounts}}{{.Type}}|{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' \
+            "$DV_CID" 2>/dev/null)" || DVRC=$?
+  if [ "$DVRC" != "0" ]; then
+    DOCKER_NOTE="docker inspect 실패(exit $DVRC — 데몬 권한 없음 / 알 수 없는 컨테이너)"
+    return 0
+  fi
+  DVF="$(mktemp 2>/dev/null || true)"
+  [ -n "$DVF" ] || { DOCKER_NOTE="임시파일을 만들지 못해 마운트를 해석하지 못했습니다"; return 0; }
+  printf '%s\n' "$DV_M" > "$DVF"
+
+  # ※ 파이프라인의 while 은 서브셸이라 변수가 밖으로 안 나온다(dash) → 파일 리다이렉션.
+  DV_HIT=""; DV_UNRES=0; DV_BINDS=0
+  while IFS='|' read -r dvt dvs dvd; do
+    [ -n "$dvt" ] || continue
+    [ "$dvt" = "bind" ] || continue
+    DV_BINDS=$((DV_BINDS + 1))
+    if [ -f "$dvs" ] && [ ! -d "$dvs" ]; then continue; fi   # 파일 바인드는 코드 트리를 덮을 수 없다
+    if [ ! -d "$dvs" ]; then
+      # 호스트에 존재하지 않는 Source — 해석 실패다. '없음' 으로 단정하면 안 된다.
+      DV_UNRES=1; DOCKER_NOTE="마운트 원본을 호스트에서 해석하지 못했습니다: $dvs"
+      continue
+    fi
+    dvr="$(realdir "$dvs")"
+    if [ "$dvr" = "$DV_TGT" ]; then DV_HIT="$dvs → $dvd (완전일치)"; break; fi
+    case "$DV_TGT" in "$dvr"/*) DV_HIT="$dvs → $dvd (설치 경로의 상위)"; break ;; esac
+  done < "$DVF"
+  rm -f "$DVF"
+
+  if [ -n "$DV_HIT" ]; then
+    DOCKER_VERDICT="bind"; DOCKER_BIND_EVID="$DV_HIT"
+    return 0
+  fi
+  if [ "$DV_UNRES" = "1" ]; then DOCKER_VERDICT="unknown"; return 0; fi
+  DOCKER_VERDICT="image"
+  DOCKER_NOTE="bind 마운트 ${DV_BINDS}건 중 $DV_TGT 를 덮는 것이 없습니다"
+  return 0
+}
+
+# ── 이번 패키지가 migrations/ 를 바꾸는가 ──────────────────────────────────
+# 결론을 저장소 diff 로 하드코딩하지 않는다. 실서버가 이 저장소보다 옛 패키지로 돌고
+# 있을 수 있고(어느 dist 로 설치됐는지 스크립트는 모른다), 그러면 '스키마 변경 없음'
+# 이라는 결론이 통째로 성립하지 않는다 → 매 실행 지문으로 계산한다.
+mig_compare() {
+  MIG_VERDICT="unknown"
+  [ -n "${PKG:-}" ] || return 0
+  [ -n "${BACKEND_DIR:-}" ] || return 0
+  MC_A="$(mig_hash "$BACKEND_DIR")"
+  MC_B="$(mig_hash "$PKG/backend")"
+  case "$MC_A$MC_B" in *nohasher*) return 0 ;; esac
+  if [ "$MC_A" = "$MC_B" ]; then MIG_VERDICT="same"; else MIG_VERDICT="changed"; fi
+  return 0
+}
+
+# ── [2] DB 진단 — 항상 돌고, 아무것도 바꾸지 않는다 ────────────────────────
+# 왜 [2] 끝인가: 백업·교체보다 **먼저** 현장의 DB 체제를 알아야 --migrate 의 허용/거부를
+# 사실로 판단할 수 있고, dry-run 이 아무 위험 없이 같은 사실을 학습할 수 있다.
+# ⚠ 이 진단은 **재시작 전** 스냅샷이다. 재시작 직후 lifespan 의 init_db() 가
+#   create_all() + 누락 컬럼 ALTER 로 스키마를 또 바꾸므로, 여기서 출력한 상태와
+#   최종 상태는 다를 수 있다. 그 사실을 출력에 명시한다.
+# ⚠ 실패는 전부 '판정 불가' 다. 파이썬을 못 찾거나 DB 에 접속 못 한다고 배포를 막으면
+#   그 자체가 새 회귀다 — 모든 단계가 조건부·비치명적이다.
+db_probe() {
+  say "DB 진단(읽기전용) — 아래는 **재시작 전** 시점의 상태입니다"
+
+  # 이번 패키지가 migrations/ 를 건드리는지는 파이썬 없이도 답할 수 있다 → 먼저 한다.
+  mig_compare
+  case "$MIG_VERDICT" in
+    same)    ok "이번 갱신은 migrations/ 를 바꾸지 않습니다 — 스키마 작업 없음 (근거: 설치 트리와 패키지의 migrations/ 지문 동일)" ;;
+    changed) warn "이번 갱신은 migrations/ 를 바꿉니다 — 스키마 작업이 필요할 수 있습니다 (근거: 지문 불일치)" ;;
+    *)       say  "  migrations/ 변경 여부: 판정 불가(해시 도구 없음)" ;;
+  esac
+
+  if [ -z "${PYBIN:-}" ] || [ ! -x "${PYBIN:-}" ]; then
+    DB_VERDICT="undetermined"; DB_NOTE="백엔드 파이썬을 특정하지 못했습니다(--pybin 으로 지정)"
+    warn "DB 진단 불가: $DB_NOTE"
+    return 0
+  fi
+  if [ ! -f "$BACKEND_DIR/alembic.ini" ]; then
+    DB_VERDICT="undetermined"; DB_NOTE="alembic.ini 가 없습니다: $BACKEND_DIR/alembic.ini"
+    warn "DB 진단 불가: $DB_NOTE"
+    return 0
+  fi
+
+  # (1) DB URL — .env 를 손으로 파싱하지 않는다.
+  #   (a) python-dotenv 의 load_dotenv() 는 기본 override=False 라 **실제 프로세스
+  #       환경변수가 .env 를 이긴다**(systemd Environment= / docker -e). 손파싱은 오답이다.
+  #   (b) load_dotenv() 는 CWD 기준이라 cwd 가 틀리면 조용히 sqlite:///./dev.db 로 떨어진다.
+  #   → migrations/env.py 가 쓰는 것과 **같은 단일 소스**(app.config.get_settings)를 부른다.
+  DBU="$( cd "$BACKEND_DIR" 2>/dev/null && to_run 20 "$PYBIN" -c \
+          'from app.config import get_settings; print(get_settings().database_url)' 2>/dev/null )" || DBU=""
+  if [ -n "$DBU" ]; then
+    DB_URL_SHOWN="$(mask_url "$DBU")"
+    case "$DBU" in
+      postgres*)  DB_KIND="PostgreSQL" ;;
+      sqlite*)    DB_KIND="SQLite" ;;
+      *)          DB_KIND="기타" ;;
+    esac
+    say "  DB: $DB_KIND  $DB_URL_SHOWN   (비밀번호는 마스킹했습니다)"
+  else
+    DB_KIND="?"
+    warn "DB URL 을 읽지 못했습니다(app.config 임포트 실패) — 이후 판정은 '불가' 입니다"
+  fi
+
+  # ── head·미적용 목록은 **패키지 트리**에서 읽는다 ──────────────────────────
+  # ⚠ 여기가 이 진단의 급소다. db_probe 는 [2](detect_paths 끝)에서 돌고 파일 교체는
+  #   [4](do_copy)다. alembic.ini 의 `script_location = %(here)s/migrations` 는 **ini 가
+  #   있는 디렉터리** 기준이므로, `-c "$BACKEND_DIR/alembic.ini"` 로 heads 를 읽으면
+  #   아직 교체되지 않은 **설치 트리(=구 패키지)** 의 head 가 나온다. 그 값을 '패키지
+  #   head' 라 부르면, 리비전을 하나 추가한 가장 흔한 릴리스에서 DB스탬프 == 구 head
+  #   가 되어 verdict 가 latest 로 떨어지고, --migrate 가 정확히 필요한 그 상황에서만
+  #   no-op + exit 0 이 나간다(신 코드 + 구 스키마로 서비스가 재기동된다).
+  #   → heads·history 는 env.py 를 돌리지 않는 **파일 전용** 명령이라 패키지 트리에서
+  #     실행해도 DB 접속도 app 임포트도 필요 없다. 그래서 이 둘만 패키지로 돌린다.
+  #   → 반대로 `current`(아래 (3))는 env.py 가 **cwd 기준 .env** 를 읽어야 하므로
+  #     반드시 설치 트리에서 돈다. -c 까지 패키지로 돌리면 app.config 가 .env 를 못 찾아
+  #     sqlite:///./dev.db 로 조용히 떨어져 남의 DB 를 진단하게 된다.
+  ALEM_DIR="$BACKEND_DIR"; DB_HEAD_SRC="설치 트리"
+  if [ -n "${PKG:-}" ] && [ -f "$PKG/backend/alembic.ini" ] && [ -d "$PKG/backend/migrations/versions" ]; then
+    ALEM_DIR="$PKG/backend"; DB_HEAD_SRC="패키지"
+  fi
+
+  # (2) head — **DB 를 건드리지 않고** 파일에서만 얻는다.
+  HOUT="$( cd "$ALEM_DIR" && to_run 30 "$PYBIN" -m alembic -c "$ALEM_DIR/alembic.ini" heads 2>/dev/null )" || HOUT=""
+  DB_HEAD="$(printf '%s\n' "$HOUT" | sed -n 's/^\([0-9a-f]\{6,\}\).*/\1/p' | head -1)"
+  HEAD_N="$(printf '%s\n' "$HOUT" | sed -n 's/^\([0-9a-f]\{6,\}\).*/\1/p' | grep -c . || true)"
+  if [ -z "$DB_HEAD" ]; then
+    # ⚠ 파싱 실패를 '최신' 으로 읽으면 안 된다. alembic 버전업으로 문구가 바뀌어도
+    #   조용히 오판하지 않도록, 해석 못 한 것은 전부 '판정 불가' 다.
+    DB_VERDICT="undetermined"
+    DB_NOTE="alembic heads 출력을 해석하지 못했습니다(alembic 미설치 또는 출력 형식 변경)"
+    warn "DB 진단 불가: $DB_NOTE"
+    return 0
+  fi
+  if [ "${HEAD_N:-1}" -gt 1 ]; then
+    DB_VERDICT="multihead"; DB_NOTE="head 가 ${HEAD_N}개입니다(머지 필요)"
+    warn "$DB_HEAD_SRC 트리의 마이그레이션 head 가 ${HEAD_N}개입니다 — 사람이 머지해야 합니다(--migrate 는 거부합니다)"
+    return 0
+  fi
+  say "  head 리비전: $DB_HEAD   (출처: $DB_HEAD_SRC 트리의 migrations/)"
+
+  # ── 교차검사 ────────────────────────────────────────────────────────────────
+  # 'DB 스탬프 == head → 미적용 없음' 이 참이려면 그 head 가 **패키지의** head 여야
+  # 한다. 패키지 트리를 읽지 못해 설치 트리로 떨어졌는데(=구 head) 이번 패키지가
+  # migrations/ 를 바꾼다면, 두 사실은 정면으로 모순이다. 예전 구현은 이 조합에서
+  # '⚠ migrations/ 를 바꿉니다' 와 '✅ 미적용 없음' 을 한 화면에 함께 찍고도 아무도
+  # 대조하지 않아 조용한 no-op + exit 0 을 만들었다. 모르면 '모름' 으로 무너진다.
+  if [ "$DB_HEAD_SRC" != "패키지" ] && [ "$MIG_VERDICT" = "changed" ]; then
+    DB_VERDICT="undetermined"
+    DB_NOTE="패키지의 alembic 트리를 읽지 못해 head 를 설치 트리에서 얻었는데, 이번 패키지는 migrations/ 를 바꿉니다"
+    warn "DB 진단 불가(교차검사 모순): $DB_NOTE"
+    say  "    → 구 head 와 DB 스탬프가 같다는 사실을 '미적용 없음' 으로 읽으면 패키지가 새로"
+    say  "      추가한 리비전이 통째로 빠집니다. 그래서 '최신' 이 아니라 '판정 불가' 입니다."
+    say  "    확인: $PKG/backend/alembic.ini 와 $PKG/backend/migrations/versions 가 있는지 보세요."
+    return 0
+  fi
+
+  # (3) DB 스탬프 — 여기서만 실제 접속이 일어난다.
+  #   백엔드가 컨테이너 안이고 DB 호스트명이 도커 네트워크 이름(db:5432)이면 호스트에서
+  #   실행하는 이 스크립트는 접속 자체를 못 한다. 그때 '미적용 없음' 으로 오판하는 것이
+  #   최악이므로 반드시 '판정 불가' 로 명시한다.
+  COUT="$(mktemp 2>/dev/null || true)"; CERR="$(mktemp 2>/dev/null || true)"
+  if [ -z "$COUT" ] || [ -z "$CERR" ]; then
+    rm -f "$COUT" "$CERR" 2>/dev/null || true
+    DB_VERDICT="undetermined"; DB_NOTE="임시파일을 만들지 못했습니다"
+    warn "DB 스탬프 판정 불가: $DB_NOTE"
+    return 0
+  fi
+  CRC=0
+  ( cd "$BACKEND_DIR" && to_run 30 "$PYBIN" -m alembic -c "$BACKEND_DIR/alembic.ini" current ) \
+      >"$COUT" 2>"$CERR" || CRC=$?
+  if [ "$CRC" != "0" ]; then
+    DB_VERDICT="undetermined"
+    DB_NOTE="alembic current 실패(exit $CRC) — DB 에 접속하지 못했을 가능성이 큽니다"
+    warn "DB 스탬프 판정 불가: $DB_NOTE"
+    say  "    (백엔드가 컨테이너 안이고 DB 호스트명이 도커 네트워크 이름이면 호스트에서는 접속할 수 없습니다)"
+    # stderr 에도 접속 URL 이 섞여 나올 수 있다 → 자격증명을 지운 뒤 마지막 3줄만.
+    # ⚠ 문자클래스에서 '@' 를 빼면(`[^/@ ]*`) 첫 '@' 에서 멈춰, 비밀번호에 '@' 가 섞였을 때
+    #   뒷부분이 그대로 로그에 남는다(sv:p@ss@host → ***@ss@host). '@' 를 허용하고 '/' 만
+    #   막으면 BRE 의 최장 일치가 authority 안 **마지막 '@'** 까지 먹는다 — path 의 '@' 는
+    #   앞에 '/' 가 있어 애초에 이 클래스가 넘어가지 못하므로 host:port 도 안전하다.
+    #   (URL 이 잘못 적혀 접속에 실패한 상황이 바로 이 분기라 노출 빈도가 가장 높다)
+    sed -e 's#://[^/ ]*@#://***@#g' "$CERR" 2>/dev/null | tail -3 \
+      | while IFS= read -r l; do say "    | $l"; done
+    rm -f "$COUT" "$CERR"
+    return 0
+  fi
+  DB_CURRENT="$(sed -n 's/^\([0-9a-f]\{6,\}\).*/\1/p' "$COUT" | head -1)"
+  CBYTES="$(tr -d ' \t\n\r' < "$COUT" 2>/dev/null | wc -c | tr -d ' ')"
+  rm -f "$COUT" "$CERR"
+
+  if [ -z "$DB_CURRENT" ]; then
+    if [ "${CBYTES:-0}" -eq 0 ]; then
+      # (c) alembic_version 테이블 자체가 없다 — 단정해서 알린다.
+      DB_VERDICT="unstamped"
+      warn "이 DB 에는 alembic_version 이 없습니다 — alembic 이 소유하지 않는 스키마입니다"
+      say  "    근거: app/main.py 의 lifespan 이 **매 기동마다** init_db() 를 호출하고,"
+      say  "          app/db.py 의 init_db() 가 create_all() + 누락 컬럼 ALTER 로 스키마를 만듭니다."
+      say  "    → 이 DB 에 'alembic upgrade head' 를 돌리면 체인의 뿌리(initial_schema)부터"
+      say  "      재생돼 **이미 있는 테이블 위에서 터집니다**. --migrate 를 줘도 거부합니다."
+    else
+      DB_VERDICT="undetermined"; DB_NOTE="alembic current 출력을 해석하지 못했습니다"
+      warn "DB 스탬프 판정 불가: $DB_NOTE"
+    fi
+    return 0
+  fi
+  say "  DB 스탬프 리비전: $DB_CURRENT"
+
+  if [ "$DB_CURRENT" = "$DB_HEAD" ]; then
+    DB_VERDICT="latest"
+    ok "DB 리비전이 $DB_HEAD_SRC head 와 같습니다 — 미적용 마이그레이션 없음"
+    if [ "$MIG_VERDICT" = "changed" ]; then
+      # 한 화면에 '바뀝니다' 와 '미적용 없음' 이 함께 나오는 조합을 그냥 두지 않는다.
+      # head 를 패키지에서 읽었으므로 이것은 모순이 아니라 **리비전 추가가 없는
+      # 내용 변경**(기존 리비전 파일 수정 등)이다 — 그 사실을 명시한다.
+      say "    ※ migrations/ 지문은 바뀌었지만 head 는 그대로입니다 = 새 리비전이 추가되지"
+      say "       않은 내용 변경입니다(head 는 $DB_HEAD_SRC 트리에서 읽었습니다)."
+    fi
+    return 0
+  fi
+
+  # current 가 head 의 조상인가 = head 로 가는 경로가 있는가. (DB 를 건드리지 않는다)
+  # ※ heads 와 **같은 트리**에서 읽어야 한다. 다른 트리에서 읽으면 예고한 목록과
+  #   실제 적용분이 어긋난다(동의 범위 밖의 마이그레이션이 들어간다).
+  RANGE="$( cd "$ALEM_DIR" && to_run 30 "$PYBIN" -m alembic -c "$ALEM_DIR/alembic.ini" \
+            history -r "$DB_CURRENT:head" 2>/dev/null )" || RANGE=""
+  if [ -z "$RANGE" ]; then
+    # (d) DB 의 리비전이 패키지 migrations/ 에 없다 — 롤백 잔재이거나 다른 계보다.
+    DB_VERDICT="unknown-rev"; DB_NOTE="DB 리비전 $DB_CURRENT 이 $DB_HEAD_SRC 트리의 migrations/ 에 없습니다"
+    warn "DB 리비전 $DB_CURRENT 이 $DB_HEAD_SRC 트리의 migrations/ 에 없습니다"
+    say  "    (DB 가 패키지보다 신버전이거나 — 롤백 잔재 — 계보가 다른 패키지입니다)"
+    return 0
+  fi
+  DB_PENDING="$(printf '%s\n' "$RANGE" | sed -n 's/.*-> \([0-9a-f][0-9a-f]*\).*/\1/p' \
+                | grep -v "^$DB_CURRENT\$" || true)"
+  DB_PENDING_N="$(printf '%s' "$DB_PENDING" | grep -c . || true)"
+  if [ "${DB_PENDING_N:-0}" -lt 1 ]; then
+    DB_VERDICT="undetermined"; DB_NOTE="미적용 리비전 목록을 해석하지 못했습니다"
+    warn "DB 스탬프 판정 불가: $DB_NOTE"
+    return 0
+  fi
+  DB_VERDICT="behind"
+  warn "미적용 마이그레이션 ${DB_PENDING_N}건 (DB=$DB_CURRENT → $DB_HEAD_SRC head=$DB_HEAD)"
+  printf '%s\n' "$DB_PENDING" | while IFS= read -r r; do say "    · $r"; done
+  if [ "$MIG_VERDICT" = "same" ]; then
+    say "    ※ 다만 이번 패키지는 migrations/ 를 바꾸지 않습니다 — 이 미적용분은 이번 갱신 때문이 아닙니다."
+  fi
+  return 0
+}
+
 detect_paths() {
   step "설치 경로 발견"
 
@@ -588,6 +1008,14 @@ detect_paths() {
   # 멈춰야 안전하다([3] 백업 이후에 죽으면 반쯤 적용된 상태가 남는다).
   resolve_pybin
 
+  # 런타임(systemd 유닛 / 도커 컨테이너)도 여기서 확정한다. 읽기만 하므로 dry-run 도
+  # 같은 사실을 볼 수 있고, [7]·[8] 이 같은 근거로 말하게 된다.
+  detect_runtime
+
+  # DB 진단은 **항상·무료·읽기전용**이다(옵션이 없다). 파일을 건드리기 전에 현장의
+  # 체제를 알아야 --migrate 의 허용/거부를 사실로 판단할 수 있다.
+  db_probe
+
   # 소유권 기준선도 지금 잡는다([4] 의 cp -a 가 root:root 로 덮어쓰기 전 값이어야 한다).
   FOWN="$(own_of "$FRONT_DIR")"
   BOWN="$(own_of "$BACKEND_DIR/app")"
@@ -610,6 +1038,7 @@ do_backup() {
   CUR_ASSET="$(asset_of "$FRONT_DIR")"
   CUR_APP="$(tree_hash "$BACKEND_DIR/app")"
   CUR_EXTRA="$(extra_hash "$BACKEND_DIR")"
+  CUR_MIG="$(mig_hash "$BACKEND_DIR")"
   PKG_APP="$(tree_hash "$PKG/backend/app")"
   say "현재 지문: asset=${CUR_ASSET:-?} app=${CUR_APP} extra=${CUR_EXTRA}"
   say "패키지 지문: asset=${PKG_ASSET:-?} app=${PKG_APP}"
@@ -642,6 +1071,10 @@ do_backup() {
     outln "FP_ASSET='${CUR_ASSET}'"
     outln "FP_APP='${CUR_APP}'"
     outln "FP_EXTRA='${CUR_EXTRA}'"
+    # migrations/ 만의 지문. FP_EXTRA 는 tools/·requirements.txt 변경까지 섞여 있어
+    # '이번 적용이 스키마 파일을 건드렸는가' 라는 질문에 답할 수 없다 → 따로 남긴다.
+    # (mval 은 `^FP_MIG=` 로 앵커되므로 아래 FP_MIG_AFTER 와 섞이지 않는다.)
+    outln "FP_MIG='${CUR_MIG}'"
     outln "FOWN='${FOWN:-}'"
     outln "BOWN='${BOWN:-}'"
     for p in $BK_FILES; do
@@ -784,8 +1217,22 @@ do_copy() {
       outln "FP_ASSET_AFTER='$(asset_of "$FRONT_DIR")'"
       outln "FP_APP_AFTER='$(tree_hash "$BACKEND_DIR/app")'"
       outln "FP_EXTRA_AFTER='$(extra_hash "$BACKEND_DIR")'"
+      outln "FP_MIG_AFTER='$(mig_hash "$BACKEND_DIR")'"
     } >> "$BACKUP_ROOT/$TS/manifest.env"
   fi
+
+  # 적용이 migrations/ 를 실제로 바꿨는지 **계산으로** 말한다(주석이 아니라).
+  # [2] 의 mig_compare 는 '패키지가 다른가' 였고, 이것은 '실제로 바뀌었나' 다.
+  MIG_NOW="$(mig_hash "$BACKEND_DIR")"
+  case "${CUR_MIG:-}${MIG_NOW:-}" in
+    *nohasher*) ;;
+    *) if [ "${CUR_MIG:-}" = "$MIG_NOW" ]; then
+         ok "migrations/ 는 한 바이트도 바뀌지 않았습니다 — 이번 갱신에 스키마 작업이 없습니다"
+       else
+         warn "migrations/ 가 바뀌었습니다 — 스키마 작업이 필요할 수 있습니다(적용 전 $CUR_MIG → 적용 후 $MIG_NOW)"
+         say  "  이 스크립트는 DB 를 자동으로 바꾸지 않습니다. 필요하면 --migrate 를 명시하세요(거부 조건은 --help)."
+       fi ;;
+  esac
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -885,6 +1332,136 @@ do_pydeps() {
   else
     ok "설치 완료 (설치 후 재확인 통과)"
   fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DB 마이그레이션 — --migrate 를 줬을 때만. **번호 없는 블록**이다.
+#   단계 번호를 붙이지 않는 이유: [7]/[8] 이라는 표기가 이 파일 곳곳(재시작 안내문,
+#   롤백 안내, 헤더 주석)에 하드코딩돼 있어, 조건부 단계를 끼워 넣으면 그 참조들이
+#   플래그 유무에 따라 어긋난다. 단계는 언제나 8개다.
+#   실행 순서는 [4]교체 → [5]의존성 → **여기** → [7]재시작 이다.
+#   ⚠ 그래서 '구 코드가 신 스키마를 보는 창(window)' 이 원리적으로 존재한다: 파일은
+#     이미 교체됐지만 백엔드 프로세스는 [7] 까지 구 코드를 메모리에 들고 있다.
+#     지금까지의 리비전이 가산 위주라 그 창이 안전할 뿐이며, 파괴적 리비전(DROP/RENAME)
+#     이 생기는 순간 이 순서로는 부족하다 — --migrate 가 절대 기본값이 되면 안 되는
+#     두 번째 이유다(첫 번째는 미스탬프 DB 를 고장낸다는 것).
+# ═══════════════════════════════════════════════════════════════════════════
+do_migrate() {
+  echo
+  outln "── DB 마이그레이션 (--migrate) ────────────────────────────────────────"
+
+  # 거부를 기능으로 만든다. 아래 어느 갈래든 '아무것도 하지 않음' 이 정답이다.
+  case "$DB_VERDICT" in
+    behind) ;;   # 유일하게 실행할 수 있는 갈래
+    latest)
+      ok "미적용 리비전이 없습니다 — 할 일이 없습니다(no-op)"
+      say "  (근거: DB 스탬프 $DB_CURRENT = $DB_HEAD_SRC head $DB_HEAD)"
+      return 0 ;;
+    unstamped)
+      MIGRATE_INCOMPLETE=1
+      warn "거부: 이 DB 에는 alembic_version 이 없습니다(alembic 이 소유하지 않는 스키마)"
+      say  "  지금 upgrade head 를 돌리면 체인의 뿌리부터 재생돼 이미 있는 테이블에서 터집니다."
+      say  "  = 도움이 아니라 **정상 서버를 고장내는 동작**이므로, 플래그를 줘도 하지 않습니다."
+      say  "  소유권을 alembic 에 넘기려면 **사람이** 스키마를 대조한 뒤 직접 찍으세요:"
+      say  "     cd $BACKEND_DIR && ${PYBIN:-<백엔드 파이썬>} -m alembic stamp <대조로 확인한 리비전>"
+      say  "  스크립트는 stamp 를 대신 찍지 않습니다 — 그것은 배포 도구가 아니라 사람의 판단입니다."
+      return 0 ;;
+    multihead)
+      MIGRATE_INCOMPLETE=1
+      warn "거부: head 가 여러 개입니다(${DB_NOTE:-}) — 사람이 alembic merge 로 정리해야 합니다"
+      return 0 ;;
+    unknown-rev)
+      MIGRATE_INCOMPLETE=1
+      warn "거부: DB 리비전 $DB_CURRENT 이 $DB_HEAD_SRC 트리의 migrations/ 에 없습니다"
+      say  "  DB 가 패키지보다 신버전(롤백 잔재)이거나 계보가 다릅니다. 자동으로 추측하지 않습니다."
+      return 0 ;;
+    *)
+      MIGRATE_INCOMPLETE=1
+      warn "거부: DB 상태를 판정하지 못했습니다(${DB_NOTE:-사유 불명})"
+      say  "  '판정 불가' 를 '최신' 으로 읽지 않습니다 — 모르는 상태에서 스키마를 바꾸지 않습니다."
+      return 0 ;;
+  esac
+
+  say "적용될 리비전 ${DB_PENDING_N}건 (DB=$DB_CURRENT → head=$DB_HEAD, 출처 $DB_HEAD_SRC):"
+  printf '%s\n' "$DB_PENDING" | while IFS= read -r r; do say "  · $r"; done
+
+  # ⚠ 이 스크립트의 핵심 불변식(백업 집합 = 쓰기 집합 = 복구 집합)이 **DB 에 대해서만**
+  #   깨지는 지점이다. --rollback 은 파일만 되돌린다. 그래서 사람의 명시적 확인을 받는다.
+  if [ "${SV_DB_BACKUP_DONE:-0}" != "1" ]; then
+    MIGRATE_INCOMPLETE=1
+    warn "거부: DB 백업 확인(SV_DB_BACKUP_DONE=1)이 없습니다"
+    say  "  --rollback 은 **파일만** 되돌립니다 — 한 번 적용한 마이그레이션은 이 스크립트가 되돌리지 못합니다."
+    say  "  DB 를 먼저 백업(pg_dump 등)한 뒤, 그 사실을 명시해 다시 실행하세요:"
+    say  "     SV_DB_BACKUP_DONE=1 sudo -E sh $(basename "$0") --apply <패키지> --migrate"
+    say  "     (sudo 는 환경변수를 지웁니다 — -E 를 빠뜨리지 마세요)"
+    return 0
+  fi
+  if [ -z "${PYBIN:-}" ] || [ ! -x "${PYBIN:-}" ]; then
+    MIGRATE_INCOMPLETE=1
+    warn "거부: 백엔드 파이썬을 특정하지 못했습니다(--pybin)"
+    return 0
+  fi
+
+  # ── 동의 범위 재확인: upgrade 직전에 **지금 트리로** 다시 센다 ──────────────
+  # [2] 의 진단은 do_copy([4]) **전** 시점이다. 실제로 도는 `upgrade head`(아래)는
+  # 교체가 끝난 설치 트리 = 패키지의 체인을 따라간다. 두 시점이 다르므로, 예고한
+  # 목록과 실제 적용분이 어긋날 수 있는 구조적 틈이 남는다(과거에는 '1건' 이라고
+  # 동의받고 3건을 적용했다). 되돌릴 수 없는 유일한 행위 앞이므로 **다르면 거부**한다.
+  #   ※ head 를 패키지에서 읽도록 고친 뒤에는 정상 경로에서 항상 일치한다. 그래도
+  #     남겨 둔다 — 같은 종류의 어긋남이 다시 생기면 여기서 확정적으로 멈춘다.
+  RE_HOUT="$( cd "$BACKEND_DIR" && to_run 30 "$PYBIN" -m alembic -c "$BACKEND_DIR/alembic.ini" heads 2>/dev/null )" || RE_HOUT=""
+  RE_HEAD="$(printf '%s\n' "$RE_HOUT" | sed -n 's/^\([0-9a-f]\{6,\}\).*/\1/p' | head -1)"
+  RE_HEADN="$(printf '%s\n' "$RE_HOUT" | sed -n 's/^\([0-9a-f]\{6,\}\).*/\1/p' | grep -c . || true)"
+  RE_RANGE="$( cd "$BACKEND_DIR" && to_run 30 "$PYBIN" -m alembic -c "$BACKEND_DIR/alembic.ini" \
+               history -r "$DB_CURRENT:head" 2>/dev/null )" || RE_RANGE=""
+  RE_PENDING="$(printf '%s\n' "$RE_RANGE" | sed -n 's/.*-> \([0-9a-f][0-9a-f]*\).*/\1/p' \
+                | grep -v "^$DB_CURRENT\$" || true)"
+  if [ -z "$RE_HEAD" ] || [ "${RE_HEADN:-1}" -gt 1 ] \
+     || [ "$RE_HEAD" != "$DB_HEAD" ] || [ "$RE_PENDING" != "$DB_PENDING" ]; then
+    MIGRATE_INCOMPLETE=1
+    warn "거부: 교체 후 트리의 마이그레이션 목록이 [2] 에서 예고한 것과 다릅니다"
+    say  "  예고: head=$DB_HEAD  ${DB_PENDING_N}건"
+    say  "  현재: head=${RE_HEAD:-읽지 못함}(head 개수 ${RE_HEADN:-?})  $(printf '%s' "$RE_PENDING" | grep -c . || true)건"
+    say  "  동의받은 범위를 넘는 스키마 변경을 하지 않습니다 — 아무것도 적용하지 않았습니다."
+    say  "  현재 상태로 다시 진단하려면:  sudo sh $(basename "$0") --dry-run <패키지>"
+    return 0
+  fi
+
+  warn "'구 코드가 신 스키마를 보는 창' 이 지금부터 [7] 재시작까지 열립니다"
+  say  "  (파일은 이미 교체됐지만 백엔드 프로세스는 아직 구 코드를 메모리에 들고 있습니다)"
+  say  "실행: cd $BACKEND_DIR && $PYBIN -m alembic upgrade head"
+  MRC=0
+  ( cd "$BACKEND_DIR" && to_run 600 "$PYBIN" -m alembic -c "$BACKEND_DIR/alembic.ini" upgrade head ) || MRC=$?
+  if [ "$MRC" != "0" ]; then
+    MIGRATE_FAIL=1
+    warn "alembic upgrade head 실패(exit $MRC)"
+    say  "  DB 는 **중간 상태**일 수 있습니다. --rollback 은 이것을 되돌리지 못합니다."
+    say  "  백업에서 DB 를 복원할지 여부는 사람이 판단하세요. 스크립트는 더 손대지 않습니다."
+    return 0
+  fi
+  MIGRATE_DONE=1
+  ok "alembic upgrade head 완료"
+
+  # 'exit 0' 과 '실제로 스탬프가 올라갔다' 는 다른 명제다 — 되물어 확인한다.
+  AOUT="$( cd "$BACKEND_DIR" && to_run 30 "$PYBIN" -m alembic -c "$BACKEND_DIR/alembic.ini" current 2>/dev/null )" || AOUT=""
+  AREV="$(printf '%s\n' "$AOUT" | sed -n 's/^\([0-9a-f]\{6,\}\).*/\1/p' | head -1)"
+  if [ -n "$AREV" ] && [ "$AREV" = "$DB_HEAD" ]; then
+    ok "적용 후 DB 리비전 = $AREV (= $DB_HEAD_SRC head)"
+  elif [ -n "$AREV" ]; then
+    # ⚠ 이것은 '확인 못 함' 이 아니라 **틀렸다**. 기대한 head 가 아닌 곳에 스탬프가 서
+    #   있다는 뜻이고, 되돌릴 수 없는 행위 뒤라 정상 종료가 될 수 있는 상태가 아니다.
+    #   예전에는 warn 만 찍고 exit 0 이 나가 '✅ 갱신 완료' 로 덮였다.
+    MIGRATE_FAIL=1
+    warn "적용 후 리비전이 기대와 다릅니다(읽은 값: $AREV / 기대: $DB_HEAD)"
+    say  "  = 예고·동의받은 범위와 실제 DB 상태가 어긋났습니다. 이 실행은 실패로 판정합니다."
+    say  "  DB 는 이미 바뀌었습니다 — --rollback 은 이것을 되돌리지 못합니다."
+  else
+    # 읽지 못한 것은 실패와 다르다(적용은 exit 0 이었다) → '미검증' 으로 따로 말한다.
+    MIGRATE_UNVERIFIED=1
+    warn "적용 후 리비전을 읽지 못했습니다(기대: $DB_HEAD) — '이상 없음' 이 아니라 '모름' 입니다"
+    say  "  확인:  cd $BACKEND_DIR && $PYBIN -m alembic current"
+  fi
+  return 0
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1151,21 +1728,74 @@ do_restart() {
   #   → 되돌릴 수 없는 행위(kill, mv, rm) 앞의 전제조건은 반드시 **손으로** 검사한다.
   if [ "$SKIP_RESTART" = "1" ]; then warn "--skip-restart 지정 — 구 코드가 계속 돕니다"; return 0; fi
 
-  UNIT=""; CID=""
-  if [ -n "${BPID:-}" ] && [ -r "/proc/$BPID/cgroup" ]; then
-    CG="$(cat "/proc/$BPID/cgroup")"
-    # cgroup v1/v2, 시스템/사용자 유닛, docker/k8s 로 형태가 제각각이라
-    # 단일 정규식으로는 반드시 어딘가 틀린다 → 두 패턴을 각각 시도한다.
-    UNIT="$(printf '%s' "$CG" | sed -n 's#.*[:/]\([A-Za-z0-9@._-]\{1,\}\.service\).*#\1#p' | head -1)"
-    CID="$(printf '%s' "$CG" | sed -n 's#.*/docker[-/]\([0-9a-f]\{12,64\}\).*#\1#p' | head -1)"
-  fi
+  # 런타임 판별은 [2] 에서 이미 했지만, 호출 순서에 의존하지 않도록 여기서 다시 한다
+  # (읽기만 하므로 몇 번을 돌려도 안전하다).
+  detect_runtime
 
   if [ -n "$CID" ]; then
-    warn "백엔드가 도커 컨테이너에서 돕니다 (id=$CID)"
-    say "  restart 는 같은 이미지를 다시 돌릴 뿐입니다. 소스가 bind mount 가 아니면"
-    say "  코드 갱신이 반영되지 않으므로 자동 재시작을 하지 않습니다."
-    say "  확인:  docker inspect -f '{{json .Mounts}}' $CID"
-    say "  반영:  docker restart $CID   (bind mount 인 경우)"
+    say "백엔드가 도커 컨테이너에서 돕니다 (id=$CID)"
+    # ⚠ 이 함수는 errexit 이 꺼져 있다(위 주석) → docker_verdict 는 어떤 경우에도
+    #   0 을 반환하고 결과를 변수로만 말한다. 되돌릴 수 없는 행위(restart) 앞의
+    #   전제조건은 아래 case 에서 **손으로** 검사한다.
+    docker_verdict "$CID"
+    case "$DOCKER_VERDICT" in
+      bind)
+        ok "bind mount 증명됨: $DOCKER_BIND_EVID"
+        say "  → 호스트에서 교체한 코드가 컨테이너 안에서도 **같은 파일**입니다."
+        say "     그러므로 이 restart 는 systemctl restart 와 의미가 정확히 같습니다."
+        say "     (컨테이너 내부에서 그 경로를 실제로 임포트하는지는 호스트에서 증명할 수 없습니다"
+        say "      — 그래서 [8] 의 openapi 지문 검증이 최종 판정입니다)"
+        RC=0; docker restart "$CID" >/dev/null 2>&1 || RC=$?
+        if [ "$RC" != "0" ]; then
+          warn "docker restart 실패(exit $RC)"; manual_restart_help; return 1
+        fi
+        if wait_health 60; then ok "재시작 완료 (docker $CID)"; return 0; fi
+        warn "재시작했으나 60초 내 health 응답 없음"
+        docker logs --tail 60 "$CID" 2>&1 | tail -60 || true
+        return 1 ;;
+      image)
+        # 이것이 '확정 실패' 다. 이번 갱신은 백엔드에 **무효**이며, restart 는
+        # 같은 구 이미지를 다시 띄워 '완료' 라는 거짓 성공만 만든다.
+        warn "이 컨테이너에는 백엔드 코드를 덮는 bind mount 가 **없습니다**"
+        say  "  근거: $DOCKER_NOTE"
+        warn "코드가 이미지 안에 있으므로 **이번 호스트 파일 교체는 백엔드에 무효**입니다"
+        say  "     restart 해도 같은 구 이미지가 다시 뜰 뿐이라 재시작하지 않습니다."
+        say  "     필요한 조치: 이미지 재빌드 후 재배포(이 저장소에는 백엔드 Dockerfile 이 없습니다 —"
+        say  "     운영자가 만든 이미지이므로 그 빌드 절차를 따르세요)."
+        say  "     지금은 '프론트·호스트 트리만 신버전' 인 혼합 상태입니다. 되돌리려면:"
+        say  "       sudo sh $(basename "$0") --rollback $TS"
+        return 1 ;;
+      *)
+        warn "도커 컨테이너로 보이지만 bind mount 를 증명하지 못했습니다"
+        say  "  사유: ${DOCKER_NOTE:-불명}"
+        say  "  근거 없이 restart 하지 않습니다 — 코드가 이미지 안이면 '재시작 완료' 가 거짓이 됩니다."
+        say  "  확인:  docker inspect -f '{{json .Mounts}}' $CID"
+        say  "  반영:  docker restart $CID   (설치 경로가 bind mount 임을 눈으로 확인한 경우에만)"
+        manual_restart_help
+        return 1 ;;
+    esac
+  fi
+
+  # ⚠ cgroup 에 컨테이너 흔적은 있는데 docker CID 로 특정하지 못한 경우
+  #   (podman / containerd / k8s / lxc). 이 검사는 반드시 **UNIT 분기보다 위**에 있어야
+  #   한다: 컨테이너의 cgroup 경로에는 그 컨테이너를 담는 상위 유닛(containerd.service,
+  #   user@1000.service …)이 함께 박혀 있어 UNIT 이 비어 있지 않기 때문이다. 아래에
+  #   두면 이 가드가 한 번도 실행되지 못한 채 **호스트의 런타임 데몬을 재시작**하고
+  #   '✅ 재시작 완료' 라는 거짓 성공이 나간다(detect_runtime 에서 UNIT 을 비우는 것과
+  #   합쳐 두 겹으로 막는다 — 어느 한쪽이 무너져도 안전측으로 떨어진다).
+  #   또 '맨 프로세스' 분기로 흘려보내도 안 된다: 컨테이너 안 프로세스에 kill -TERM 을
+  #   보내는 셈이라 컨테이너가 통째로 죽고 재기동 정책에 따라 **구 이미지로 다시 뜬다**.
+  if [ "$RUNTIME_UNCERTAIN" = "1" ]; then
+    warn "컨테이너 안에서 도는 것으로 보이지만 런타임을 특정하지 못했습니다(docker 아님)"
+    say  "  cgroup: $(printf '%s' "$RUNTIME_CG" | head -1)"
+    if [ -n "$RUNTIME_CG_UNIT" ]; then
+      say  "  ※ cgroup 에서 '$RUNTIME_CG_UNIT' 이 보이지만 이것은 컨테이너를 **담고 있는**"
+      say  "     상위 유닛이지 백엔드의 유닛이 아닙니다 — 재시작 대상으로 쓰지 않습니다."
+    fi
+    say  "  → 컨테이너 안 프로세스를 죽이면 컨테이너가 통째로 내려가고, 재기동 정책에 따라"
+    say  "     구 이미지로 다시 뜰 수 있습니다. 근거 없이 종료 신호를 보내지 않습니다."
+    say  "  코드가 이미지 안이라면 이번 갱신은 백엔드에 반영되지 않습니다(이미지 재빌드 필요)."
+    manual_restart_help
     return 1
   fi
 
@@ -1197,6 +1827,37 @@ do_restart() {
       say  "  지금 종료 신호를 보내면 다시 띄울 근거가 사라집니다 — 죽이지 않고 멈춥니다."
       manual_restart_help; return 1
     fi
+    # ── 단일 워커 배포 계약 점검 ────────────────────────────────────────────
+    # 이 스크립트는 스스로 --workers 를 붙이지 않는다(원래 cmdline 을 그대로 재사용한다).
+    # 그러나 **지금 돌고 있는 프로세스**가 다중 워커로 떠 있으면 그대로 다시 뜨고,
+    # SAINTVIEW_ENV=prod 면 app/config.py 의 게이트에 걸려 서비스가 뜨지 못한다
+    # (게이트 예외는 워커 자식에서 나므로, 마스터를 못 내리면 무한 재기동 루프가 된다).
+    # → 죽이기 전에 미리 알린다(원격에서 이유를 모른 채 백엔드를 잃는 일을 막는다).
+    # 판정은 확실할 때만: --workers/-w 의 값이 2 이상인 경우로 좁힌다(오탐 금지).
+    CMD_TXT="$(tr '\0' ' ' < "$CMDF" 2>/dev/null || true)"
+    WK="$(printf '%s' "$CMD_TXT" \
+          | sed -n 's/.*[[:space:]]--workers[= ]\{1,\}\([0-9]\{1,\}\).*/\1/p' | tail -1)"
+    if [ -z "$WK" ]; then
+      WK="$(printf '%s' "$CMD_TXT" | sed -n 's/.*[[:space:]]-w[= ]\{0,\}\([0-9]\{1,\}\).*/\1/p' | tail -1)"
+    fi
+    case "$WK" in
+      ''|*[!0-9]*) ;;
+      *) if [ "$WK" -ge 2 ]; then
+           warn "현재 기동 명령에 워커 $WK 개가 지정돼 있습니다: $CMD_TXT"
+           say  "  이 백엔드는 **단일 워커가 배포 계약**입니다 — 캐시·락·A세션이 프로세스"
+           say  "  인메모리라 워커마다 따로 돌아 조용히 깨집니다(A 로그인 랜덤 만료·로그인"
+           say  "  잠금 임계값 N배·같은 SOP 중복 다운로드·디코드 캐시 N배로 OOM)."
+           say  "  이대로 재기동하면 SAINTVIEW_ENV=prod 에서 게이트에 걸려 **서비스가 뜨지 못합니다**."
+           say  "  ⚠ 게이트 예외는 워커 자식에서 나므로, 마스터를 함께 내리지 못하면 '거부'가"
+           say  "     아니라 **무한 재기동 루프**가 됩니다(실측 uvicorn 0.34.0: 30초에 8회 재기동,"
+           say  "     매 회 앱 전체 재import → CPU 소모·로그 폭주). 포트는 netstat 에 LISTEN 으로"
+           say  "     안 보이지만 마스터가 점유해 다른 프로세스는 bind 에 실패합니다."
+           say  "     (게이트는 조건이 맞으면 마스터에 SIGTERM 을 보내 루프를 끊습니다 —"
+           say  "      그래도 루프가 보이면 pkill -f 'uvicorn.*--workers' 로 마스터를 직접 종료)"
+           say  "  조치: --workers 1 로 띄우세요(워커를 늘리려면 캐시·세션을 공유 저장소로"
+           say  "        먼저 빼야 합니다 — docs/DEPLOYMENT.md §3-1)."
+         fi ;;
+    esac
     LOG="${SV_BACKEND_LOG:-/var/log/saintview-backend.log}"
     kill -TERM "$BPID" 2>/dev/null || true
 
@@ -1275,11 +1936,49 @@ do_restart() {
 # ═══════════════════════════════════════════════════════════════════════════
 # [8] 검증
 # ═══════════════════════════════════════════════════════════════════════════
+# '백엔드가 구버전' 을 **검출**하는 장치는 원래부터 있었다(아래 openapi 지문).
+# 빠져 있던 것은 검출이 아니라 **귀속**이다 — 왜 구버전인지. 그동안 '재시작 누락 의심'
+# 이라고만 찍어 운영자를 엉뚱한 곳으로 보냈다. [7] 의 판정 결과를 여기까지 끌고 와
+# 원인을 그대로 말한다.
+ATTRIB_DONE=0
+attribute_stale() {
+  [ "$ATTRIB_DONE" = "0" ] || return 0
+  ATTRIB_DONE=1
+  case "${DOCKER_VERDICT:-}" in
+    image)
+      vng "원인 확정: 백엔드 코드가 **도커 이미지 안**에 있습니다 — 호스트 파일 교체는 백엔드에 반영되지 않습니다"
+      say "  근거: ${DOCKER_NOTE:-}"
+      say "  조치: 이미지 재빌드 후 재배포(또는 설치 경로를 bind mount 로 바꾸기)"
+      say "  지금은 '프론트·호스트 트리만 신버전' 인 혼합 상태입니다 — 되돌리기: sudo sh $(basename "$0") --rollback $TS" ;;
+    unknown)
+      warn "원인 후보: 도커 컨테이너인데 bind mount 를 증명하지 못했습니다(${DOCKER_NOTE:-사유 불명})"
+      say  "  코드가 이미지 안이라면 이번 갱신은 백엔드에 무효입니다."
+      say  "  확인:  docker inspect -f '{{json .Mounts}}' ${CID:-<컨테이너>}" ;;
+    *)
+      if [ "$RUNTIME_UNCERTAIN" = "1" ]; then
+        warn "원인 후보: 컨테이너로 보이지만 런타임을 특정하지 못해 재시작하지 않았습니다"
+      elif [ "$SKIP_RESTART" = "1" ]; then
+        say "  원인: --skip-restart 로 재시작을 건너뛰었습니다(구 프로세스가 구 코드를 들고 있습니다)"
+      else
+        say "  확인 순서: [7] 출력의 재시작 결과 → 포트를 잡고 있는 PID → 그 PID 의 cwd"
+      fi ;;
+  esac
+  return 0
+}
+
 verify_backend_local() {
   # 백엔드를 nginx 를 거치지 않고 직접 찌른다 → 프록시 문제와 코드 문제가 섞이지 않는다.
   B="http://127.0.0.1:$PORT"
   code="$(hcode --max-time 10 "$B/api/health")"
   [ "$code" = "200" ] && vok "백엔드 /api/health 200" || vng "백엔드 /api/health = $code"
+  # health 가 5xx 인데 미적용 마이그레이션이 있으면 두 사실을 **나란히** 제시한다.
+  # (둘을 인과로 단정하지 않는다 — 그 판단은 로그를 본 사람이 한다)
+  case "$code" in
+    5*) if [ "$DB_VERDICT" = "behind" ]; then
+          say "  참고: [2] 진단에서 미적용 마이그레이션 ${DB_PENDING_N}건이 관측됐습니다(DB=$DB_CURRENT → head=$DB_HEAD)"
+          say "        기동 실패 로그에 스키마 관련 오류가 있는지 함께 확인하세요."
+        fi ;;
+  esac
 
   # 가장 강한 증거: openapi 의 라우트 표 자체. (무인증 공개)
   TMPO="$(mktemp)"
@@ -1288,6 +1987,7 @@ verify_backend_local() {
     vok "openapi 에 /api/export/manifest 존재 → 신규 코드 반영됨"
   elif [ "$ocode" = "200" ]; then
     vng "openapi 200 이지만 /api/export/manifest 없음 → 백엔드가 여전히 구버전"
+    attribute_stale
   else
     warn "openapi.json = $ocode — 상태코드 지문으로만 판정합니다"
   fi
@@ -1300,7 +2000,8 @@ verify_backend_local() {
   mcode="$(hcode --max-time 10 "$B/api/export/manifest")"
   case "$mcode" in
     401) vok "GET /api/export/manifest = 401 (라우트 존재)" ;;
-    404) vng "GET /api/export/manifest = 404 → 백엔드 구버전(재시작 누락 의심)" ;;
+    404) vng "GET /api/export/manifest = 404 → 백엔드가 구버전 코드로 돌고 있습니다"
+         attribute_stale ;;
     200) vng "GET /api/export/manifest = 200 → /api 프록시 붕괴(SPA 폴백) 또는 인증 우회" ;;
     *)   vng "GET /api/export/manifest = $mcode (401 기대)" ;;
   esac
@@ -1466,6 +2167,38 @@ VERIFY_SKIPPED=0
 do_verify() {
   step "검증"
   verify_pydeps
+  # ── DB 상태는 **보고하되 판정하지 않는다** ────────────────────────────────
+  # '미적용 마이그레이션 존재' 만으로 exit 1 을 주면 안 된다: 이번 갱신이 migrations/ 를
+  # 바꾸지 않는 경우 그 미적용분은 배포와 무관한 사실이고, 실패로 찍으면 순수한 오탐이다.
+  # 경고와 안내로 남긴다(진단은 무료여야 하고, 무료라는 말은 배포를 막지 않는다는 뜻이다).
+  case "$DB_VERDICT" in
+    latest)
+      # 침묵하지 않는다. 예전에는 이 갈래가 아예 없어서, [2] 가 구 트리 head 로 오판한
+      # 'latest' 가 [8] 에서 한 줄도 언급되지 않은 채 '✅ 갱신 완료' 로 덮였다.
+      # 무엇과 비교해 '최신' 이라고 말하는지를 항상 근거와 함께 남긴다.
+      say "DB: 미적용 마이그레이션 없음 (DB=$DB_CURRENT = $DB_HEAD_SRC head $DB_HEAD)"
+      if [ "$MIGRATE_DONE" = "1" ]; then say "  → 이번 실행에서 --migrate 로 적용한 결과입니다."; fi ;;
+    behind)
+      warn "DB: 미적용 마이그레이션 ${DB_PENDING_N}건 (DB=$DB_CURRENT → $DB_HEAD_SRC head=$DB_HEAD)"
+      if [ "$MIGRATE_DONE" = "1" ]; then
+        say "  → 이번 실행에서 --migrate 로 적용했습니다(위 블록 참조)."
+      else
+        say "  → 이번 갱신은 이것을 자동으로 적용하지 않았습니다(기본 동작). 배포 실패가 아닙니다."
+        if [ "$MIG_VERDICT" = "same" ]; then
+          say "     이번 패키지는 migrations/ 를 바꾸지 않으므로 이 미적용분은 이번 갱신 때문이 아닙니다."
+        fi
+        say "     적용하려면(위험을 읽은 뒤):  --migrate  (SV_DB_BACKUP_DONE=1 필요)"
+      fi ;;
+    unstamped)
+      warn "DB: alembic_version 이 없는 미스탬프 스키마입니다(init_db() 가 만든 DB)"
+      say  "  → 정상 동작입니다. 다만 alembic 으로 스키마를 관리하려면 사람이 stamp 를 찍어야 합니다." ;;
+    unknown-rev)
+      warn "DB: 리비전 $DB_CURRENT 이 패키지 migrations/ 에 없습니다(롤백 잔재 또는 다른 계보)" ;;
+    multihead)
+      warn "DB: 패키지의 마이그레이션 head 가 여러 개입니다 — 사람이 머지해야 합니다" ;;
+    undetermined)
+      warn "DB: 상태를 판정하지 못했습니다(${DB_NOTE:-사유 불명}) — '이상 없음' 이 아니라 '모름' 입니다" ;;
+  esac
   # ⚠ 디스크 검증은 curl 이 전혀 필요 없다(grep · [ -f ] 뿐). 그러므로 curl 게이트
   #   **앞**에 둔다. 예전에는 curl 게이트 하나가 이것까지 함께 건너뛰어,
   #   '배포된 index.html 이 패키지와 다름' · '참조 자산 없음' · '.gz/.br 누락' 이라는
@@ -1870,6 +2603,11 @@ do_rollback() {
   fi
   outln "     (확인이 끝나면 지우세요:  rm -rf ${PREV_APP:-<경로>}$MOVED)"
   outln "  · 의존성까지 되돌리려면:  $BDIR/pip-freeze.txt 참고 (보통은 pip uninstall pycdlib 한 줄)"
+  # 불변식의 유일한 예외를 여기서도 못 박는다. '롤백하면 다 돌아간다' 는 오해가
+  # 가장 비싸게 끝나는 곳이 DB 다.
+  outln "  · ⚠ **DB 는 되돌리지 않습니다**(이 스크립트는 DB 를 백업하지도 복구하지도 않습니다)."
+  outln "       --migrate 로 적용한 마이그레이션이 있었다면 그 스키마는 그대로 남아 있습니다."
+  outln "       되돌리려면 적용 전 DB 백업에서 사람이 직접 복원해야 합니다."
   return "$RB_RC"
 }
 
@@ -1887,10 +2625,71 @@ do_dryrun() {
   outln "  파이썬     : ${PYBIN:-미발견}  (근거: ${PYBIN_SRC:-없음} / 미설치 항목만 설치, -U 사용 안 함)"
   outln "  소유권     : 프론트=${FOWN:-?}  백엔드app=${BOWN:-?}  (복사 후 이 값으로 원복)"
   outln "  nginx      : ${NGINX:-미발견}  (patch_nginx.sh 위임 + brotli 모듈 자동 설치)"
-  outln "  재시작     : PID=${BPID:-미발견}"
+
+  # ── 현장의 '체제' 를 아무 위험 없이 학습하는 자리가 바로 dry-run 이다 ──────
+  # 재시작 방식(특히 도커 bind mount 여부)과 DB 체제는 apply 에서 처음 알면 늦다.
+  # ⚠ 기본값을 '맨 프로세스' 로 두면 안 된다. detect_runtime 은 BPID 가 없으면 즉시
+  #   return 하므로 CID·UNIT·RUNTIME_UNCERTAIN 이 모두 비는 **가장 흔한 경우가 바로
+  #   PID 미발견**이다(도구 부재·비root·컨테이너 NAT — 위 [2] 가 경고하는 상황).
+  #   그때 '맨 프로세스' 라고 쓰면 apply 가 실제로는 재시작을 시도조차 못 하고 수동
+  #   안내로 빠지는데도 dry-run 이 '재기동된다' 고 예고하게 된다. apply 가 하지 않을
+  #   일을 예고하지 않는다.
+  if [ -n "${BPID:-}" ] && [ -r "/proc/$BPID/cmdline" ]; then
+    RTDESC="맨 프로세스 → apply 시 TERM 후 원래 인자·cwd 로 재기동"
+  elif [ -n "${BPID:-}" ]; then
+    RTDESC="판정 불가(cmdline 을 읽지 못함 — root 필요) → apply 시 재시작하지 않고 수동 안내"
+  else
+    RTDESC="판정 불가(포트 점유 프로세스 미발견) → apply 시 재시작하지 않고 수동 안내"
+  fi
+  if [ -n "$CID" ]; then
+    docker_verdict "$CID"
+    case "$DOCKER_VERDICT" in
+      bind)  RTDESC="docker $CID — bind mount 증명됨($DOCKER_BIND_EVID) → apply 시 docker restart" ;;
+      image) RTDESC="docker $CID — bind mount 없음(${DOCKER_NOTE:-}) → **이번 갱신은 백엔드에 무효**(이미지 재빌드 필요)" ;;
+      *)     RTDESC="docker $CID — 판정 불가(${DOCKER_NOTE:-사유 불명}) → apply 시 재시작하지 않고 수동 안내" ;;
+    esac
+  elif [ "$RUNTIME_UNCERTAIN" = "1" ]; then
+    RTDESC="컨테이너로 보이나 docker 로 특정 불가${RUNTIME_CG_UNIT:+ (cgroup 의 '$RUNTIME_CG_UNIT' 는 상위 유닛이라 대상 아님)} → apply 시 죽이지 않고 수동 안내"
+  elif [ -n "$UNIT" ]; then
+    RTDESC="systemd 유닛 $UNIT → apply 시 systemctl restart"
+  fi
+  outln "  재시작     : PID=${BPID:-미발견}  /  $RTDESC"
+
+  DBDESC="$DB_VERDICT"
+  case "$DB_VERDICT" in
+    latest)       DBDESC="최신($DB_CURRENT = $DB_HEAD_SRC head $DB_HEAD) — 할 일 없음" ;;
+    behind)       DBDESC="미적용 ${DB_PENDING_N}건 ($DB_CURRENT → $DB_HEAD_SRC head $DB_HEAD)" ;;
+    unstamped)    DBDESC="미스탬프(alembic_version 없음 — init_db() 가 만든 DB)" ;;
+    unknown-rev)  DBDESC="DB 리비전 $DB_CURRENT 이 $DB_HEAD_SRC 트리의 migrations/ 에 없음(롤백 잔재/다른 계보)" ;;
+    multihead)    DBDESC="$DB_HEAD_SRC 트리의 head 가 여러 개(머지 필요)" ;;
+    undetermined) DBDESC="판정 불가 — ${DB_NOTE:-사유 불명}" ;;
+    *)            DBDESC="진단하지 않음" ;;
+  esac
+  outln "  DB         : ${DB_KIND:-?}  ${DB_URL_SHOWN:-?}   (비밀번호 마스킹)"
+  outln "  DB 스탬프  : $DBDESC   ※ 재시작 전 시점 — 기동 시 init_db() 가 스키마를 또 보정합니다"
+  case "$MIG_VERDICT" in
+    same)    outln "  migrations : 이 패키지는 migrations/ 를 바꾸지 않습니다(지문 동일) → 스키마 작업 없음" ;;
+    changed) outln "  migrations : 이 패키지는 migrations/ 를 바꿉니다(지문 불일치) → 스키마 작업 검토 필요" ;;
+    *)       outln "  migrations : 판정 불가(해시 도구 없음)" ;;
+  esac
+  if [ "$MIGRATE" = "1" ]; then
+    case "$DB_VERDICT" in
+      behind)
+        if [ "${SV_DB_BACKUP_DONE:-0}" = "1" ]; then
+          outln "  --migrate  : 실행합니다 — 위 ${DB_PENDING_N}건을 [5] 뒤에 적용"
+        else
+          outln "  --migrate  : **거부**합니다 — SV_DB_BACKUP_DONE=1 이 없습니다(DB 백업 확인 필요)"
+        fi ;;
+      latest) outln "  --migrate  : no-op (미적용 없음 — 근거: DB $DB_CURRENT = $DB_HEAD_SRC head $DB_HEAD)" ;;
+      *)      outln "  --migrate  : **거부**합니다 — DB 상태가 '$DB_VERDICT' 입니다(자세한 사유는 위 [2] 출력)" ;;
+    esac
+  else
+    outln "  --migrate  : 주지 않았습니다 → DB 는 **아무것도 바꾸지 않습니다**(기본 동작)"
+  fi
   echo
   outln "  건드리지 않는 것: backend/.env, dev.db, certs/, deploy/generated/**,"
   outln "                    orthanc-generated.json, scp-policy.env, worklists/*.wl, 도커 볼륨"
+  outln "                    **DB 스키마·데이터**(--migrate 를 명시하지 않는 한 읽기만 합니다)"
   outln "  삭제하지 않는 것: 기존 frontend/dist 자산(열려 있는 탭이 구 청크를 요청한다)"
 }
 
@@ -1921,6 +2720,9 @@ case "$MODE" in
     do_backup           # [3]
     do_copy             # [4]
     do_pydeps           # [5]
+    # --migrate 를 준 경우에만 도는 번호 없는 블록. 순서는 교체·의존성 뒤, 재시작 앞이다.
+    # (플래그가 없으면 DB 는 **한 바이트도** 건드리지 않는다 — 진단만 이미 끝나 있다)
+    if [ "$MIGRATE" = "1" ]; then do_migrate; fi
     do_nginx            # [6]
     # ※ set -eu 아래에서 `f; RC=$?` 는 함수가 0 이 아닌 값을 반환하는 순간 셸이 즉사한다
     #   (dash 에서 확인). 반드시 `RC=0; f || RC=$?` 형태로 써야 뒤 분기가 살아 있다.
@@ -1930,21 +2732,40 @@ case "$MODE" in
     echo
     # PYDEPS_FAIL 을 판정에 포함한다. 과거에는 pip 이 통째로 실패해도 '✅ 갱신 완료
     # / exit 0' 가 나와, ISO 반출이 501 인 서버를 정상이라고 보고했다.
-    if [ "$V_FAIL" -eq 0 ] && [ "$RRC" = "0" ] && [ "$PYDEPS_FAIL" = "0" ]; then
+    # 마이그레이션을 실제로 적용했다면, 롤백의 한계를 **여기서** 못 박는다.
+    # (이 스크립트의 불변식 '백업 집합 = 복구 집합' 이 DB 에 대해서만 깨진 유일한 경우)
+    if [ "$MIGRATE_DONE" = "1" ]; then
+      outln "⚠  이 실행은 DB 마이그레이션을 적용했습니다 — **--rollback 은 DB 를 되돌리지 못합니다**"
+      outln "   (파일만 되돌아갑니다. DB 를 되돌리려면 적용 전 백업에서 복원해야 합니다)"
+    fi
+    if [ "$V_FAIL" -eq 0 ] && [ "$RRC" = "0" ] && [ "$PYDEPS_FAIL" = "0" ] && [ "$MIGRATE_FAIL" = "0" ]; then
       # 검증을 실제로 다 돌린 경우에만 '완료' 라고 말한다. curl 이 없어 HTTP 검증을
       # 건너뛴 실행에 exit 0 을 주면 '미검증' 이 '정상' 으로 둔갑한다(--skip-restart 와
       # 겹치면 실제로 아무 HTTP 검증도 하지 않은 채 ✅ 가 나갔다).
-      if [ "$VERIFY_SKIPPED" = "0" ]; then
+      # 같은 이유로, --migrate 를 줬는데 거부한 실행도 0 이 아니다: 파일 갱신은 끝났지만
+      # **사람이 요청한 작업 하나를 하지 않았다**. 0 을 주면 '했다' 로 읽힌다.
+      if [ "$VERIFY_SKIPPED" = "0" ] && [ "$MIGRATE_INCOMPLETE" = "0" ] && [ "$MIGRATE_UNVERIFIED" = "0" ]; then
         outln "✅ 갱신 완료 ($TS)"
         outln "   백업: $BACKUP_ROOT/$TS   (되돌리기: sudo sh $(basename "$0") --rollback $TS)"
         exit 0
       fi
-      outln "⚠  갱신은 끝났으나 **검증을 완료하지 못했습니다**(curl 없음) — 정상 여부는 확인되지 않았습니다"
-      outln "   확인: 브라우저 접속 / wget -qO- http://127.0.0.1:$PORT/api/health"
+      if [ "$MIGRATE_INCOMPLETE" = "1" ]; then
+        outln "⚠  파일 갱신은 끝났으나 **--migrate 로 요청한 마이그레이션을 실행하지 않았습니다**"
+        outln "   사유는 위 'DB 마이그레이션' 블록에 있습니다(거부는 이 스크립트의 정상 동작입니다)."
+      fi
+      if [ "$MIGRATE_UNVERIFIED" = "1" ]; then
+        outln "⚠  마이그레이션은 exit 0 이었으나 **적용 후 리비전을 확인하지 못했습니다**"
+        outln "   'exit 0' 과 '스탬프가 올라갔다' 는 다른 명제입니다 — 직접 확인하세요:"
+        outln "     cd $BACKEND_DIR && ${PYBIN:-<백엔드 파이썬>} -m alembic current"
+      fi
+      if [ "$VERIFY_SKIPPED" = "1" ]; then
+        outln "⚠  갱신은 끝났으나 **검증을 완료하지 못했습니다**(curl 없음) — 정상 여부는 확인되지 않았습니다"
+        outln "   확인: 브라우저 접속 / wget -qO- http://127.0.0.1:$PORT/api/health"
+      fi
       outln "   백업: $BACKUP_ROOT/$TS   (되돌리기: sudo sh $(basename "$0") --rollback $TS)"
       exit 2
     fi
-    outln "❌ 갱신이 완전하지 않습니다 (검증 실패 $V_FAIL 건, 재시작 exit $RRC, 의존성 실패 $PYDEPS_FAIL)"
+    outln "❌ 갱신이 완전하지 않습니다 (검증 실패 $V_FAIL 건, 재시작 exit $RRC, 의존성 실패 $PYDEPS_FAIL, 마이그레이션 실패 $MIGRATE_FAIL)"
     echo
     outln "   되돌리려면:"
     outln "     sudo sh $(basename "$0") --rollback $TS"
