@@ -46,6 +46,7 @@ def write_config(body: ConfigBody, db: Session = Depends(get_db),
                  user: dict = Depends(admin_user)):
     from app.services.settings_service import get_setting, set_setting
 
+    before = get_bridge_config(db)
     stored = dict(get_setting(db, SETTING_KEY, default={}) or {})
     for k in CONFIG_KEYS:
         if k in body.value:
@@ -55,7 +56,18 @@ def write_config(body: ConfigBody, db: Session = Depends(get_db),
                 continue
             stored[k] = v
     set_setting(db, SETTING_KEY, stored)
-    return {"ok": True, "value": _masked(get_bridge_config(db))}
+    after = get_bridge_config(db)
+    # ⚠ A 서버(주소/계정)가 바뀌면 **캐시를 반드시 비운다**. service_client 는 키가 바뀌면
+    #   재생성되지만 캐시는 그대로 남는다. 캐시에 들어 있는 것은 이전 서버의
+    #   study/series/sop UID·디코드 픽셀이라, 그대로 내주면 새 서버의 검사 화면에
+    #   **이전 환자의 영상**이 뜬다(PACS 에서는 오독 위험).
+    if (before.get("base_url"), before.get("user_id")) != (after.get("base_url"), after.get("user_id")):
+        from app.services import webpacs_live as live
+
+        live.invalidate_tree()
+        live.invalidate_related()
+        live.invalidate_pixel_caches()
+    return {"ok": True, "value": _masked(after)}
 
 
 @router.post("/test")

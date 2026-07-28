@@ -235,3 +235,62 @@ def test_zip_stays_readable_past_the_4mb_flush():
     assert zf.namelist() == [f"f{i}.bin" for i in range(6)]
     for n in zf.namelist():
         assert len(zf.read(n)) == 1024 * 1024, n
+
+
+# ── 실사용 크기 회귀 (엔드포인트 경유) ────────────────────────────────────
+# 왜 필요한가: 위 테스트는 _ZipDrain 만 직접 다루고, 나머지 반출 테스트는 _read 가
+# 12바이트 안팎을 돌려주도록 대체한다. 그래서 `if sink.pending() > 4MB` 분기가 **한 번도**
+# 안 돌았고, 382 passed 가 초록인 채로 실사용 산출물은 전건 손상이었다.
+# 반출은 조용히 틀리면 받는 쪽(환자·타 병원)이 알아챌 방법이 없으므로, 실제 라우터를
+# 실제 DICOM 크기로 통과시키는 관문을 둔다.
+_BIG = 3 * 1024 * 1024
+
+
+@pytest.fixture()
+def big_read(monkeypatch, fake_tree):
+    """_read 가 3MB 를 돌려준다 — 3장이면 flush 분기가 확실히 여러 번 돈다."""
+    def read(_db, f):
+        # SOP 마다 내용이 달라야 '어느 장이 어디에 들어갔는가' 까지 검증된다
+        return (f["sop_uid"].encode() + b"|").ljust(_BIG, b"\xa5")
+
+    monkeypatch.setattr(ex, "_read", read)
+    return read
+
+
+def test_zip_endpoint_survives_real_dicom_sizes(client, auth_headers, study, big_read):
+    """4MB 를 넘는 실사용 반출이 온전한 ZIP 이어야 한다(라우터 경유).
+
+    되감기 구현일 때 실측: 페이로드 15.7MB → 산출 59.7MB(0x00 이 78.9%),
+    testzip() 이 첫 항목 INDEX.txt 에서 실패하고 모든 항목이
+    BadZipFile('Bad magic number for file header') 로 못 읽혔다.
+    """
+    r = client.get(f"/api/export/package?study_ids={study.id}&format=zip",
+                   headers=auth_headers)
+    assert r.status_code == 200, r.text
+    payload = _BIG * 3                        # fake_tree 는 3장
+    assert len(r.content) > 4 * 1024 * 1024, "flush 분기를 안 넘겼다 — 회귀 감지 불가"
+    # 0 채움 회귀 감지: 무압축(ZIP_STORED)이라 산출은 원본 합계 + 헤더 수 KB 여야 한다
+    assert len(r.content) < payload + 64 * 1024, f"스트림이 부풀었다: {len(r.content)}"
+
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert zf.testzip() is None, "ZIP 이 손상됐다(중앙디렉터리 오프셋 어긋남)"
+    for sop, path in (("s1", "/S001/000001.dcm"), ("s2", "/S001/000002.dcm"),
+                      ("s3", "/S002/000001.dcm")):
+        got = zf.read(EXP_DIR + path)
+        assert got == (sop.encode() + b"|").ljust(_BIG, b"\xa5"), path
+
+
+def test_iso_endpoint_survives_real_dicom_sizes(client, auth_headers, study, big_read):
+    """ISO 도 같은 크기에서 지켜진다 — 두 반출 경로를 나란히 붙잡아 둔다."""
+    pycdlib = pytest.importorskip("pycdlib")
+    r = client.get(f"/api/export/package?study_ids={study.id}&format=iso",
+                   headers=auth_headers)
+    assert r.status_code == 200, r.text
+    iso = pycdlib.PyCdlib()
+    iso.open_fp(io.BytesIO(r.content))
+    try:
+        buf = io.BytesIO()
+        iso.get_file_from_iso_fp(buf, joliet_path="/" + EXP_DIR + "/S001/000001.dcm")
+        assert buf.getvalue() == (b"s1|").ljust(_BIG, b"\xa5")
+    finally:
+        iso.close()

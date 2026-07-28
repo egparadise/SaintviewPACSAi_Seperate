@@ -11,6 +11,7 @@ import io
 import logging
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -26,6 +27,45 @@ router = APIRouter(prefix="/api/htj2k", tags=["htj2k-stream"])
 HTJ2K_LOSSLESS = "1.2.840.10008.1.2.4.201"
 CACHE = Path(__file__).resolve().parents[2] / "cache" / "htj2k"
 _inflight_series: set[str] = set()
+# 검사-후-추가를 원자화한다. get_frame 은 sync def 라 FastAPI 가 스레드풀에서 병렬 실행하고,
+# 뷰어는 시리즈를 열 때 같은 시리즈의 여러 프레임을 동시에 요청한다.
+# (현재 CPython 에서는 `not in` + `add` 사이에 GIL 을 놓는 바이트코드가 없어 사실상 원자적이지만,
+#  그건 구현 세부에 기댄 것이다 — free-threading 빌드에서는 성립하지 않는다.
+#  webpacs_live 의 _prefetch_lock/_prefetching 이 이미 이 형태다. 같은 규칙을 지킨다.)
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _atomic_write(dest: Path, data: bytes) -> None:
+    """캐시 파일 원자 기록 — 같은 이름으로 직접 쓰면 **읽는 쪽이 빈 파일을 본다**.
+
+    write_bytes() 는 'wb' 로 열어 먼저 0바이트로 자른 뒤 채운다. 그 사이 다른 스레드가
+    get_frame 의 `cached.exists()` 에서 True 를 보고 read_bytes() 하면 b"" 를 받아
+    Content-Length: 0 인 **정상 200 멀티파트**(178바이트)를 내보낸다 — 전송 오류가 아니라
+    성공 응답이라 재시도도 안 걸리고, 클라이언트 WASM 코덱이 빈 j2c 로 디코딩에 실패해
+    뷰어에 검은 타일이 남는다(사용자가 다시 스크롤할 때까지 복구 안 됨).
+    실측: 찢긴 읽기는 **전부 정확히 0바이트** — j2c 크기와 무관한 O_TRUNC 구간이다.
+    webpacs_live.get_instance_bytes 가 같은 이유로 이미 tmp+os.replace 를 쓴다.
+    tmp 이름에 스레드 id 를 넣는 것도 그쪽과 같은 이유다(같은 .part 에 동시 기록 방지).
+    """
+    if dest.exists():
+        # 이 캐시는 내용 주소지정이다 — (sop, frame) 이 같으면 j2c 바이트도 같다.
+        # 이미 있으면 덮어쓸 이유가 없고, 덮어쓰지 않는 것이 곧 찢긴 읽기를 없애는 길이다.
+        # (온디맨드 경로가 만든 파일을 시리즈 배치가 나중에 되덮던 경로도 여기서 끊긴다.)
+        return
+    tmp = dest.with_suffix(f".{threading.get_ident():x}.part")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, dest)     # 원자 교체 — 읽는 쪽은 옛 파일 아니면 새 파일만 본다
+    except OSError:
+        # Windows 는 대상 파일이 열려 있으면 교체를 거부한다(파이썬 open 이 FILE_SHARE_DELETE
+        # 를 안 걸어서다). 그 사이 다른 스레드가 같은 프레임을 이미 넣은 것이므로 내용은 동일 —
+        # tmp 만 버리고 성공으로 본다. 대상이 정말 없을 때만 실패를 올린다.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if not dest.exists():
+            raise
 
 # ── 캐시 상한 ──────────────────────────────────────────────────────────────
 # 이 캐시는 **본 프레임을 전부 영구 보관**했다. 판독을 계속하면 디스크가 찰 때까지
@@ -59,6 +99,15 @@ def _prune_cache(force: bool = False) -> None:
                 continue
             entries.append((st.st_mtime, st.st_size, f))
             total += st.st_size
+        # 원자 쓰기(_atomic_write)의 tmp 가 프로세스 중단으로 남을 수 있다 — glob("*.j2c") 이
+        # 못 잡아 무한정 쌓인다. 1시간 넘게 방치된 것만 회수(진행 중인 쓰기는 건드리지 않는다).
+        cutoff = time.time() - 3600
+        for f in CACHE.glob("*.part"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                continue
         if total <= limit:
             return
         entries.sort(key=lambda e: e[0])
@@ -128,7 +177,8 @@ def _pre_encode_series(series_uid: str) -> None:
         pass
     finally:
         client.close()
-        _inflight_series.discard(series_uid)
+        with _INFLIGHT_LOCK:
+            _inflight_series.discard(series_uid)
 
 
 @router.get("/studies/{stu}/series/{ser}/instances/{sop}/frames/{frame}")
@@ -159,12 +209,22 @@ def get_frame(stu: str, ser: str, sop: str, frame: int,
         if cs is None:
             raise HTTPException(status_code=500, detail="HTJ2K 인코딩 실패")
         CACHE.mkdir(parents=True, exist_ok=True)
-        cached.write_bytes(cs)
+        _atomic_write(cached, cs)
         _prune_cache()
         # 같은 시리즈 나머지 프레임 프리인코딩(백그라운드 1회)
-        if ser not in _inflight_series:
-            _inflight_series.add(ser)
-            threading.Thread(target=_pre_encode_series, args=(ser,), daemon=True).start()
+        with _INFLIGHT_LOCK:
+            start = ser not in _inflight_series
+            if start:
+                _inflight_series.add(ser)
+        if start:
+            try:
+                threading.Thread(target=_pre_encode_series, args=(ser,), daemon=True).start()
+            except RuntimeError:
+                # 스레드 생성 실패 — discard 는 _pre_encode_series 의 finally 에 있으므로
+                # 여기서 직접 풀지 않으면 그 시리즈는 프로세스가 죽을 때까지 영영
+                # 프리인코딩되지 않는다(온디맨드로만 한 장씩 → 스크롤이 계속 느려진다).
+                with _INFLIGHT_LOCK:
+                    _inflight_series.discard(ser)
         return _multipart(cs)
     finally:
         client.close()

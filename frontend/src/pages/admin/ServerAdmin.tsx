@@ -85,14 +85,14 @@ export function ServerPanel() {
                       ctl(`${sv.name} 중지`, () => api.infraContainerAction(sv.container!, "stop"),
                           sv.container === "saintview-db" ? "DB 를 중지하면 프로그램 전체가 동작하지 않습니다" : undefined))}
                   </>}
-                  {/* 백엔드 API 자체 — 재시작/중지(중지 후 재기동은 바탕화면 아이콘) */}
+                  {/* 백엔드 API 자체 — 재시작/중지(중지 후 재기동은 설치 루트의 start_viewer_suite.bat) */}
                   {sv.kind === "api" && <>
                     {ctlBtn("⟳ 재시작", "백엔드 서버 프로세스 재시작 (약 5초 순단)", () =>
                       ctl("백엔드 재시작", () => api.serverControl("restart"),
                           "재시작 동안 몇 초간 접속이 끊깁니다 (자동 재접속)"))}
                     {ctlBtn("■ 중지", "백엔드 서버 프로세스 강제 종료", () =>
                       ctl("백엔드 중지", () => api.serverControl("stop"),
-                          "웹 화면 전체가 내려갑니다! 재기동은 서버 PC 바탕화면 [Saintview PACS 시작] 아이콘으로만 가능합니다"))}
+                          "웹 화면 전체가 내려갑니다! 재기동은 서버 PC 설치 루트의 start_viewer_suite.bat 실행으로만 가능합니다"))}
                   </>}
                   {!sv.manage && !sv.container && sv.kind !== "api" && <span style={{ color: "var(--text-secondary)" }}>—</span>}
                 </td>

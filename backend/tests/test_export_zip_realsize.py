@@ -60,10 +60,16 @@ def test_real_size_zip_is_readable(client, auth_headers, big_study, big_tree):
     print(f"\n[산출] {len(blob):,}B  (실 payload {N*SLICE:,}B)")
     print(f"[0x00] {blob.count(bytes(1)):,}B")
 
+    # 0 채움 회귀 감지 — 되감기 버그일 때 산출이 페이로드의 3~7배로 부풀었다
+    # (BytesIO 가 EOF 너머 seek 의 간극을 0x00 으로 메운 결과).
+    assert len(blob) < N * SLICE + 64 * 1024, f"스트림이 부풀었다: {len(blob):,}B"
+
     zf = zipfile.ZipFile(io.BytesIO(blob))
     names = [n for n in zf.namelist() if n.endswith(".dcm")]
     print(f"[항목] {len(zf.namelist())}  dcm={len(names)}")
-    print(f"[testzip] {zf.testzip()!r}")
+    # 중앙디렉터리 오프셋이 실제 로컬 헤더와 맞는지 — 손상의 1차 관문
+    assert zf.testzip() is None, "ZIP 무결성 검사 실패(로컬 헤더 오프셋 어긋남)"
+    assert len(names) == N
 
     bad = []
     for n in names:
@@ -71,8 +77,7 @@ def test_real_size_zip_is_readable(client, auth_headers, big_study, big_tree):
             data = zf.read(n)
         except Exception as e:  # noqa: BLE001
             bad.append((n, f"{type(e).__name__}: {e}")); continue
-        exp = _payload(n.rsplit("/", 1)[-1])
-        if len(data) != SLICE:
+        if len(data) != SLICE or not data.startswith(b"DICM"):
             bad.append((n, f"길이 {len(data)}"))
     print(f"[깨진 항목] {len(bad)}/{len(names)}  첫: {bad[0] if bad else None}")
     assert not bad, f"{len(bad)}/{len(names)} 손상"

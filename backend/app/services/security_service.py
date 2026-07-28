@@ -354,7 +354,26 @@ def run_integrity_scan(db: Session, actor_id: int | None = None) -> dict:
 # ════════════════════════════ ③ 접근 보안 — 로그인 실패 잠금 ════════════════════════════
 _state_lock = threading.Lock()
 _fail_counts: dict[str, int] = {}       # "user:이름" / "ip:주소" → 연속 실패 횟수
+_fail_last: dict[str, float] = {}       # 키 → 마지막 실패 시각(epoch) — 자연 감쇠 판정용
 _locked_until: dict[str, float] = {}    # 키 → 잠금 해제 시각(epoch)
+
+
+def _decay_locked(key: str, now: float, window_sec: float) -> None:
+    """카운터 자연 감쇠 — '연속 실패' 가 실제로 연속일 때만 쌓이게 한다.
+
+    예전에는 _fail_counts 를 지우는 곳이 로그인 **성공**(reset_login_failures)과 관리자
+    clear_lockout 둘뿐이었다. 그래서 한 번 임계에 도달한 키는 잠금이 만료돼도 카운터가
+    threshold 이상에 영구히 머물렀고, record_login_failure 의
+    `if cnt >= threshold and key not in _locked_until` 이 **다음 단 한 번의 오타**에
+    바로 참이 되어 lock_min(기본 15분)이 통째로 다시 걸렸다.
+    ip: 키도 같이 오르므로 NAT 뒤 판독실 전체가 한 사람의 오타로 반복 차단됐다.
+    (만료 후 첫 시도가 성공이면 리셋됐지만, 저장된 틀린 비번을 쓰는 브라우저처럼
+     첫 시도가 실패인 경우가 실제로 흔하다.)
+    """
+    last = _fail_last.get(key)
+    if last is not None and now - last > window_sec:
+        _fail_counts.pop(key, None)
+        _fail_last.pop(key, None)
 
 
 def _keys(username: str, ip: str) -> list[str]:
@@ -369,7 +388,13 @@ def _keys(username: str, ip: str) -> list[str]:
 def _remaining(key: str, now: float) -> float:
     until = _locked_until.get(key, 0.0)
     if until <= now:
-        _locked_until.pop(key, None)  # 만료 잠금 정리
+        if key in _locked_until:
+            # 잠금이 만료되면 **카운터도 같이** 지운다. 예전에는 _locked_until 만 비워서
+            # 잠금이 풀린 계정이 오타 한 번에 즉시 다시 잠겼다(형벌을 다 치른 뒤에도
+            # 카운터가 임계 이상으로 남아 있었다).
+            _locked_until.pop(key, None)
+            _fail_counts.pop(key, None)
+            _fail_last.pop(key, None)
         return 0.0
     return until - now
 
@@ -396,12 +421,19 @@ def record_login_failure(db: Session, username: str, ip: str) -> None:
     policy = get_policy(db)
     threshold, lock_min = int(policy["threshold"]), int(policy["lock_min"])
     newly_locked: list[str] = []
+    now = time.time()
+    # 감쇠 창 = lock_min(최소 5분). '연속 실패' 라는 원래 의도대로, 이 시간 동안 실패가
+    # 없으면 카운터를 0 으로 되돌린다 — 몇 시간 전 오타가 오늘의 잠금에 합산되지 않는다.
+    window = max(300.0, lock_min * 60.0)
     with _state_lock:
         for key in _keys(username, ip):
+            _remaining(key, now)          # 만료 잠금 + 그 카운터 정리
+            _decay_locked(key, now, window)
             cnt = _fail_counts.get(key, 0) + 1
             _fail_counts[key] = cnt
+            _fail_last[key] = now
             if cnt >= threshold and key not in _locked_until:
-                _locked_until[key] = time.time() + lock_min * 60
+                _locked_until[key] = now + lock_min * 60
                 newly_locked.append(key)
     for key in newly_locked:
         db.add(AuditLog(action="login_lockout", target_type="account", target_id=username[:64],
@@ -416,6 +448,7 @@ def reset_login_failures(username: str, ip: str) -> None:
     with _state_lock:
         for key in _keys(username, ip):
             _fail_counts.pop(key, None)
+            _fail_last.pop(key, None)
             _locked_until.pop(key, None)
 
 
@@ -426,10 +459,12 @@ def clear_lockout(key: str = "") -> int:
             n = int(key in _locked_until or key in _fail_counts)
             _locked_until.pop(key, None)
             _fail_counts.pop(key, None)
+            _fail_last.pop(key, None)
             return n
         n = len(_locked_until)
         _locked_until.clear()
         _fail_counts.clear()
+        _fail_last.clear()
         return n
 
 
@@ -437,6 +472,8 @@ def lockout_overview() -> dict:
     """활성 잠금·실패 카운터 현황(대시보드용)."""
     now = time.time()
     with _state_lock:
+        # _remaining 이 만료 잠금과 그 카운터를 함께 정리한다 — 그래서 이 순서를 지켜야
+        # 아래 counting 에 '이미 형을 다 치른' 키가 임계 이상 값으로 남지 않는다.
         locks = [{"key": k, "remaining_sec": int(_remaining(k, now))}
                  for k in list(_locked_until) if _remaining(k, now) > 0]
         counting = {k: v for k, v in _fail_counts.items() if k not in _locked_until and v > 0}
@@ -447,6 +484,7 @@ def reset_state() -> None:
     """테스트 전용 — 인메모리 잠금 상태 초기화."""
     with _state_lock:
         _fail_counts.clear()
+        _fail_last.clear()
         _locked_until.clear()
 
 

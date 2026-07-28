@@ -23,7 +23,11 @@ def put(sid: str, data: dict[str, Any]) -> None:
         return
     with _LOCK:
         rec = dict(data)
-        rec["ts"] = time.time()
+        now = time.time()
+        rec["ts"] = now
+        # token_ts = **그 토큰을 받은 시각**. ts(마지막 접근)와 분리해서 들고 있어야
+        # 공유 클라이언트가 '어느 쪽 토큰이 더 새 것인가'를 판정할 수 있다(webpacs_live.user_client).
+        rec["token_ts"] = now
         _SESSIONS[sid] = rec
         _prune_locked()
 
@@ -43,11 +47,37 @@ def get(sid: str) -> dict[str, Any] | None:
 
 def update_token(sid: str, token: str) -> None:
     """A 토큰 갱신(refresh 성공 시) — 세션에 최신 access 토큰 반영."""
+    now = time.time()
     with _LOCK:
         rec = _SESSIONS.get(sid)
         if rec is not None:
             rec["token"] = token
-            rec["ts"] = time.time()
+            rec["token_ts"] = now
+            rec["ts"] = now
+
+
+def update_token_by_account(base_url: str, a_user_id: str, token: str) -> int:
+    """같은 A 계정을 쓰는 **모든 활성 세션**에 새 토큰 반영. 반환: 갱신된 세션 수.
+
+    왜 sid 하나가 아니라 계정 전체인가 — webpacs_live 의 per-user 클라이언트 풀은
+    (base_url, a_user_id) 로 **공유**된다(A 는 계정당 단일 유효 토큰이라 그래야 401 폭풍이 없다).
+    그런데 갱신 콜백을 '클라이언트를 처음 만든 sid' 에 못박아 두면, 나중에 같은 A 계정으로
+    들어온 다른 창의 세션은 갱신을 영원히 못 받는다. 그 세션은 만료 토큰을 계속 들고 있다가
+    매 요청마다 401+refresh 왕복을 내고, 공유 클라이언트에 그 옛 토큰을 되써 넣어
+    두 창이 서로의 토큰을 밀어내는 왕복(=막으려던 401 폭풍)을 만든다.
+    토큰은 계정 단위 자원이므로 반영도 계정 단위여야 한다.
+    """
+    a_user_id = str(a_user_id or "")
+    now = time.time()
+    n = 0
+    with _LOCK:
+        for rec in _SESSIONS.values():
+            if rec.get("base_url") == base_url and str(rec.get("a_user_id") or "") == a_user_id:
+                rec["token"] = token
+                rec["token_ts"] = now
+                rec["ts"] = now
+                n += 1
+    return n
 
 
 def clear(sid: str) -> None:

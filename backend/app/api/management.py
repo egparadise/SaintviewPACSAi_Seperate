@@ -998,6 +998,36 @@ def purge(body: PurgeBody, db: Session = Depends(get_db),
 
 
 # ════════════════════════════ 백엔드 프로세스 자체 제어 (restart|stop) ════════════════════════════
+SUITE_DEFAULT_PORT = 8010   # 스위트 백엔드의 유일한 포트(본체 SaintviewPACSai 는 8000 — 별개다)
+
+
+def _listen_port() -> int:
+    """지금 이 프로세스가 듣고 있는 포트 — 재시작 배치에 그대로 넘긴다.
+
+    기동 명령이 `py -m uvicorn app.main:app --port 8010 …` 이라 argv 에서 읽는 것이
+    가장 정확하다(설정 파일보다 실제 상태에 가깝다). 못 읽으면 스위트 기본값 8010.
+    """
+    import os
+    import sys
+
+    argv = sys.argv
+    for i, a in enumerate(argv):
+        if a == "--port" and i + 1 < len(argv):
+            try:
+                return int(argv[i + 1])
+            except ValueError:
+                break
+        if a.startswith("--port="):
+            try:
+                return int(a.split("=", 1)[1])
+            except ValueError:
+                break
+    try:
+        return int(os.getenv("SAINTVIEW_API_PORT") or SUITE_DEFAULT_PORT)
+    except ValueError:
+        return SUITE_DEFAULT_PORT
+
+
 class ServerControlBody(BaseModel):
     action: str  # restart | stop
 
@@ -1007,8 +1037,9 @@ def server_control(body: ServerControlBody, db: Session = Depends(get_db),
                    user: dict = Depends(require_perm("server.manage"))):
     """백엔드 API 프로세스 강제 재시작/중지 — 분리된 cmd 가 2초 뒤 수행(이 응답은 정상 반환).
 
-    restart: 현재 PID 종료 후 동일 인터프리터·인자로 uvicorn 재기동(환경변수 상속).
-    stop: 종료만 — 웹 UI 도 함께 내려가므로 재기동은 바탕화면 [Saintview PACS 시작] 아이콘 사용.
+    restart: 현재 PID 종료 후 **지금 듣고 있는 포트 그대로** uvicorn 재기동(환경변수 상속).
+    stop: 종료만 — 웹 UI 도 함께 내려가므로 재기동은 서버 PC 설치 루트의
+          start_viewer_suite.bat 실행.
     """
     import os
     import subprocess
@@ -1030,9 +1061,12 @@ def server_control(body: ServerControlBody, db: Session = Depends(get_db),
                     target_type="server", target_id=body.action, detail={"pid": pid}))
     db.commit()
     no_win = subprocess.CREATE_NO_WINDOW
+    # ⚠ 포트를 배치에 하드코딩해 두면 안 된다 — 예전 배치는 8000(본체 포트)으로 되살렸고,
+    #   스위트의 모든 접근 경로(vite 프록시·nginx proxy_pass)는 8010 만 본다. 그래서
+    #   [재시작] 이후 웹이 영영 안 돌아왔다. **지금 듣고 있는 포트**를 넘겨 단일 소스로 만든다.
     cr = subprocess.run(
         ["schtasks", "/create", "/f", "/tn", "SaintviewServerControl",
-         "/tr", f'"{bat}" {body.action}', "/sc", "once", "/st", "23:59"],
+         "/tr", f'"{bat}" {body.action} {_listen_port()}', "/sc", "once", "/st", "23:59"],
         capture_output=True, text=True, timeout=30, creationflags=no_win)
     if cr.returncode != 0:
         raise HTTPException(status_code=500, detail=f"작업 등록 실패: {(cr.stderr or cr.stdout).strip()[:120]}")
@@ -1042,4 +1076,4 @@ def server_control(body: ServerControlBody, db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail=f"작업 실행 실패: {(rn.stderr or rn.stdout).strip()[:120]}")
     return {"ok": True, "action": body.action,
             "detail": "2초 후 수행됩니다" + (" — 잠시 후 자동 재접속" if body.action == "restart" else
-                                         " — 재기동은 바탕화면 아이콘(saintview_recover.bat) 사용")}
+                                         " — 재기동은 서버 PC 설치 루트의 start_viewer_suite.bat 실행")}

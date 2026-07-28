@@ -4026,7 +4026,8 @@ export function Worklist() {
         display: "flex", gap: 16, padding: "3px 12px", background: "var(--bg-panel)",
         borderTop: "1px solid var(--border)", fontSize: 11.5, color: "var(--text-secondary)", flexShrink: 0,
       }}>
-        <span>[Q][H] Server: http://localhost:8000</span>
+        {/* 8000 은 본체 포트다 — 스위트는 8010. 실제 나가는 곳을 그대로 표시한다. */}
+        <span>[Q][H] Server: {import.meta.env.VITE_API_BASE || window.location.origin}</span>
         <span>{total} results {selected ? "1 selected" : "0 selected"}</span>
         {emergencyCount > 0 && <span style={{ color: "var(--stat-emergency)" }}>⚠ Emergency {emergencyCount}건</span>}
         <span style={{ marginLeft: "auto" }}>{new Date().toLocaleString("ko-KR")}</span>

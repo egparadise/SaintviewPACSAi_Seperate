@@ -95,22 +95,31 @@ def user_client(sess: dict) -> WebPacsClient:
     sess: webpacs_session 레코드({base_url, token, refresh, a_user_id, sid, verify_ssl, ...})."""
     from app.services import webpacs_session
 
-    key = f"{sess.get('base_url')}|{sess.get('a_user_id')}"
-    sid = sess.get("sid", "")
+    base_url = str(sess.get("base_url") or "")
+    a_uid = str(sess.get("a_user_id") or "")
+    key = f"{base_url}|{a_uid}"
+    tok_ts = float(sess.get("token_ts") or 0.0)
     with _user_lock:
         cli = _user_clients.get(key)
         if cli is None:
             cli = WebPacsClient(
-                sess["base_url"], str(sess.get("a_user_id") or ""),
+                base_url, a_uid,
                 verify_ssl=bool(sess.get("verify_ssl", True)),
                 token=sess.get("token"), refresh_token=sess.get("refresh"),
-                on_token=(lambda t, _sid=sid: webpacs_session.update_token(_sid, t)),
+                # ⚠ sid 로 못박으면 안 된다 — 이 클라이언트는 같은 A 계정의 **모든 세션**이
+                #   공유한다. 처음 만든 sid 에만 갱신을 흘리면 나머지 창은 만료 토큰에 갇힌다.
+                on_token=(lambda t, _b=base_url, _u=a_uid:
+                          webpacs_session.update_token_by_account(_b, _u, t)),
             )
+            cli.adopt_token(sess.get("token"), tok_ts)
             _user_clients[key] = cli
         else:
-            # 최신 세션 토큰을 반영(다른 창에서 재로그인해 토큰이 바뀐 경우)
-            if sess.get("token"):
-                cli._token = sess["token"]  # noqa: SLF001 — 같은 A 사용자 토큰 동기화
+            # ⚠ 무조건 되쓰기(cli._token = sess["token"]) 는 금물이었다.
+            #   창2 가 refresh 로 새 토큰을 받아도 창1 의 세션 레코드에는 옛 토큰이 남는데,
+            #   창1 의 다음 요청이 그 옛 토큰으로 공유 클라이언트를 되덮어 곧장 401 이 났다.
+            #   토큰을 받은 시각(token_ts)을 비교해 **더 새 것일 때만** 채택한다.
+            #   (A 는 계정당 단일 유효 access 라 마지막에 발급된 것이 언제나 유일한 정답이다.)
+            cli.adopt_token(sess.get("token"), tok_ts)
         return cli
 
 
@@ -356,7 +365,7 @@ def live_related(db: Session, vid: int, user: dict | None = None,
 def invalidate_tree(vid: int = 0) -> None:
     """시리즈 트리 캐시 무효화 — vid 를 주면 그 검사만, 비우면 전체.
 
-    왜 필요한가: _TREE_CACHE 는 vid 키로 30초 TTL 이다. 그런데 A 에 시리즈가 추가되면
+    왜 필요한가: _TREE_CACHE 는 (base_url, vid) 키로 30초 TTL 이다. 그런데 A 에 시리즈가 추가되면
     (촬영이 이어지는 검사는 흔하다) SSE 로 '바뀌었다'는 신호는 받으면서도 트리는 최대
     30초 동안 옛 것을 내준다 — 뷰어에 새 시리즈가 안 보인다.
     related·instance 는 이미 무효화 통로가 있는데 트리만 없어서 만들었다.
@@ -366,7 +375,9 @@ def invalidate_tree(vid: int = 0) -> None:
         if not vid:
             _TREE_CACHE.clear()
             return
-        _TREE_CACHE.pop(vid, None)
+        # 키는 (base_url, vid) 튜플이므로 vid 하나로는 못 집는다 — 그 vid 의 모든 서버분을 지운다
+        for k in [k for k in _TREE_CACHE if k[1] == vid]:
+            _TREE_CACHE.pop(k, None)
 
 
 def invalidate_related(patient_key: str = "") -> None:
@@ -378,6 +389,30 @@ def invalidate_related(patient_key: str = "") -> None:
             return
         for k in [k for k in _REL_CACHE if k.endswith(f"|{patient_key}")]:
             _REL_CACHE.pop(k, None)
+
+
+def invalidate_pixel_caches() -> None:
+    """픽셀 캐시 전체 무효화 — A 서버가 바뀌었을 때 쓴다.
+
+    디코드/인코딩 캐시는 SOP UID 로만 키가 잡혀 있다. SOP UID 는 전역 고유라 서버가 달라도
+    충돌하지 않는 것이 원칙이지만, A 를 갈아 끼우면 '이전 서버 자료가 새 서버 화면에 남는'
+    상태 자체를 없애 두는 편이 안전하다(반대로 지워서 잃는 것은 재취득 비용뿐이다).
+    디스크 캐시(*.dcm)까지 지운다 — 이것이 '이전 환자 영상'을 실제로 그려 내던 원천이다.
+    """
+    global _enc_bytes
+    with _DECODE_LOCK:
+        _DECODE_CACHE.clear()
+    with _ENC_LOCK:
+        _ENC_CACHE.clear()
+        _enc_bytes = 0
+    try:
+        for f in CACHE_DIR.glob("*.dcm"):
+            try:
+                f.unlink()
+            except OSError:      # 다른 스레드가 방금 지웠거나 읽는 중일 수 있다
+                continue
+    except OSError:
+        pass
 
 
 def live_detail(db: Session, vid: int, user: dict | None = None,
@@ -400,7 +435,16 @@ def live_detail(db: Session, vid: int, user: dict | None = None,
 
 
 # ── series-tree (A series/viewer + v2 시리즈 메타데이터의 기하 태그) ───────
-_TREE_CACHE: OrderedDict[int, tuple[float, dict]] = OrderedDict()
+# ⚠ 키는 반드시 (base_url, vid) 다 — vid 만으로는 **다른 A 서버의 트리를 내준다**.
+# vid = VID_BASE + study_idx 인데 study_idx 는 A 서버 로컬 시퀀스라, 브리지 주소를 바꾸면
+# 같은 study_idx 가 전혀 다른 환자의 검사를 가리킨다. 그때 vid 키 캐시가 적중하면 뷰어는
+# 이전 서버의 study/series/sop UID 로 픽셀을 요청하고, 그 SOP 가 아직 디스크 캐시
+# (cache/webpacs_live/<sop>.dcm)에 남아 있으면 **이전 환자의 영상이 새 검사 화면에 그려진다**.
+# (검사를 열면 prefetch_series 가 즉시 디스크 캐시를 덥히므로 warm 이 정상 상태다.)
+# 바로 위 _REL_CACHE 가 이미 base_url 을 키에 넣고 있다 — 같은 규칙을 여기에도 적용한다.
+# per-user 세션은 자기 base_url 을 12h 까지 들고 있으므로(auth.webpacs_login) 이 혼선은
+# '설정 변경 직후 30초' 가 아니라 세션 수명 내내 반복될 수 있다.
+_TREE_CACHE: OrderedDict[tuple[str, int], tuple[float, dict]] = OrderedDict()
 _TREE_TTL = 30.0
 _TREE_LOCK = threading.Lock()
 
@@ -428,11 +472,14 @@ def _tag1(meta: dict, key: str, default=None):
 def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
     """series-tree 동형 — instances 에 rows/cols/spacing/position/orientation 포함.
     구조는 사용자 무관이라 vid 로 캐시(픽셀 취득은 서비스 계정)."""
+    # 클라이언트를 **먼저** 해석해야 캐시 키(base_url)를 만들 수 있다.
+    # live_client 는 풀에서 꺼내 오는 값싼 호출이라 적중 경로에도 부담이 없다.
+    client = live_client(db, user)
+    ck = (str(getattr(client, "base_url", "")), vid)
     with _TREE_LOCK:
-        hit = _TREE_CACHE.get(vid)
+        hit = _TREE_CACHE.get(ck)
         if hit and time.time() - hit[0] < _TREE_TTL:
             return hit[1]
-    client = live_client(db, user)
     idx = to_remote_idx(vid)
     series_rows = client.series_viewer(idx)
     study_uid = ""
@@ -485,7 +532,8 @@ def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
     series_out.sort(key=lambda s: s["series_number"])
     tree = {"study_uid": study_uid, "series": series_out}
     with _TREE_LOCK:
-        _TREE_CACHE[vid] = (time.time(), tree)
+        _TREE_CACHE[ck] = (time.time(), tree)
+        _TREE_CACHE.move_to_end(ck)
         while len(_TREE_CACHE) > 64:
             _TREE_CACHE.popitem(last=False)
     return tree
@@ -617,8 +665,21 @@ def _prune_cache(force: bool = False) -> None:
         if not force and _prune_counter % _PRUNE_EVERY != 0:
             return
     try:
-        files = sorted(CACHE_DIR.glob("*.dcm"), key=lambda f: f.stat().st_mtime)
-        for f in files[:-CACHE_MAX_FILES] if len(files) > CACHE_MAX_FILES else []:
+        # ⚠ 정렬 키 안에서 f.stat() 을 부르면 안 된다 — glob 이 이름을 뽑은 뒤 stat 전에
+        #   그 파일이 사라지면(invalidate_instance 의 손상 캐시 삭제, 다른 스레드의 프루닝)
+        #   FileNotFoundError 가 sorted() 밖으로 튀어나가 아래 `except OSError` 가 **정리
+        #   전체**를 삼킨다. 한 파일 건너뛰기가 아니라 그 사이클의 정리량이 0 이 되고,
+        #   다음 기회는 쓰기 256회 뒤라 상한이 조용히 무시된다(실측: 4000개 스캔 ≈140ms
+        #   창 안에 삭제가 단 1회만 들어와도 절반 이상 중단).
+        #   htj2k_stream._prune_cache 는 이미 파일마다 try/except 로 막아 두었다 — 같은 형태.
+        entries: list[tuple[float, Path]] = []
+        for f in CACHE_DIR.glob("*.dcm"):
+            try:
+                entries.append((f.stat().st_mtime, f))
+            except OSError:      # 다른 스레드가 방금 지웠다 — 이 파일만 건너뛴다
+                continue
+        entries.sort(key=lambda e: e[0])
+        for _, f in entries[:-CACHE_MAX_FILES] if len(entries) > CACHE_MAX_FILES else []:
             f.unlink(missing_ok=True)
         # os.replace 실패·프로세스 중단으로 남은 임시 파일 회수 — glob("*.dcm") 이 못 잡아
         # 무한정 쌓이던 것들. 1시간 넘게 방치된 것만(진행 중인 쓰기는 건드리지 않는다).

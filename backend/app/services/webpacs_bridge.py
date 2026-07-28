@@ -105,6 +105,8 @@ class WebPacsClient:
         self._token: str | None = token
         self._refresh_token: str | None = refresh_token
         self._on_token = on_token   # 토큰 갱신 시 세션 저장소에 반영하는 콜백(선택)
+        # 지금 들고 있는 토큰을 **받은 시각** — adopt_token 이 '더 새 것만 채택' 판정에 쓴다.
+        self._token_ts: float = 0.0
         # A 는 단일 유효 토큰(로그인마다 이전 토큰 무효화)이라, 멀티스레드(FastAPI threadpool)에서
         # 병렬 이미지 로드가 각자 재로그인하면 서로의 토큰을 무효화하는 401 폭풍이 난다.
         # → 재인증을 락으로 직렬화 + "내가 쓴 토큰이 아직 유효할 때만" 재인증(중복 재인증 방지).
@@ -173,6 +175,9 @@ class WebPacsClient:
         raise WebPacsError("원격 PACS 세션이 만료되었습니다 — 다시 로그인하세요")
 
     def _emit_token(self) -> None:
+        # 내가 방금 받은 토큰이 가장 새 것이다 — adopt_token 이 이 시각과 비교해
+        # 옛 세션 레코드의 토큰으로 되돌아가는 것을 막는다(항상 _auth_lock 안에서 호출된다).
+        self._token_ts = time.time()
         if self._on_token and self._token:
             try:
                 self._on_token(self._token)
@@ -189,6 +194,27 @@ class WebPacsClient:
                 tok = self._token
         return tok or ""
 
+    def adopt_token(self, token: str | None, token_ts: float) -> bool:
+        """외부(세션 저장소)에서 받은 토큰을 **더 새 것일 때만** 채택. 반환: 채택 여부.
+
+        여러 세션(창)이 같은 A 계정 클라이언트를 공유한다. 예전에는 세션 레코드의 토큰을
+        무조건 self._token 에 대입했는데, 옛 토큰을 든 창이 요청할 때마다 최신 토큰을
+        되덮어 401 이 사용자에게 그대로 새어 나갔다. 시각 비교로 되돌림을 막는다.
+        _auth_lock 안에서 바꾼다 — _reauth_locked/_refresh_locked 와 같은 직렬화 구역이라야
+        재인증 도중 옛 값이 끼어들지 않는다.
+        """
+        if not token:
+            return False
+        with self._auth_lock:
+            if self._token == token:
+                self._token_ts = max(self._token_ts, token_ts)
+                return False
+            if self._token is not None and token_ts <= self._token_ts:
+                return False        # 더 오래된 토큰 — 무시(되돌림 방지)
+            self._token = token
+            self._token_ts = token_ts
+            return True
+
     def _relogin_if_stale(self, used_token: str) -> None:
         """401 재시도 전 — 내가 쓴 토큰이 아직 현재 토큰일 때만 재인증.
         다른 스레드가 이미 갱신했으면 그 토큰을 그대로 재사용(중복 재인증·상호 무효화 방지)."""
@@ -196,8 +222,10 @@ class WebPacsClient:
             if self._token == used_token or self._token is None:
                 self._reauth_locked()
 
-    def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
-        h = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+    def _headers(self, extra: dict[str, str] | None = None,
+                 token: str | None = None) -> dict[str, str]:
+        tok = token if token is not None else self._token
+        h = {"Authorization": f"Bearer {tok}"} if tok else {}
         if extra:
             h.update(extra)
         return h
@@ -205,12 +233,17 @@ class WebPacsClient:
     def _authed(self, send, *args, **kw) -> httpx.Response:
         """토큰 부착 요청 실행 + 401 시 stale 판정 재로그인 1회 재시도(공용).
         send: self._client.request/get/post 등. args/kw 에 headers 는 주입하지 않는다(여기서 부착)."""
+        # ⚠ 헤더에 붙일 토큰은 used 와 **같은 값**이어야 한다. 예전에는 _headers() 가
+        #   self._token 을 다시 읽어서, 그 사이 다른 스레드가 토큰을 바꾸면 요청은 새 토큰(Y)으로
+        #   나가는데 used 는 옛 토큰(X)이었다. 401 이 나도 _relogin_if_stale(X) 는
+        #   self._token(Y) != X 라며 **재인증을 건너뛰어** 401 이 호출자에게 그대로 새어 나갔다.
         used = self._ensure_token()
-        kw["headers"] = self._headers(kw.pop("headers", None))
+        extra = kw.pop("headers", None)
+        kw["headers"] = self._headers(extra, token=used)
         r = send(*args, **kw)
         if r.status_code == 401:
             self._relogin_if_stale(used)
-            kw["headers"] = self._headers()
+            kw["headers"] = self._headers(extra)
             r = send(*args, **kw)
         return r
 

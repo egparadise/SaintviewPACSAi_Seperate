@@ -47,7 +47,8 @@ gzip_min_length 1024;
 gzip_proxied any;
 gzip_types
     application/javascript text/javascript application/json
-    text/css text/plain image/svg+xml application/manifest+json;
+    text/css text/plain image/svg+xml application/manifest+json
+    application/wasm;
 "@ | Out-File -FilePath $dropin -Encoding utf8
 Write-Host "- 작성: $dropin"
 

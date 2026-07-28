@@ -11,7 +11,8 @@ const rootDir = dirname(fileURLToPath(import.meta.url))
 // 자체서명 HTTPS 전용 — 모니터 감지(getScreenDetails) 등 secure context 필수 API가
 // 원격 PC(다른 좌석·Tailscale) 접속에서도 동작해야 하므로 http 폴백 없이 HTTPS 로 고정한다.
 // (http 로 조용히 내려가면 원격 다중 모니터 인식이 소리 없이 죽는다 — 기동 거부가 낫다)
-// 인증서 생성: start_saintview.bat 이 없으면 자동 생성. 수동 생성은 frontend 에서
+// 인증서 생성: start_viewer_suite.bat(스위트의 유일한 런처) 0단계가 없으면 자동 생성.
+// ⚠ 이 저장소에 start_saintview.bat 은 없다(본체 SaintviewPACSai 의 파일). 수동 생성은 frontend 에서
 //   openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/dev.key -out certs/dev.crt -days 3650 \
 //     -subj "/CN=saintview-dev" \
 //     -addext "subjectAltName=IP:<tailscaleIP>,IP:127.0.0.1,DNS:localhost,DNS:<host>.ts.net"
@@ -22,7 +23,7 @@ function httpsOption() {
   if (!existsSync(key) || !existsSync(cert)) {
     throw new Error(
       '[vite] HTTPS 전용 — certs/dev.key|crt 가 없어 기동할 수 없습니다. ' +
-      'start_saintview.bat 실행(자동 생성) 또는 vite.config.ts 상단의 openssl 명령으로 생성하세요.',
+      '설치 루트의 start_viewer_suite.bat 실행(자동 생성) 또는 vite.config.ts 상단의 openssl 명령으로 생성하세요.',
     )
   }
   return { key: readFileSync(key), cert: readFileSync(cert) }
@@ -72,7 +73,12 @@ function precompress() {
       const dir = new URL('./dist/assets/', import.meta.url)
       let n = 0, saved = 0
       for (const f of readdirSync(dir)) {
-        if (!/\.(js|css|svg|json|html)$/.test(f)) continue
+        // wasm 필수 — 이게 빠져 있어 2.67MB(openjph/openjpeg/libjpegturbo/charls 디코더)가
+        // 콜드 로드마다 **무압축**으로 나갔다. gzip 이면 826KB 로 줄어든다(1.85MB 낭비).
+        // openjphjs 는 HTJ2K 디코드 경로라, 사전압축을 넣은 목적(원격·저대역에서 뷰어 창 열기)이
+        // 정확히 이 파일에서 안 지켜지고 있었다. 런타임 gzip 도 application/wasm 을 빠뜨려
+        // (nginx gzip_types / vite preview 압축 미들웨어) 두 방어선이 동시에 비어 있었다.
+        if (!/\.(js|css|svg|json|html|wasm)$/.test(f)) continue
         const p = new URL(f, dir)
         const raw = readFileSync(p)
         if (raw.length < 1024) continue

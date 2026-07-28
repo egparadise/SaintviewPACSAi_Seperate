@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -99,7 +100,23 @@ def encode_frames_batch(specs: list[tuple[str, "pydicom.Dataset"]], cache_dir: P
         for out, dest in index:
             r = res.get(out)
             if r and r.get("ok"):
-                dest.write_bytes(Path(out).read_bytes())
+                # ⚠ dest.write_bytes() 로 직접 쓰면 안 된다 — 'wb' 는 먼저 0바이트로 자른다.
+                #   이 배치가 도는 동안 사용자는 **바로 그 시리즈를 스크롤 중**이고(프리인코딩을
+                #   촉발한 것이 그 스크롤이다), 온디맨드 경로가 만들어 둔 같은 파일을 다른
+                #   스레드가 읽고 있다. 그때 자르면 빈 j2c 가 나가 뷰어에 검은 타일이 남는다.
+                #   (건너뛰기 판정은 _pre_encode_series 가 sop 의 **첫 프레임**만 보므로,
+                #    다중프레임에서는 여기까지 온 뒤에야 이미 있는 것이 드러난다.)
+                #   내용은 (sop, frame) 에 대해 결정적이라 이미 있으면 그대로 두면 된다.
+                if dest.exists():
+                    continue
+                part = dest.with_suffix(f".{os.getpid():x}.part")
+                try:
+                    part.write_bytes(Path(out).read_bytes())
+                    os.replace(part, dest)
+                except OSError:
+                    part.unlink(missing_ok=True)
+                    if not dest.exists():
+                        continue
                 done += 1
         return done
     finally:

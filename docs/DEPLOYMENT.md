@@ -56,7 +56,10 @@ cd backend && py -3.11 seed_sample.py
 캐시·락·인플라이트·세션이 전부 프로세스 인메모리(모듈 전역 dict)이기 때문이다.
 
 기동 명령은 `--workers` 를 쓰지 않는다 — `start_viewer_suite.bat`(포트 8010),
-`backend/server_restart.bat`(포트 8000) 모두 `py -3.11 -m uvicorn app.main:app --port … --log-level warning`.
+`backend/server_restart.bat`(기본 8010, 관리자 콘솔이 현재 리스닝 포트를 인자로 넘긴다) 모두
+`py -3.11 -m uvicorn app.main:app --port … --log-level warning`.
+⚠ 스위트 백엔드 포트는 **8010 하나뿐**이다. 8000 은 본체(SaintviewPACSai) 포트다 —
+예전 `server_restart.bat` 이 8000 으로 되살려서 관리자 콘솔 [재시작] 뒤 웹이 안 돌아왔다.
 `deploy/nginx-viewer.conf` 의 업스트림도 `proxy_pass http://127.0.0.1:8010` **단일**이다.
 
 **워커가 2개 이상이면 무슨 일이 나는가** (파일:행 — 전부 프로세스 인메모리 전역):

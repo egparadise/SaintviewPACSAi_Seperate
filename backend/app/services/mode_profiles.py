@@ -26,6 +26,14 @@ DEFAULT_MODE_PROFILES: dict = {
                 "dbl_action": "viewer2d",
             },
             "viewer": {
+                # ⚠ client_viewer 가 빠져 있으면 이 프로파일은 **뷰어를 바꾸지 못한다**.
+                #   SettingsModal 의 [적용] 은 `{...현재값, ...prof.viewer, mode_key}` 병합이라
+                #   없는 키는 직전 값이 그대로 남는다. 그래서 I-View 를 쓰던 사용자가
+                #   'SaintView' 를 골라 적용해도 화면은 I-View 그대로인데 mode_key 만 저장돼
+                #   콤보에는 '적용됨' 으로 보였다(저장은 되는데 반영이 안 되는 증상).
+                #   뷰어 스킨 판정은 전적으로 이 키다(Worklist 의 setSvMode(cv === "sv")).
+                #   등록 id 는 lib/viewerConfig.ts 의 sv/infi/ty — SaintView 는 "sv".
+                "client_viewer": "sv",
                 "paletteSide": "left", "thumbSide": "left",
                 "thumbMode": "series", "reportDock": True,
             },

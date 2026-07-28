@@ -911,7 +911,11 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             {page === "network" && (
               <>
                 <Group title="로컬 구성">
-                  <Row label="API 서버"><code style={{ fontSize: 12 }}>http://localhost:8000</code></Row>
+                  {/* 하드코딩하지 않는다 — 스위트 백엔드는 8010 이고 8000 은 본체 포트다.
+                      VITE_API_BASE 가 비면(기본 배치) 같은 출처로 나가므로 그것을 그대로 보여준다. */}
+                  <Row label="API 서버"><code style={{ fontSize: 12 }}>
+                    {import.meta.env.VITE_API_BASE || window.location.origin}
+                  </code></Row>
                   <Row label="OHIF 뷰어"><code style={{ fontSize: 12 }}>http://localhost:3000</code></Row>
                 </Group>
                 <Group title="DICOM 서버 (Orthanc)" right={<button onClick={testOrthanc}>연결 테스트</button>}>
