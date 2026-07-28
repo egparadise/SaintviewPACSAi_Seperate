@@ -175,6 +175,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [saved, setSaved] = useState("");
 
   // ── 상태 (페이지별) ──
+  // 워크리스트 갱신 정책 — 기본 수동(SEARCH 를 눌러야 갱신). Live 도 동일하게 따른다.
+  const [refreshMode, setRefreshMode] = useState<"manual" | "auto">("manual");
   const [refreshSec, setRefreshSec] = useState(10);
   const [defaultStatus, setDefaultStatus] = useState("");
   const [columns, setColumns] = useState<string[]>(DEFAULT_COLUMNS);
@@ -350,10 +352,20 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       const pbv = (r.value as { panels_by_viewer?: { sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null } }).panels_by_viewer;
       if (pbv) setWlPanelsBy(pbv);
       const v = r.value as {
-        auto_refresh_sec?: number; default_status?: string; columns?: string[];
+        auto_refresh_sec?: number; refresh_mode?: string; default_status?: string; columns?: string[];
         find_fields?: string[]; dbl_action?: "viewer2d" | "ohif";
       };
-      if (v.auto_refresh_sec !== undefined) setRefreshSec(v.auto_refresh_sec);
+      // 구 설정 이관 — Worklist.tsx 와 **같은 규칙**이어야 화면과 설정이 어긋나지 않는다:
+      //   refresh_mode 없음 + auto_refresh_sec 없음/0 → 수동, >0 → 자동 그 초
+      if (v.refresh_mode === "auto" || v.refresh_mode === "manual") {
+        setRefreshMode(v.refresh_mode);
+        if (v.auto_refresh_sec) setRefreshSec(v.auto_refresh_sec);
+      } else if (v.auto_refresh_sec) {
+        setRefreshMode("auto");
+        setRefreshSec(v.auto_refresh_sec);
+      } else {
+        setRefreshMode("manual");
+      }
       setDefaultStatus(v.default_status ?? "");
       if (v.columns?.length) setColumns(v.columns.filter((c) => COLUMN_DEFS[c]));
       if (v.find_fields?.length) setFindFields(v.find_fields.filter((c) => FIND_FIELDS[c]));
@@ -541,7 +553,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     // 병합 저장 — 드래그 panel_order 등 다른 키를 덮어쓰지 않도록 현재 서버 값과 합친다
     const cur = (await api.getSetting("worklist.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("worklist.prefs",
-      { ...cur, auto_refresh_sec: refreshSec, default_status: defaultStatus, columns,
+      { ...cur, refresh_mode: refreshMode, auto_refresh_sec: refreshSec, default_status: defaultStatus, columns,
         by_viewer: wlBy, panels_by_viewer: wlPanelsBy,
         find_fields: findFields, dbl_action: dblAction, panels: wlPanels, nav_left: polNavLeft }, "user");
     const curV = (await api.getSetting("viewer.prefs").catch(() => ({ value: {} }))).value;
@@ -825,11 +837,38 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             {page === "env" && (
               <>
                 <Group title="워크리스트 동작">
-                  <Row label="자동 갱신">
-                    <select value={refreshSec} onChange={(e) => setRefreshSec(Number(e.target.value))}>
-                      <option value={0}>끔</option><option value={5}>5초</option>
-                      <option value={10}>10초</option><option value={30}>30초</option>
-                    </select>
+                  <Row label="목록 갱신">
+                    <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <input type="radio" name="wlrefresh" checked={refreshMode === "manual"}
+                               onChange={() => setRefreshMode("manual")} />
+                        수동 (SEARCH 를 누를 때만)
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <input type="radio" name="wlrefresh" checked={refreshMode === "auto"}
+                               onChange={() => setRefreshMode("auto")} />
+                        자동
+                      </label>
+                      <input type="number" min={1} max={3600} value={refreshSec}
+                             disabled={refreshMode !== "auto"}
+                             onChange={(e) => {
+                               const n = Number(e.target.value);
+                               setRefreshSec(Number.isFinite(n) ? Math.min(3600, Math.max(1, Math.round(n))) : 10);
+                             }}
+                             style={{ width: 70, opacity: refreshMode === "auto" ? 1 : 0.45 }} />
+                      <span style={{ color: "var(--text-secondary)" }}>초마다</span>
+                    </span>
+                  </Row>
+                  <Row label="">
+                    <span style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                      모든 뷰어(SaintView·T-View·I-View)의 워크리스트와 <b>Live 모드에도 함께</b> 적용됩니다.
+                      수동일 때 원격에 변경이 생기면 목록을 바꾸지 않고 상단에 알림만 띄웁니다.
+                      {refreshMode === "auto" && refreshSec < 3 && (
+                        <><br /><b style={{ color: "var(--warn, #f59e0b)" }}>
+                          {refreshSec}초는 매우 짧습니다 — Live 모드에서는 원격 PACS 에 그만큼 자주 질의합니다.
+                        </b></>
+                      )}
+                    </span>
                   </Row>
                   <Row label="기본 상태 필터">
                     <select value={defaultStatus} onChange={(e) => setDefaultStatus(e.target.value)}>

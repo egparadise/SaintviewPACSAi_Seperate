@@ -26,6 +26,9 @@ const VIEWERS = [
 
 export function HospitalWorklistSettings({ hid }: { hid: number }) {
   // worklist.prefs (병원 스코프)
+  // 갱신 정책은 계정 설정(설정 > 환경)과 **같은 계약**을 써야 한다. 여기서 모드를 안 쓰면
+  // 관리자가 이 화면을 저장하기만 해도 auto_refresh_sec 이 실려 전 병원이 자동으로 바뀐다.
+  const [refreshMode, setRefreshMode] = useState<"manual" | "auto">("manual");
   const [refreshSec, setRefreshSec] = useState(10);
   const [defaultStatus, setDefaultStatus] = useState("");
   const [dblAction, setDblAction] = useState<"viewer2d" | "ohif">("viewer2d");
@@ -46,12 +49,21 @@ export function HospitalWorklistSettings({ hid }: { hid: number }) {
   useEffect(() => {
     api.hospWlSetting(hid, "worklist.prefs").then((r) => {
       const v = r.value as {
-        auto_refresh_sec?: number; default_status?: string; columns?: string[];
+        auto_refresh_sec?: number; refresh_mode?: string; default_status?: string; columns?: string[];
         by_viewer?: { sv?: string[] | null; ty?: string[] | null; infi?: string[] | null };
         find_fields?: string[]; dbl_action?: "viewer2d" | "ohif";
         panels?: Record<string, boolean>; nav_left?: "past" | "recent";
       };
-      if (v.auto_refresh_sec !== undefined) setRefreshSec(v.auto_refresh_sec);
+      // 이관 규칙은 Worklist.tsx·SettingsModal.tsx 와 동일해야 한다(세 곳이 어긋나면 화면과 설정이 따로 논다)
+      if (v.refresh_mode === "auto" || v.refresh_mode === "manual") {
+        setRefreshMode(v.refresh_mode);
+        if (v.auto_refresh_sec) setRefreshSec(v.auto_refresh_sec);
+      } else if (v.auto_refresh_sec) {
+        setRefreshMode("auto");
+        setRefreshSec(v.auto_refresh_sec);
+      } else {
+        setRefreshMode("manual");
+      }
       setDefaultStatus(v.default_status ?? "");
       if (v.columns?.length) setColumns(v.columns.filter((c) => COLUMN_DEFS[c]));
       if (v.by_viewer) setWlBy(v.by_viewer);
@@ -74,7 +86,8 @@ export function HospitalWorklistSettings({ hid }: { hid: number }) {
       // 병합 저장 — 병원 스코프 현재 값과 합쳐 다른 키 보존(설정 모달 save()와 동일 규약)
       const cur = (await api.hospWlSetting(hid, "worklist.prefs").catch(() => ({ value: {} }))).value;
       await api.putHospWlSetting(hid, "worklist.prefs", {
-        ...cur, auto_refresh_sec: refreshSec, default_status: defaultStatus, columns,
+        ...cur, refresh_mode: refreshMode, auto_refresh_sec: refreshSec,
+        default_status: defaultStatus, columns,
         by_viewer: wlBy, find_fields: findFields, dbl_action: dblAction,
         panels, nav_left: navLeft,
       });
@@ -100,11 +113,26 @@ export function HospitalWorklistSettings({ hid }: { hid: number }) {
       </div>
 
       <Group title="워크리스트 동작">
-        <Row label="자동 갱신">
-          <select value={refreshSec} onChange={(e) => setRefreshSec(Number(e.target.value))}>
-            <option value={0}>끔</option><option value={5}>5초</option>
-            <option value={10}>10초</option><option value={30}>30초</option>
-          </select>
+        <Row label="목록 갱신">
+          <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <input type="radio" name="hospwlrefresh" checked={refreshMode === "manual"}
+                     onChange={() => setRefreshMode("manual")} />
+              수동 (SEARCH 를 누를 때만)
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <input type="radio" name="hospwlrefresh" checked={refreshMode === "auto"}
+                     onChange={() => setRefreshMode("auto")} />
+              자동
+            </label>
+            <input type="number" min={1} max={3600} value={refreshSec} disabled={refreshMode !== "auto"}
+                   onChange={(e) => {
+                     const n = Number(e.target.value);
+                     setRefreshSec(Number.isFinite(n) ? Math.min(3600, Math.max(1, Math.round(n))) : 10);
+                   }}
+                   style={{ width: 70, opacity: refreshMode === "auto" ? 1 : 0.45 }} />
+            <span style={{ color: "var(--text-secondary)" }}>초마다 (Live 포함)</span>
+          </span>
         </Row>
         <Row label="기본 상태 필터">
           <select value={defaultStatus} onChange={(e) => setDefaultStatus(e.target.value)}>

@@ -973,23 +973,10 @@ function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, ser
   );
 }
 
-/* ── [C] 메인 검사 그리드 (컬럼 구성형) ───────────── */
-function StudyGrid({
-  items, columns, selectedId, selectedIds, onSelect, onOpen, onContext, variant, treeDisabled,
-}: {
-  items: StudyRow[];
-  columns: string[];
-  selectedId: number | null;
-  selectedIds?: Set<number>;   // 다중선택 집합(Shift 범위/Ctrl 토글). 없으면 단일(selectedId)만.
-  onSelect: (row: StudyRow, e?: React.MouseEvent) => void;
-  onOpen: (row: StudyRow) => void;
-  onContext: (e: React.MouseEvent, row: StudyRow) => void;
-  variant?: "infi";
-  /** LOCAL 모드 — Series 펼침(＋)은 서버 seriesTree 라 숨김(로컬 id 오호출 방지) */
-  treeDisabled?: boolean;
-}) {
-  const infi = variant === "infi";
-  // Exam → Series → Image 계층 확장: '＋' 클릭=아래로 전개('−'로 전환), 다시 클릭=접기
+/* ── Exam → Series → Image 확장 트리 (메인 그리드·과거검사 공용) ─────────────
+   두 곳이 같은 계층을 보여 준다. 같은 코드를 두 번 쓰면 한쪽만 고쳐지는 사고가 나므로
+   상태(useSeriesTree)와 행 렌더(SeriesTreeRows)를 한 벌만 둔다. */
+function useSeriesTree() {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [expSeries, setExpSeries] = useState<Set<string>>(new Set());
   const [trees, setTrees] = useState<Record<number, SeriesNode[] | null>>({});   // null=로딩 중
@@ -1007,15 +994,96 @@ function StudyGrid({
       return n;
     });
   };
-  const toggleSeries = (uid: string) => setExpSeries((prev) => {
+  // 시리즈 키는 검사 id 를 접두로 붙인다 — 다른 검사가 같은 series_uid 를 갖는 경우
+  // (같은 검사가 목록과 과거검사에 동시에 뜨는 상황 포함) 펼침이 서로 얽히지 않게.
+  const toggleSeries = (key: string) => setExpSeries((prev) => {
     const n = new Set(prev);
-    if (n.has(uid)) n.delete(uid); else n.add(uid);
+    if (n.has(key)) n.delete(key); else n.add(key);
     return n;
   });
+  return { expanded, expSeries, trees, toggleExam, toggleSeries };
+}
+
+const TREE_MARK: React.CSSProperties = {
+  cursor: "pointer", color: "var(--accent)", fontWeight: 700, userSelect: "none",
+};
+
+/** 펼쳐진 검사의 Series/Image 행들. 앞의 빈 칸(토글 열) 수는 lead 로 맞춘다. */
+function SeriesTreeRows({ studyId, tree, expSeries, toggleSeries, colSpan, lead, onOpen }: {
+  studyId: number;
+  tree: SeriesNode[] | null | undefined;
+  expSeries: Set<string>;
+  toggleSeries: (key: string) => void;
+  colSpan: number;             // Series/Image 행이 차지할 열 수(토글 열 제외)
+  lead: number;                // 앞에 비워 둘 열 수(토글 열)
+  onOpen: () => void;          // 더블클릭 — 영상 열기
+}) {
+  const pad = Array.from({ length: lead }, (_, i) => <td key={`p${i}`} />);
+  if (tree === null) {
+    return <tr>{pad}<td colSpan={colSpan}
+      style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>시리즈 로딩…</td></tr>;
+  }
+  if (!tree || tree.length === 0) {
+    return <tr>{pad}<td colSpan={colSpan}
+      style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>시리즈 없음</td></tr>;
+  }
+  return (
+    <>
+      {tree.map((s, si) => {
+        const key = `${studyId}|${s.series_uid}`;
+        return (
+          <Fragment key={key}>
+            <tr style={{ background: "rgba(56,108,173,0.10)" }} onDoubleClick={onOpen}>
+              {pad}
+              <td colSpan={colSpan} style={{ paddingLeft: 26, fontSize: 12 }}>
+                <span style={{ ...TREE_MARK, marginRight: 7 }}
+                      title={expSeries.has(key) ? "Image 접기" : "Image 펼치기"}
+                      onClick={(e) => { e.stopPropagation(); toggleSeries(key); }}
+                      onDoubleClick={(e) => e.stopPropagation()}>
+                  {expSeries.has(key) ? "−" : "＋"}
+                </span>
+                📚 Series {s.series_number || si + 1} · {s.modality} · {s.instances.length}장
+                <span style={{ color: "var(--text-secondary)" }}> {s.series_desc}</span>
+              </td>
+            </tr>
+            {expSeries.has(key) && s.instances.map((inst, ii) => (
+              <tr key={inst.sop_uid} onDoubleClick={onOpen}>
+                {pad}
+                <td colSpan={colSpan}
+                    style={{ paddingLeft: 58, fontSize: 11.5, color: "var(--text-secondary)" }}>
+                  🖼 Image {inst.instance_number || ii + 1}
+                  {inst.rows ? ` · ${inst.rows}×${inst.cols}px` : ""}
+                  <span style={{ opacity: 0.6 }}> · …{inst.sop_uid.slice(-12)}</span>
+                </td>
+              </tr>
+            ))}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
+/* ── [C] 메인 검사 그리드 (컬럼 구성형) ───────────── */
+function StudyGrid({
+  items, columns, selectedId, selectedIds, onSelect, onOpen, onContext, variant, treeDisabled,
+}: {
+  items: StudyRow[];
+  columns: string[];
+  selectedId: number | null;
+  selectedIds?: Set<number>;   // 다중선택 집합(Shift 범위/Ctrl 토글). 없으면 단일(selectedId)만.
+  onSelect: (row: StudyRow, e?: React.MouseEvent) => void;
+  onOpen: (row: StudyRow) => void;
+  onContext: (e: React.MouseEvent, row: StudyRow) => void;
+  variant?: "infi";
+  /** LOCAL 모드 — Series 펼침(＋)은 서버 seriesTree 라 숨김(로컬 id 오호출 방지) */
+  treeDisabled?: boolean;
+}) {
+  const infi = variant === "infi";
+  // Exam → Series → Image 계층 확장: '＋' 클릭=아래로 전개('−'로 전환), 다시 클릭=접기
+  const { expanded, expSeries, trees, toggleExam, toggleSeries } = useSeriesTree();
   const span = columns.length + 2;   // 토글 + # + 컬럼들
-  const markStyle: React.CSSProperties = {
-    cursor: "pointer", color: "var(--accent)", fontWeight: 700, userSelect: "none",
-  };
+  const markStyle = TREE_MARK;
   return (
     <div style={{ overflow: "auto", flex: 1, minWidth: 0 }}>
       <table className={infi ? "grid-table grid-infi" : "grid-table"}>
@@ -1051,48 +1119,11 @@ function StudyGrid({
                 <td style={{ color: "var(--text-secondary)" }}>{i + 1}</td>
                 {columns.map((c) => <td key={c}>{COLUMN_DEFS[c]?.render(row)}</td>)}
               </tr>
-              {/* 1단계: Series 행들 */}
+              {/* Series → Image 행들 (과거검사 패널과 같은 렌더) */}
               {!treeDisabled && expanded.has(row.id) && (
-                trees[row.id] === null ? (
-                  <tr><td /><td colSpan={span - 1}
-                          style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>
-                    시리즈 로딩…
-                  </td></tr>
-                ) : (trees[row.id] ?? []).length === 0 ? (
-                  <tr><td /><td colSpan={span - 1}
-                          style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>
-                    시리즈 없음
-                  </td></tr>
-                ) : (trees[row.id] ?? []).map((s, si) => (
-                  <Fragment key={s.series_uid}>
-                    <tr style={{ background: "rgba(56,108,173,0.10)" }}
-                        onDoubleClick={() => onOpen(row)}>
-                      <td />
-                      <td colSpan={span - 1} style={{ paddingLeft: 26, fontSize: 12 }}>
-                        <span style={{ ...markStyle, marginRight: 7 }}
-                              title={expSeries.has(s.series_uid) ? "Image 접기" : "Image 펼치기"}
-                              onClick={(e) => { e.stopPropagation(); toggleSeries(s.series_uid); }}
-                              onDoubleClick={(e) => e.stopPropagation()}>
-                          {expSeries.has(s.series_uid) ? "−" : "＋"}
-                        </span>
-                        📚 Series {s.series_number || si + 1} · {s.modality} · {s.instances.length}장
-                        <span style={{ color: "var(--text-secondary)" }}> {s.series_desc}</span>
-                      </td>
-                    </tr>
-                    {/* 2단계: Image(인스턴스) 행들 */}
-                    {expSeries.has(s.series_uid) && s.instances.map((inst, ii) => (
-                      <tr key={inst.sop_uid} onDoubleClick={() => onOpen(row)}>
-                        <td />
-                        <td colSpan={span - 1}
-                            style={{ paddingLeft: 58, fontSize: 11.5, color: "var(--text-secondary)" }}>
-                          🖼 Image {inst.instance_number || ii + 1}
-                          {inst.rows ? ` · ${inst.rows}×${inst.cols}px` : ""}
-                          <span style={{ opacity: 0.6 }}> · …{inst.sop_uid.slice(-12)}</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </Fragment>
-                ))
+                <SeriesTreeRows studyId={row.id} tree={trees[row.id]}
+                                expSeries={expSeries} toggleSeries={toggleSeries}
+                                colSpan={span - 1} lead={1} onOpen={() => onOpen(row)} />
               )}
             </Fragment>
           ))}
@@ -1108,25 +1139,54 @@ function StudyGrid({
   );
 }
 
-/* ── [D-좌] 과거검사 (선택 환자, F-14) ────────────── */
-function PriorStudiesGrid({ detail, onAddCompare }: {
+/* ── [D-좌] 과거검사 (선택 환자, F-14) ──────────────
+   메인 그리드와 같은 '＋' 계층(Series → Image)을 쓰고, **더블클릭은 영상 열기**다.
+   비교세트 추가는 예전에 더블클릭이 맡았지만 열기와 겹칠 수 없어 행 끝의 ⇄ 버튼으로 옮겼다
+   (과거영상은 '열어 본다'가 '비교세트에 담는다'보다 훨씬 잦은 동작이다). */
+function PriorStudiesGrid({ detail, onAddCompare, onOpen }: {
   detail: StudyDetail | null;
   onAddCompare: (e: { id: number; study_uid: string; study_date: string; modality: string; study_desc: string }) => void;
+  onOpen: (id: number) => void;
 }) {
+  const { expanded, expSeries, trees, toggleExam, toggleSeries } = useSeriesTree();
+  const span = 5;   // 토글 + 검사일 + MOD + 검사명 + 상태 (⇄ 는 상태 칸 안)
   return (
-    <PanelBox title={`과거검사 ${detail ? `— ${detail.patient_name}` : ""} (더블클릭=비교세트 추가)`}>
+    <PanelBox title={`과거검사 ${detail ? `— ${detail.patient_name}` : ""} (＋ 펼치기 · 더블클릭=열기 · ⇄ 비교세트)`}>
       <table className="grid-table">
-        <thead><tr><th>검사일</th><th>MOD</th><th>검사명</th><th>상태</th></tr></thead>
+        <thead>
+          <tr>
+            <th style={{ width: 22 }} />
+            <th>검사일</th><th>MOD</th><th>검사명</th><th>상태</th>
+          </tr>
+        </thead>
         <tbody>
           {(detail?.related_exams ?? []).map((e) => (
-            <tr key={e.id} onDoubleClick={() => onAddCompare(e)}>
-              <td>{e.study_date}</td><td>{e.modality}</td>
-              <td title={e.study_desc}>{e.study_desc}</td>
-              <td><StatusBadge status={e.status} /></td>
-            </tr>
+            <Fragment key={e.id}>
+              <tr onDoubleClick={() => onOpen(e.id)} style={{ userSelect: "none" }}>
+                <td style={{ ...TREE_MARK, textAlign: "center" }}
+                    title={expanded.has(e.id) ? "접기" : "Series/Image 펼치기"}
+                    onClick={(ev) => { ev.stopPropagation(); toggleExam(e.id); }}
+                    onDoubleClick={(ev) => ev.stopPropagation()}>
+                  {expanded.has(e.id) ? "−" : "＋"}
+                </td>
+                <td>{e.study_date}</td><td>{e.modality}</td>
+                <td title={e.study_desc}>{e.study_desc}</td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  <StatusBadge status={e.status} />
+                  <button title="비교세트에 추가" style={{ padding: "0 6px", fontSize: 11, marginLeft: 6 }}
+                          onClick={(ev) => { ev.stopPropagation(); onAddCompare(e); }}
+                          onDoubleClick={(ev) => ev.stopPropagation()}>⇄</button>
+                </td>
+              </tr>
+              {expanded.has(e.id) && (
+                <SeriesTreeRows studyId={e.id} tree={trees[e.id]}
+                                expSeries={expSeries} toggleSeries={toggleSeries}
+                                colSpan={span - 1} lead={1} onOpen={() => onOpen(e.id)} />
+              )}
+            </Fragment>
           ))}
           {(!detail || detail.related_exams.length === 0) && (
-            <tr><td colSpan={4} style={{ color: "var(--text-secondary)" }}>
+            <tr><td colSpan={span} style={{ color: "var(--text-secondary)" }}>
               {detail ? "과거 검사 없음" : "검사를 선택하세요"}
             </td></tr>
           )}
@@ -2414,7 +2474,13 @@ export function Worklist() {
   const selAnchorRef = useRef<number | null>(null);   // Shift 범위 기준점(마지막 단일/토글 클릭)
   const [compareSet, setCompareSet] = useState<CompareItem[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
+  // 목록 갱신 정책 — 기본은 **수동**(SEARCH 를 눌러야 갱신). 설정 > 환경에서 자동/초 지정.
+  // 예전에는 값이 없으면 10초 자동이었고, Live 는 사용자 설정과 무관하게 5초로 강제됐다.
+  // 판독 중에 목록이 저 혼자 움직이는 것이 방해가 된다는 지적이 있어 기본을 뒤집었다.
+  const [refreshMode, setRefreshMode] = useState<"manual" | "auto">("manual");
   const [refreshSec, setRefreshSec] = useState(10);
+  // 수동 모드에서 원격(A)에 변경이 감지되면 목록을 바꾸지 않고 **알리기만** 한다.
+  const [pendingChange, setPendingChange] = useState(false);
   // SEARCH 실행 시각 피드백 — 재조회 시작 시 그리드 깜빡임 (동일 keyframes 2개를 번갈아 써서 연속 클릭에도 재시작)
   const [searchFlash, setSearchFlash] = useState(0);
   const flashMountRef = useRef(false);
@@ -2639,14 +2705,24 @@ export function Worklist() {
   const loadWlPrefs = useCallback(() => {
     api.getSetting("worklist.prefs").then((r) => {
       const v = r.value as {
-        auto_refresh_sec?: number; default_status?: string; columns?: string[];
+        auto_refresh_sec?: number; refresh_mode?: string; default_status?: string; columns?: string[];
         find_fields?: string[]; dbl_action?: "viewer2d" | "ohif";
         by_viewer?: { sv?: string[] | null; ty?: string[] | null; infi?: string[] | null };
         panel_order?: { d?: string[]; e?: string[] };
       };
       // 원본 prefs 보관 — 뷰어별 해석/병합 저장의 기준값(panels_by_viewer/sizes_by_viewer 포함)
       wlPrefsRef.current = (r.value ?? {}) as Record<string, unknown>;
-      if (v.auto_refresh_sec !== undefined) setRefreshSec(v.auto_refresh_sec);
+      // 구 설정 이관: refresh_mode 가 없으면 auto_refresh_sec 으로 유추한다.
+      //   없음 → 수동(새 기본)  ·  0 → 수동('끔'이었던 것)  ·  >0 → 자동 그 초
+      if (v.refresh_mode === "auto" || v.refresh_mode === "manual") {
+        setRefreshMode(v.refresh_mode);
+        if (v.auto_refresh_sec) setRefreshSec(v.auto_refresh_sec);
+      } else if (v.auto_refresh_sec) {
+        setRefreshMode("auto");
+        setRefreshSec(v.auto_refresh_sec);
+      } else {
+        setRefreshMode("manual");
+      }
       if (v.default_status) setFilters((f) => ({ ...f, status: v.default_status! }));
       // 공통 컬럼(read_state 도입 전 저장분엔 판독 컬럼을 맨 앞에 가산 보정) + 뷰어별 오버라이드
       if (v.columns?.length) {
@@ -2804,26 +2880,34 @@ export function Worklist() {
   }, [items, filters.modality]);
 
   useEffect(() => {
-    // LIVE 모드 — 실시간 반영을 위해 5초 폴링 고정(원격 A 자체 클라이언트와 동일한 실시간성)
-    const sec = liveMode ? Math.min(refreshSec || 5, 5) : refreshSec;
-    if (!sec) return;
+    // 자동일 때만 주기 갱신. 수동이면 타이머를 아예 만들지 않는다.
+    // ⚠ 예전에는 Live 를 min(sec||5, 5) 로 **강제**해 '끔' 으로 둬도 5초마다 목록이 바뀌었다.
+    //   Live 야말로 판독 중 목록이 흔들리면 곤란한 모드라 강제를 없앴다.
+    if (refreshMode !== "auto") return;
+    const sec = Math.max(1, refreshSec || 10);
     const t = setInterval(() => setRefreshKey((k) => k + 1), sec * 1000);
     return () => clearInterval(t);
-  }, [refreshSec, liveMode]);
+  }, [refreshMode, refreshSec]);
 
   // ⚡ LIVE — A SSE(`/see/stream`) 변경 감지. A 서버에 이미 있는 SSE 를 백엔드가 구독하고,
   // 여기서는 그 리비전(rev)만 가볍게 확인해 **바뀌었을 때만** 목록을 재조회한다.
   // (위 5초 폴링은 SSE 미연결·구버전 A 를 위한 폴백으로 그대로 둔다 — 이중 안전)
   const sseRevRef = useRef<number | null>(null);
+  // 모드를 effect 의존성에 넣으면 설정을 바꿀 때마다 SSE 구독이 끊겼다 붙는다 → ref 로 읽는다
+  const refreshModeRef = useRef(refreshMode);
+  useEffect(() => { refreshModeRef.current = refreshMode; }, [refreshMode]);
   useEffect(() => {
     if (!liveMode) { sseRevRef.current = null; return; }
     let stop = false;
     const tick = () => api.liveSseStatus().then((s) => {
       if (stop || !s.connected) return;                  // 미연결 → 폴링 폴백에 맡김
       if (sseRevRef.current === null) { sseRevRef.current = s.rev; return; }
-      if (s.rev !== sseRevRef.current) {                  // 원격 변경 발생 → 즉시 반영
+      if (s.rev !== sseRevRef.current) {                  // 원격 변경 발생
         sseRevRef.current = s.rev;
-        setRefreshKey((k) => k + 1);
+        // 자동이면 즉시 반영, 수동이면 목록을 건드리지 않고 **알리기만** 한다
+        // (수동의 뜻은 '내가 SEARCH 를 누를 때만 바뀐다' 이므로 여기서 바꾸면 약속을 깬다).
+        if (refreshModeRef.current === "auto") setRefreshKey((k) => k + 1);
+        else setPendingChange(true);
       }
     }).catch(() => { /* 상태 조회 실패는 무시 — 폴링이 커버 */ });
     tick();
@@ -2903,9 +2987,17 @@ export function Worklist() {
     if (selected) api.study(selected.id).then(setSelected);
   }, [selected]);
 
+  // SEARCH — 수동 모드에서 목록이 바뀌는 **유일한** 경로. 대기 중 알림도 여기서 내린다.
+  const runSearch = useCallback(() => {
+    setPendingChange(false);
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   const openStudy = useCallback((row: StudyRow | StudyDetail) => {
     openViewer(row.study_uid, hpFor(row.modality));
   }, []);
+
+
 
   // 자체 뷰어 오픈 — 새 창(별도 웹페이지, ?viewer=2d)으로 연다. lastViewerRef = UBPACS "기존 영상"
   const openV2 = useCallback((cfg: {
@@ -3026,6 +3118,16 @@ export function Worklist() {
       }
     });
   }, []);
+
+  // 과거검사 열기 — related_exams 는 요약(id/uid/일자/모달리티/검사명)만 담고 있어 상세를 한 번 받는다.
+  // 그래야 워크리스트에서 여는 것과 **완전히 같은 경로**(openV2)를 타서 탭 누적·모니터 배치가 일치한다.
+  // LOCAL 모드는 서버 상세가 없으므로 막는다(로컬 id 로 서버를 부르면 엉뚱한 검사가 열린다).
+  const openPrior = useCallback((id: number) => {
+    if (localMode) { alert("LOCAL 모드에서는 과거검사를 열 수 없습니다"); return; }
+    void api.study(id)
+      .then((d) => openV2({ detail: d }))
+      .catch((e) => alert(`검사를 열 수 없습니다: ${e instanceof Error ? e.message : String(e)}`));
+  }, [openV2, localMode]);
 
   // 선택 + 3창 동기(Viewer·Reading이 같은 환자를 따라감). 포커스만 바뀌는 경로 → 다중선택은 그 행으로 축소(stale 하이라이트/카운트 방지)
   const selectAndSync = useCallback((d: StudyDetail) => {
@@ -3695,13 +3797,29 @@ export function Worklist() {
       )}
       <ActionToolbar selected={selected} onAction={(a) => doAction(a)}
                      searchText={searchText} setSearchText={setSearchText}
-                     onSearch={() => setRefreshKey((k) => k + 1)}
+                     onSearch={runSearch}
                      onNlSearch={onNlSearch}
                      withOpen={withOpen} setWithOpen={setWithOpen}
                      withOpenMode={withOpenMode} setWithOpenMode={setWithOpenMode}
                      ohifOn={ohifOn} allowed={allowedAction} />
       <FilterBar filters={filters} setFilters={setFilters} fields={findFields}
-                 onSearch={() => setRefreshKey((k) => k + 1)} />
+                 onSearch={runSearch} />
+
+      {/* 수동 갱신 중 원격(A)에 변경이 생겼을 때 — 목록은 그대로 두고 알리기만 한다.
+          판독 중 목록이 저 혼자 바뀌지 않으면서도 '새 검사가 왔다'는 사실은 놓치지 않게. */}
+      {pendingChange && refreshMode === "manual" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 12px",
+                      background: "rgba(250,204,21,0.14)", borderBottom: "1px solid var(--border)",
+                      fontSize: 12 }}>
+          <b>원격 워크리스트에 변경이 있습니다</b>
+          <span style={{ color: "var(--text-secondary)" }}>
+            수동 갱신 모드라 목록을 그대로 두었습니다 — 설정 &gt; 환경에서 자동으로 바꿀 수 있습니다.
+          </span>
+          <button className="primary" style={{ marginLeft: "auto", padding: "2px 12px" }}
+                  onClick={runSearch}>지금 갱신</button>
+          <button style={{ padding: "2px 10px" }} onClick={() => setPendingChange(false)}>닫기</button>
+        </div>
+      )}
 
       {/* 다중선택 상태 바 — Shift(범위)/Ctrl·Cmd(개별) 로 여러 Exam 선택 시 표시 */}
       {selectedIds.size > 1 && (
@@ -3795,7 +3913,7 @@ export function Worklist() {
                 <Splitter dir="h" onEnd={() => endInfiRegion("related")} onReset={() => resetInfiRegion("priorH")}
                           onDrag={(dy) => dragInfiRegion("related", "priorH", 40, 320, dy)} />
                 <div style={{ height: infiSz.priorH, flexShrink: 0, display: "flex" }}>
-                  <PriorStudiesGrid detail={selected}
+                  <PriorStudiesGrid detail={selected} onOpen={openPrior}
                                     onAddCompare={(e) => setCompareSet((prev) =>
                                       prev.some((c) => c.study_uid === e.study_uid) ? prev : [...prev, e])} />
                 </div>
@@ -3856,7 +3974,7 @@ export function Worklist() {
             <DraggablePanel key={k} zone="d" k={k} onDrop={onPanelDrop} onHide={() => setPanelShown(k, false)} style={{ flex: 1 }}>
               {k === "orders" ? <OrdersPanel refreshKey={refreshKey} />
                 : k === "prior" ? (
-                  <PriorStudiesGrid detail={selected}
+                  <PriorStudiesGrid detail={selected} onOpen={openPrior}
                                     onAddCompare={(e) => setCompareSet((prev) =>
                                       prev.some((c) => c.study_uid === e.study_uid) ? prev : [...prev, e])} />
                 ) : (
