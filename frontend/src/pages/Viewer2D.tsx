@@ -10,7 +10,7 @@ import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewe
 import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
 import {
-  DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgRatioBox, mgStamp, mgWallByCol,
+  DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgReadable, mgRatioBox, mgStamp, mgWallByCol,
   mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
@@ -662,6 +662,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   const [mgOn, setMgOn] = useState(DEFAULT_MG_CFG.on);
   const [mgBoxes, setMgBoxes] = useState<Record<string, MgProbe>>({});   // SOP → 조직 경계 탐지 결과
+  const mgCfgRef = useRef(mgCfg);
+  useEffect(() => { mgCfgRef.current = mgCfg; }, [mgCfg]);
   const [prevDone, setPrevDone] = useState<Record<string, true>>({});   // 원본이 한 번 뜬 SOP
   const [mgReady, setMgReady] = useState(false);   // viewer.prefs 로드 완료(행잉 경합 방지)
   // 모서리 오버레이 구성(모달리티별) — 설정 > 뷰어 공통 > 영상 정보 표시
@@ -2999,6 +3001,32 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                             p.flipH, p.flipV, mgForceZoom(sz, inst), side));
   };
   mgAtRef.current = mgAt;
+
+  // ── onLoad 를 놓친 프레임 회수 ────────────────────────────────────────────
+  // 브라우저 캐시에 이미 있는 프레임은 React 가 onLoad 핸들러를 붙이기 전에 load 가
+  // 끝나 버릴 수 있다. 그러면 경계상자가 영영 안 생겨 **그 프레임만** 2D-MG 가 안 먹는다
+  // ("간헐적으로 적용이 안 된다"의 나머지 절반). 화면에 떠 있는 MG 이미지 중 상자가 없는
+  // 것을 짧게 훑어 줍는다. 주울 것이 없으면 스스로 멈춘다(상시 타이머를 두지 않는다).
+  const mgBoxesRef = useRef(mgBoxes);
+  useEffect(() => { mgBoxesRef.current = mgBoxes; }, [mgBoxes]);
+  useEffect(() => {
+    let tries = 0;
+    let timer = 0;
+    const sweep = () => {
+      let pending = 0;
+      document.querySelectorAll<HTMLImageElement>("img[data-sv-sop]").forEach((el) => {
+        const sop = el.dataset.svSop || "";
+        if (!sop || mgBoxesRef.current[sop]) return;
+        if (!mgReadable(el)) { pending++; return; }      // 아직 디코드 전 — 다음 차례에
+        const b = mgProbe(sop, el, mgCfgRef.current.thr);
+        setMgBoxes((m) => (m[sop] ? m : { ...m, [sop]: b }));
+      });
+      // 아직 디코드 안 된 것이 남아 있고 시도 여유가 있으면 한 번 더(최대 약 6초)
+      if (pending && ++tries < 20) timer = window.setTimeout(sweep, 300);
+    };
+    timer = window.setTimeout(sweep, 0);
+    return () => window.clearTimeout(timer);
+  }, [mgOn, series, panes]);
   /** MG 프레임이 뜨면 조직 경계상자 산출(추가 네트워크 없음). 체크 해제 상태에서도 미리 구해 둔다. */
   const mgOnImgLoad = (p: PaneState, sop: string | undefined, el: HTMLImageElement) => {
     if (!sop) return;
@@ -3161,6 +3189,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                                 objectFit: "contain", filter: paneFilter(p) }} />
                 )}
                 <img src={url} alt="" draggable={false}
+                     data-sv-sop={inst?.sop_uid}
                      onLoad={(e) => mgOnImgLoad(p, inst?.sop_uid, e.currentTarget)}
                      style={{
                        position: "absolute", inset: 0,
@@ -3206,6 +3235,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                       )}
                       {u && (
                         <img src={u} alt="" draggable={false}
+                             data-sv-sop={ti?.sop_uid}
                              onLoad={(e) => mgOnImgLoad(p, ti?.sop_uid, e.currentTarget)}
                              style={{
                                position: "absolute", inset: 0,

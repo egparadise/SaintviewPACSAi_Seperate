@@ -171,12 +171,23 @@ function _remember(ck: string, out: MgProbe): MgProbe {
   return out;
 }
 
-/** 화면에 이미 뜬 <img> 에서 조직 경계상자 산출(동기, 추가 네트워크 0. SOP+임계 캐시). */
+/** 이 이미지를 지금 분석할 수 있는가 — 디코드가 끝나야 캔버스에 그릴 수 있다. */
+export const mgReadable = (img: HTMLImageElement | null | undefined): boolean =>
+  !!img && img.complete && img.naturalWidth > 1 && img.naturalHeight > 1;
+
+/** 화면에 이미 뜬 <img> 에서 조직 경계상자 산출(동기, 추가 네트워크 0. SOP+임계 캐시).
+ *
+ * ⚠ **아직 디코드되지 않은 이미지는 캐시하지 않는다.** 예전에는 그 경우에도 analyze 가
+ *   blind 를 돌려주고 그것이 BOXES 에 **영구 저장**돼, 한 번 이르게 물어본 SOP 는 그 세션
+ *   내내 2D-MG 보정을 받지 못했다. "간헐적으로 적용이 안 된다"의 정체가 이것이다
+ *   (브라우저 캐시에 있어 빨리 뜬 프레임일수록 더 잘 걸렸다).
+ *   실패는 캐시하지 않는다 — URL 경로(mgProbeUrl)가 이미 같은 규칙을 쓴다. */
 export function mgProbe(sop: string, img: HTMLImageElement, thr: number): MgProbe {
   if (!sop) return { kind: "blind" };
   const ck = _key(sop, thr);
   const hit = BOXES.get(ck);
   if (hit !== undefined) return hit;
+  if (!mgReadable(img)) return { kind: "blind" };   // 다음 기회에 다시 — 기억하지 않는다
   return _remember(ck, analyze(img, thr));
 }
 
