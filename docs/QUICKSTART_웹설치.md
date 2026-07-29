@@ -55,6 +55,9 @@ cd backend && py -3.11 seed_sample.py
 접속·로그인:
 - 브라우저 `https://localhost:5180` (원격은 `https://<뷰어서버IP>:5180`) — 최초 1회 인증서 경고 통과
 - 병원 `SAMPLE01` / 계정 `sample_admin` / 비번 `sample1234` (**운영 전 반드시 변경**)
+  - 로그인 칸은 비어 있다 — 직접 입력한다. 시드 계정을 미리 채워 두면 브라우저가 그 값을
+    자격증명으로 저장해 워크리스트 **SEARCH** 칸에 `Sample01` 이 자동완성되는 사고가 있었다.
+  - 이미 저장된 PC: `chrome://password-manager/passwords` → 이 사이트 항목(사용자 이름 `Sample01`) 삭제.
 
 ---
 

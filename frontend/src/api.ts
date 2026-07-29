@@ -1,5 +1,7 @@
 // API 클라이언트 — 백엔드 FastAPI
 import { registerLiveStudyUid } from "./lib/liveUids";
+import { opfsWipe } from "./lib/opfsStore";
+import { dlResetCache } from "./lib/dlCache";
 
 const BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 const OHIF_BASE = import.meta.env.VITE_OHIF_BASE ?? "http://localhost:3000";
@@ -89,6 +91,11 @@ function serverLogout(prevToken: string) {
   } catch { /* 무시 */ }
 }
 
+/** 마지막 저장본 삭제 작업 — 진행 중이면 그 Promise, 아니면 즉시 완료.
+ *  401 처리기가 window.location.reload() **전에** 이것을 기다린다(최대 3초). */
+let lastWipe: Promise<void> | null = null;
+export function opfsWipeDone(): Promise<void> { return lastWipe ?? Promise.resolve(); }
+
 export function setToken(t: string | null, remember = false) {
   const prev = token;
   token = t;
@@ -103,8 +110,22 @@ export function setToken(t: string | null, remember = false) {
   //   판독 중이던 탭의 <img> 만 401 이 된다(JWT 는 그 탭 sessionStorage 에 멀쩡해서 JSON API 는
   //   200 → 화면에 오류가 뜨지 않는다). 토큰이 없던 호출자는 서버에 끊을 세션도 없으므로
   //   logout 을 보낼 이유가 애초에 없다. 서버도 같은 원인을 막는다(auth.logout has_credential).
-  else if (prev) serverLogout(prev);
+  else if (prev) {
+    serverLogout(prev);
+    // ★ 다운로드 모드 저장본 폐기 — 로그아웃·세션 만료·계정 전환 어느 경로든 여기를 지난다
+    //   (App.logout 의 setToken(null), req() 401 처리기). 환자 영상이 브라우저에 남는 표면을
+    //   새로 만드는 일이라, 자격이 사라지는 순간 저장본도 함께 사라져야 한다 — sv_pix 폐기와 같은 논리.
+    // ⚠ 순서: **다운로더를 먼저 세우고** 지운다(워크리스트 로그아웃 버튼과 같은 규칙).
+    //   안 세우면 in-flight 였던 fetch 가 삭제 뒤에 opfsPut 으로 트리를 되살린다.
+    //   dlScheduler 를 직접 import 하면 순환(dlScheduler → api)이라 이벤트로 알린다.
+    try { window.dispatchEvent(new Event("sv-auth-cleared")); } catch { /* 무시 */ }
+    dlResetCache();
+    // ★ 삭제 Promise 를 보관한다 — 401 처리기가 reload 전에 이것을 기다린다.
+    //   기다리지 않고 reload 하면 삭제가 중간에 끊겨 파일이 남을 수 있다(opfsWipe 참조).
+    lastWipe = opfsWipe().catch(() => {});
+  }
 }
+
 
 export function hasToken() {
   return !!token;
@@ -177,8 +198,15 @@ async function reqRaw<T>(path: string, init?: RequestInit): Promise<T> {
       continue;
     }
     if (res.status === 401) {
+      // ★ 저장본 삭제가 끝난 **뒤에** 리로드한다.
+      //   예전에는 setToken(null) 바로 뒤에 reload 를 때렸는데, setToken 안의 삭제는 대기하지
+      //   않는 `void opfsWipe()` 라 리로드가 JS 컨텍스트를 내리면서 삭제가 중간에 끊겼다 —
+      //   공용 판독 PC 의 OPFS 에 환자 영상이 그대로 남는다(opfsStore.opfsWipe 주석의 그 사고).
+      //   워크리스트 로그아웃 버튼이 이미 쓰는 처리(Promise.race + 3초)를 세션 만료에도 적용한다.
+      //   세션 만료는 로그아웃 버튼보다 흔한 경로다.
       setToken(null);
-      window.location.reload();
+      void Promise.race([opfsWipeDone(), new Promise((r) => setTimeout(r, 3000))])
+        .finally(() => window.location.reload());
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

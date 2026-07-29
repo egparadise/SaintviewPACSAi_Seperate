@@ -147,18 +147,23 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
           </span>
         </div>
 
+        {/* ⚠ 이 접속설정은 **자체 <form> 으로 격리**한다. form 밖에 type=password 가 떠 있으면
+            크롬이 문서 전체를 '주인 없는(unowned) 합성 로그인 폼'으로 묶어, 같은 문서의 이름 없는
+            텍스트 필드(워크리스트 SEARCH 등)에 저장된 자격증명을 자동완성으로 채워 넣는다.
+            로그인 폼이 아니므로 autoComplete="off" + new-password 로 저장 후보에서도 뺀다. */}
         {isAdmin && cfgOpen && cfg && (
-          <div style={{ margin: "10px 0", padding: 10, border: "1px solid var(--border)",
-                        borderRadius: 6, display: "flex", flexWrap: "wrap", gap: 8,
-                        alignItems: "center", fontSize: 12 }}>
+          <form autoComplete="off" onSubmit={(e) => e.preventDefault()}
+                style={{ margin: "10px 0", padding: 10, border: "1px solid var(--border)",
+                         borderRadius: 6, display: "flex", flexWrap: "wrap", gap: 8,
+                         alignItems: "center", fontSize: 12 }}>
             <label><input type="checkbox" checked={cfg.enabled}
                           onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} /> 브리지 사용</label>
             <label>원격 주소 <input style={{ ...inp, width: 240 }} placeholder="https://api.inviz.co.kr"
-                                 value={cfg.base_url}
+                                 value={cfg.base_url} name="wp-base-url" autoComplete="off"
                                  onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })} /></label>
-            <label>계정 ID <input style={inp} value={cfg.user_id}
+            <label>계정 ID <input style={inp} value={cfg.user_id} name="wp-user-id" autoComplete="off"
                                 onChange={(e) => setCfg({ ...cfg, user_id: e.target.value })} /></label>
-            <label>비밀번호 <input style={inp} type="password"
+            <label>비밀번호 <input style={inp} type="password" name="wp-password" autoComplete="new-password"
                                 placeholder={cfg.has_password ? "(저장됨 — 변경 시 입력)" : ""}
                                 value={pw} onChange={(e) => setPw(e.target.value)} /></label>
             <label title="자체서명 HTTPS 원격이면 해제">
@@ -170,26 +175,32 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
             <label>최신 <input style={{ ...inp, width: 48 }} type="number" min={1} max={200}
                              value={cfg.auto_sync_limit}
                              onChange={(e) => setCfg({ ...cfg, auto_sync_limit: Number(e.target.value) || 20 })} /> 건</label>
-            <button onClick={saveCfg} style={{ fontSize: 11, fontWeight: 700 }}>저장</button>
-            <button onClick={testConn} style={{ fontSize: 11 }}>연결 테스트</button>
+            {/* form 안의 button 은 기본이 submit 이라 페이지가 리로드된다 — 반드시 type="button" */}
+            <button type="button" onClick={saveCfg} style={{ fontSize: 11, fontWeight: 700 }}>저장</button>
+            <button type="button" onClick={testConn} style={{ fontSize: 11 }}>연결 테스트</button>
             {testMsg && <span style={{ fontSize: 11 }}>{testMsg}</span>}
             <div style={{ flexBasis: "100%", color: "var(--text-secondary)", fontSize: 11 }}>
               원격 계정은 인계 PACS 의 PACS 사용자(user_type P)여야 하며, 영상은 원격 서버가
               복호화한 DICOM(DICOMweb v2)으로 수신합니다 — MinIO 암호화 키 불필요.
             </div>
-          </div>
+          </form>
         )}
 
         {/* 검색 바 */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "10px 0", fontSize: 12,
                       alignItems: "center" }}>
+          {/* 검색 칸에도 name/autoComplete 를 준다 — 이름 없는 텍스트 필드는 크롬 자동완성이
+              username 후보로 오인해 저장된 자격증명을 채워 넣는다(SEARCH 칸 오염 사고) */}
           <input style={{ ...inp, width: 150 }} placeholder="통합 검색" value={q}
+                 name="wp-q" autoComplete="off" spellCheck={false}
                  onChange={(e) => setQ(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && void search()} />
           <input style={inp} placeholder="환자 ID" value={pid}
+                 name="wp-pid" autoComplete="off" spellCheck={false}
                  onChange={(e) => setPid(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && void search()} />
           <input style={inp} placeholder="환자 이름" value={pname}
+                 name="wp-pname" autoComplete="off" spellCheck={false}
                  onChange={(e) => setPname(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && void search()} />
           <select style={{ padding: "3px 4px", fontSize: 12 }} value={modality}

@@ -48,6 +48,35 @@ export function renderedParams(hasQuery: boolean): string {
   return "";
 }
 
+/* ── 다운로드 모드(선다운로드 저장본) 전용 형식 ──────────────────────────────
+ * 저장본은 **한 번 구워서 오래 쓰는** 바이트라 회선 상태에 따라 형식이 흔들리면 안 된다
+ * (같은 이미지가 회선별로 다른 바이트가 되어 캐시가 갈린다). 그렇다고 renderedParams 를
+ * 통째로 버리면 **관리자의 '무손실 PNG' 진단 품질 설정까지 같이 버리게 된다** — 실제로
+ * 그랬다: dlScheduler 가 accept=image/jpeg&quality=90 을 하드코딩해, PNG 로 판독하도록
+ * 설정한 병원에서 다운로드 모드를 켜는 순간 화면이 아무 표시 없이 손실 JPEG 으로 강등됐다.
+ * 그래서 **관리자 명시 설정(png/jpeg)은 그대로 따르고, 회선 자동판정만 배제**한다.
+ * (default 는 서버 기본과 같은 뜻이므로 저장본에서는 JPEG q90 으로 고정한다 — 회선 의존 제거.) */
+export function fixedImageFormat(): { format: "png" | "jpeg"; quality: number } {
+  if (IMG_FMT.format === "png") return { format: "png", quality: 0 };
+  if (IMG_FMT.format === "jpeg") return { format: "jpeg", quality: IMG_FMT.quality };
+  return { format: "jpeg", quality: 90 };
+}
+
+/** 저장본 rendered 파라미터 — 회선 무관·관리자 설정 반영.
+ *  f 를 넘기면 그 스냅샷으로 만든다(한 검사를 받는 동안 형식이 바뀌어 섞이지 않게). */
+export function fixedRenderedParams(hasQuery = false, f = fixedImageFormat()): string {
+  const sep = hasQuery ? "&" : "?";
+  return f.format === "png" ? `${sep}accept=image/png`
+                            : `${sep}accept=image/jpeg&quality=${f.quality}`;
+}
+
+/** 저장본 형식 태그 — 캐시 키·파일명에 들어간다.
+ *  관리자가 형식을 바꾸면 **이미 받아 둔 바이트는 다른 형식**이므로 키가 갈려야 한다.
+ *  안 그러면 png 로 바꾼 뒤에도 예전 JPEG 저장본이 계속 히트해 설정이 조용히 안 먹는다. */
+export function fixedFormatTag(f = fixedImageFormat()): string {
+  return f.format === "png" ? "png" : `j${f.quality}`;
+}
+
 // HTJ2K 전송구문 — Orthanc 미지원이라 백엔드 스트리밍 프록시(/api/htj2k)로 프레임을 받는다
 const HTJ2K_UIDS = ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.202", "1.2.840.10008.1.2.4.203"];
 export function isHtj2kTs(): boolean { return HTJ2K_UIDS.includes(IMG_FMT.wado_ts ?? ""); }

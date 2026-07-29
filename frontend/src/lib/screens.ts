@@ -1,6 +1,8 @@
 // 모니터 배치 헬퍼 — Window Management API(Chrome)로 창 위치/크기 features 계산
 // (뷰어/워크리스트/판독 창 공용 — Setting>모니터에서 선택한 인덱스 사용)
 
+import { liveViewerSlots, noteViewerSlot, viewerSlotName } from "./viewerSlots";
+
 // getScreenDetails(모니터 감지) 사용 가능 여부 진단.
 // 가능하면 null, 불가하면 그 사유를 한국어 안내로 반환.
 // 핵심: 이 API 는 "보안 컨텍스트"(HTTPS 또는 localhost)에서만 window 에 노출된다.
@@ -66,10 +68,20 @@ export async function screenFeatures(
 /** 선택 모니터별 개별 창 배치 — 모니터 번호(인덱스) 오름차순.
  *  다중 모니터에 뷰어를 "각각" 띄우기 위한 것. 단일 스팬 창은 브라우저가 한 모니터로
  *  클램프하고, 비연속 선택(예: 1·3·4, 2 건너뜀) 시 사이 모니터까지 덮으므로 창을 나눈다.
- *  반환: 각 모니터의 {index, features}. 감지 불가·미선택이면 [{index:-1, features:fallback}]. */
+ *  반환: 각 모니터의 {index, features}. 감지 불가·미선택이면 [{index:-1, features:fallback}].
+ *
+ *  maxOpen(설정>모니터 '최대 열 영상 수', 0=선택 전부) 캡 인자는 여기서 적용하지만 **넘기는 쪽은
+ *  워크리스트 오픈 경로 하나뿐**이다. 설정 문구가 말하는 그 값의 뜻이 "검사를 열 때 순환할 모니터
+ *  개수"(=라운드로빈 슬롯 수)이기 때문이다.
+ *  ⚠ 한때 뷰어측(Compare·과거검사 '인접 모니터')에도 같은 캡을 넘겼다가, 라운드로빈이 쓰지도 않는
+ *    여분 모니터를 못 쓰게 만들어 기능만 깎였다(3모니터·max_open=2 → 비교 2건이 배치 포기하고
+ *    인플레이스 분할 폴백, max_open=1 → prior_mode="monitor" 가 항상 Layout 폴백). 정작 막고 싶던
+ *    "라운드로빈이 쓰는 모니터를 Compare 가 덮는 것"은 캡으로는 하나도 막히지 않았다(캡 안쪽 모니터가
+ *    바로 라운드로빈이 쓰는 모니터다). 그 보호는 placeCompareSlaves 가 살아 있는 슬롯을 회피해 처리한다. */
 export async function screenFeaturesList(
   indices: number[] | null | undefined,
   fallback = "width=1500,height=920",
+  maxOpen = 0,
 ): Promise<{ index: number; features: string }[]> {
   const sel = [...new Set((indices ?? []).filter((i) => i >= 0))].sort((a, b) => a - b);
   const screens = sel.length ? await getScreens() : null;
@@ -81,7 +93,9 @@ export async function screenFeaturesList(
       index: x.i,
       features: `left=${x.s.availLeft},top=${x.s.availTop},width=${x.s.availWidth},height=${x.s.availHeight}`,
     }));
-  return out.length ? out : [{ index: -1, features: fallback }];
+  if (!out.length) return [{ index: -1, features: fallback }];
+  const cap = Number(maxOpen) || 0;
+  return cap > 0 && out.length > cap ? out.slice(0, cap) : out;
 }
 
 /** 비교(Compare) slave 검사를 "다음 모니터"에 배치 — 기준(master) 모니터를 제외하고 master 다음부터 순환
@@ -101,7 +115,14 @@ export function placeCompareSlaves(
     : Number((masterName.match(/^sv_viewer_slot(\d+)$/) ?? [])[1]);
   const mi = Number.isFinite(mMon) ? slots.findIndex((s) => s.index === mMon) : -1;
   // master 다음부터 순환하는 나머지 모니터(= master 제외). mi 미확인 시 첫 슬롯을 master 로 간주.
-  const order = mi >= 0 ? [...slots.slice(mi + 1), ...slots.slice(0, mi)] : slots.slice(1);
+  const cyc = mi >= 0 ? [...slots.slice(mi + 1), ...slots.slice(0, mi)] : slots.slice(1);
+  // 라운드로빈이 **지금 쓰고 있는** 모니터는 뒤로 미룬다 — 비어 있는 모니터가 있는데도 살아 있는
+  // 검사 창을 덮어써 판독 중인 영상이 사라지는 것을 막는다(순서는 각 그룹 안에서 그대로 유지).
+  // 예전엔 이걸 max_open 캡으로 막으려 했는데, 캡 안쪽이 바로 라운드로빈이 쓰는 모니터라 효과가 0이었다.
+  // 전 모니터가 살아 있으면 두 그룹 중 하나가 비므로 결과는 종전과 동일(기능 축소 없음).
+  const live = liveViewerSlots();
+  const busy = (s: { index: number }) => live.has(viewerSlotName(s.index, slots[0].index));
+  const order = [...cyc.filter((s) => !busy(s)), ...cyc.filter(busy)];
   if (!order.length) return false;
   // 비교검사가 여유 모니터보다 많으면 각자 다른 모니터에 못 놓는다 → 같은 창을 덮어써 검사가 소실되므로
   // 배치를 포기하고 false 반환(호출부가 한 창 인플레이스 분할로 모두 표시 — 무손실).
@@ -116,14 +137,17 @@ export function placeCompareSlaves(
 
 // slave 뷰어 창 열기+배치 공통 — cmprole(녹색 라벨) + mm=1(공유 Exam 레지스트리 유지 — In-View 가
 // 환자 혼합 방지 필터로 레지스트리를 덮어쓰지 않게). 재사용 창은 open 좌표가 무시되므로 직접 이동.
-// 창 이름은 Worklist openV2 규약과 동일(최저번호 모니터="sv_viewer") — 같은 모니터 중복 창 방지.
+// 창 이름은 viewerSlotName 단일 출처(최저번호 모니터="sv_viewer") — 같은 모니터 중복 창 방지.
+// 뷰어가 스스로 여는 창도 워크리스트 라운드로빈과 같은 슬롯 장부에 기록해야 한다 — 안 그러면
+// 워크리스트가 "그 모니터엔 창이 없다"고 보고 사이클 시작(전 모니터 오픈)으로 오판한다.
 function openSlaveWindow(studyId: number, role: string, slot: { index: number; features: string },
                          firstIndex: number): boolean {
-  const name = slot.index === firstIndex ? "sv_viewer" : `sv_viewer_slot${slot.index}`;
+  const name = viewerSlotName(slot.index, firstIndex);
   const base = `${window.location.origin}${window.location.pathname}`;
   const url = `${base}?viewer=2d&study=${studyId}&cmprole=${encodeURIComponent(role)}&mm=1`;
   const w = window.open(url, name, slot.features);
   if (!w) return false;
+  noteViewerSlot(name, studyId);
   const m: Record<string, number> = {};
   for (const kv of slot.features.split(",")) { const [kk, vv] = kv.split("="); m[kk] = Number(vv); }
   if (![m.left, m.top, m.width, m.height].some((n) => n === undefined || Number.isNaN(n))) {

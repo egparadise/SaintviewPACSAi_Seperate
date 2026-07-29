@@ -12,8 +12,22 @@ import {
   useState,
 } from "react";
 import { ExportDialog } from "./ExportDialog";
+import { readDlPrefs } from "../lib/dlPrefs";
+import { dlConfigure, dlInvalidate, dlPromote, dlReset, dlSetQueue, dlStop } from "../lib/dlScheduler";
+import { dlSupportReason, opfsWipe } from "../lib/opfsStore";
+import { setImageFormat } from "../lib/imageFormat";
+// 조회 질의는 '확정된 조건(committed)'에서만 만든다 — 규칙과 근거는 lib/worklistQuery.ts 참조
+import {
+  buildWorklistQuery,
+  defaultStatusInjection,
+  freshChangedVids,
+  isQueryDirty,
+  toLiveParams,
+  type CommittedQuery,
+} from "../lib/worklistQuery";
 import {
   PERM_DENIED_TIP,
+  VID_BASE,
   VIEWER_BASE,
   api,
   downloadReportPdf,
@@ -60,6 +74,10 @@ import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { screenFeatures, screenFeaturesList } from "../lib/screens";
 import { showToast } from "../lib/toast";
 import { onStudySync, postStudySync, postViewerAddTab } from "../lib/sync";
+import {
+  forgetViewerSlot, liveViewerSlots, noteViewerSlot, openByPlan, planViewerOpen,
+  readViewerRoundRobin, viewerSlotName, writeViewerRoundRobin,
+} from "../lib/viewerSlots";
 import { Splitter, clampSz } from "../lib/Splitter";
 
 const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewer3D })));
@@ -126,14 +144,18 @@ async function viewerMonitorPlan(): Promise<{
     if (Array.isArray(mon?.tab_monitor_map)) tabMonMap = mon!.tab_monitor_map!;
     if (mon?.tab_binding) tabBinding = mon.tab_binding;
   } catch { /* 캐시 유지 */ }
-  let slots = await screenFeaturesList(monitorScreens);
-  if (maxOpen > 0 && slots[0]?.index >= 0 && slots.length > maxOpen) slots = slots.slice(0, maxOpen);
+  // max_open 캡('검사를 열 때 순환할 모니터 개수')은 **라운드로빈 슬롯 수**다 — 적용 지점은 여기,
+  // 워크리스트 오픈 경로뿐이다. 뷰어측 Compare·과거검사 '인접 모니터'까지 이 캡을 적용했더니
+  // 라운드로빈이 쓰지도 않는 여분 모니터를 못 쓰게 만들어(3모니터·max_open=2 → Compare 2건이 배치
+  // 포기, max_open=1 → prior_mode="monitor" 가 항상 Layout 폴백) 기능만 깎였다.
+  // '라운드로빈이 쓰는 모니터를 Compare 가 덮는 것'은 screens.ts 가 살아 있는 슬롯을 피해 배치한다.
+  const slots = await screenFeaturesList(monitorScreens, undefined, maxOpen);
   return { slots, tabMonMap, tabBinding };
 }
-// 다중 모니터 라운드로빈 카운터(모듈 레벨 — Worklist 세션 동안 유지). 검사를 열 때마다 다음 슬롯.
-let viewerRoundRobin = 0;
 // 다중 선택 일괄 오픈 시작 시 호출 — 선택 목록의 위(첫)부터 모니터 1,2,3 순서로 배치되도록 리셋.
-function resetViewerRoundRobin() { viewerRoundRobin = 0; }
+// ⚠ 카운터는 모듈 변수가 아니라 창 간 공유 상태(lib/viewerSlots)에 있다 — 워크리스트를 F5 해도
+//   살아 있는 뷰어 창의 배치 순서가 이어져야 하기 때문(모듈 변수는 F5 로 0 이 되어 1번 모니터를 덮어썼다).
+function resetViewerRoundRobin() { writeViewerRoundRobin(0); }
 // 마지막 openV2 로 연 뷰어 창들(이름→핸들). 라운드로빈 대상 판정·고아 창 정리·닫힘 감지에 사용.
 // 최저번호 모니터(슬롯 0)는 표준 이름 "sv_viewer"(ReportWindow ◀▶·관련검사 오픈이 참조), 나머지는
 // "sv_viewer_slot{index}".
@@ -312,7 +334,7 @@ function usePermMe(): PermMe | null {
 
 /* ── [A] 액션 툴바 ─────────────────────────────── */
 function ActionToolbar({
-  selected, onAction, searchText, setSearchText, onSearch, onNlSearch,
+  selected, onAction, searchText, setSearchText, onSearch, onNlSearch, dirty,
   withOpen, setWithOpen, withOpenMode, setWithOpenMode, ohifOn = false, allowed,
 }: {
   selected: StudyDetail | null;
@@ -321,6 +343,9 @@ function ActionToolbar({
   setSearchText: (s: string) => void;
   onSearch: () => void;
   onNlSearch: (text: string) => void;
+  // 입력한 검색조건이 아직 조회에 반영되지 않았음(=커밋 전). SEARCH 를 눌러야 목록이 바뀐다는
+  // 계약을 지키되, 사용자가 '왜 안 바뀌지?' 로 헤매지 않도록 버튼에 표시만 해 준다.
+  dirty?: boolean;
   withOpen: boolean;
   setWithOpen: (b: boolean) => void;
   withOpenMode: "add" | "stack";
@@ -385,8 +410,12 @@ function ActionToolbar({
         window.dispatchEvent(new CustomEvent("sv-save-shortcut"));
       }}>★저장</button>
       {/* S1 자연어 검색 (nl_to_query) — AI 기능이므로 보라 포인트 */}
+      {/* ⚠ name/autoComplete 를 반드시 준다 — 이름 없는 텍스트 필드는 크롬이 문서 전체를
+          'unowned 합성 로그인 폼' 으로 묶을 때 username 후보로 잡아 저장된 자격증명(예: 병원ID)을
+          여기에 채워 넣는다. 실제로 SEARCH 칸에 로그인 병원ID 가 자동입력돼 목록이 비는 사고가 있었다. */}
       <input
         placeholder="AI 검색 — 예: 지난주 흉부 CT 미판독" value={nlText}
+        name="wl-nlq" autoComplete="off" autoCorrect="off" spellCheck={false}
         onChange={(e) => setNlText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && nlText.trim()) { onNlSearch(nlText); } }}
         title="자연어로 검색 조건을 입력하면 AI가 필터로 변환합니다 (적용 전 미리보기)"
@@ -394,11 +423,17 @@ function ActionToolbar({
       />
       <input
         placeholder="SEARCH — 환자 ID/이름 (=정확 / 접두% / !제외)" value={searchText}
+        name="wl-q" autoComplete="off" autoCorrect="off" spellCheck={false}
         onChange={(e) => setSearchText(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && onSearch()}
         style={{ width: 280, background: "var(--bg-canvas)" }}
       />
-      <button className="primary" onClick={onSearch}>SEARCH</button>
+      <button className="primary" onClick={onSearch}
+              title={dirty ? "입력한 검색조건이 아직 적용되지 않았습니다 — 누르면 조회합니다"
+                           : "현재 조건으로 다시 조회"}
+              style={dirty ? { boxShadow: "0 0 0 2px var(--stat-emergency,#f87171)" } : undefined}>
+        SEARCH{dirty ? " •" : ""}
+      </button>
     </div>
   );
 }
@@ -411,32 +446,37 @@ export const FIND_FIELDS: Record<string, string> = {
 };
 export const DEFAULT_FIND_FIELDS = ["pid", "pname", "sex", "modality", "date", "desc", "status", "finding", "emergency", "key"];
 
-function FilterBar({ filters, setFilters, fields, onSearch }: {
+function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
   filters: Record<string, string>;
   setFilters: (f: Record<string, string>) => void;
   fields: string[];
   onSearch: () => void;
+  dirty?: boolean;   // 입력했지만 아직 SEARCH 로 커밋되지 않음 (조회에 반영 전)
 }) {
+  // ⚠ setFilters 는 **입력 상태만** 바꾼다. 조회는 SEARCH/Enter(onSearch)로만 일어난다
+  //    — 기획: '수동 = 내가 SEARCH 를 누를 때만 목록이 바뀐다'(커밋 7c5d360).
   const set = (k: string, v: string) => setFilters({ ...filters, [k]: v });
   const enter = (e: React.KeyboardEvent) => e.key === "Enter" && onSearch();
+  // 이름 없는 텍스트 필드는 크롬 자동완성이 로그인 username 칸으로 오인한다 → name + autoComplete 필수
+  const ac = (k: string) => ({ name: `wl-f-${k}`, autoComplete: "off" as const, spellCheck: false });
   const F = (key: string) => {
     switch (key) {
       case "pid":
-        return <input key={key} placeholder="*Any 환자 ID" value={filters.pid ?? ""} style={{ width: 110 }}
+        return <input key={key} placeholder="*Any 환자 ID" value={filters.pid ?? ""} style={{ width: 110 }} {...ac("pid")}
                       onChange={(e) => set("pid", e.target.value)} onKeyDown={enter} />;
       case "pname":
-        return <input key={key} placeholder="*Any 이름" value={filters.pname ?? ""} style={{ width: 110 }}
+        return <input key={key} placeholder="*Any 이름" value={filters.pname ?? ""} style={{ width: 110 }} {...ac("pname")}
                       onChange={(e) => set("pname", e.target.value)} onKeyDown={enter} />;
       case "sex":
         return (
-          <select key={key} value={filters.sex ?? ""} onChange={(e) => set("sex", e.target.value)}>
+          <select key={key} value={filters.sex ?? ""} {...ac("sex")} onChange={(e) => set("sex", e.target.value)}>
             <option value="">*Any 성별</option><option value="M">M</option>
             <option value="F">F</option><option value="O">O</option>
           </select>
         );
       case "modality":
         return (
-          <select key={key} value={filters.modality ?? ""} onChange={(e) => set("modality", e.target.value)}>
+          <select key={key} value={filters.modality ?? ""} {...ac("modality")} onChange={(e) => set("modality", e.target.value)}>
             <option value="">*Any Modality</option>
             {["CR", "CT", "MR", "US", "MG", "XA", "NM", "DX", "ES", "RF", "OT"].map((m) => (
               <option key={m} value={m}>{m}</option>
@@ -446,22 +486,22 @@ function FilterBar({ filters, setFilters, fields, onSearch }: {
       case "date":
         return (
           <span key={key} style={{ display: "flex", gap: 3, alignItems: "center" }}>
-            <input type="date" value={filters.date_from_iso ?? ""} title="검사일 From"
+            <input type="date" value={filters.date_from_iso ?? ""} title="검사일 From" {...ac("date-from")}
                    onChange={(e) => set("date_from_iso", e.target.value)} />
             <span style={{ color: "var(--text-secondary)" }}>~</span>
-            <input type="date" value={filters.date_to_iso ?? ""} title="검사일 To"
+            <input type="date" value={filters.date_to_iso ?? ""} title="검사일 To" {...ac("date-to")}
                    onChange={(e) => set("date_to_iso", e.target.value)} />
           </span>
         );
       case "desc":
-        return <input key={key} placeholder="*Any 검사명" value={filters.desc ?? ""} style={{ width: 140 }}
+        return <input key={key} placeholder="*Any 검사명" value={filters.desc ?? ""} style={{ width: 140 }} {...ac("desc")}
                       onChange={(e) => set("desc", e.target.value)} onKeyDown={enter} />;
       case "body_part":
-        return <input key={key} placeholder="*Any 부위" value={filters.body_part ?? ""} style={{ width: 90 }}
+        return <input key={key} placeholder="*Any 부위" value={filters.body_part ?? ""} style={{ width: 90 }} {...ac("body_part")}
                       onChange={(e) => set("body_part", e.target.value)} onKeyDown={enter} />;
       case "status":
         return (
-          <select key={key} value={filters.status ?? ""} onChange={(e) => set("status", e.target.value)}>
+          <select key={key} value={filters.status ?? ""} {...ac("status")} onChange={(e) => set("status", e.target.value)}>
             <option value="">*Any 상태</option><option value="unread">미판독(확정 전)</option>
             <option value="received">도착</option>
             <option value="draft_ready">AI초안</option><option value="reading">판독중</option>
@@ -469,7 +509,7 @@ function FilterBar({ filters, setFilters, fields, onSearch }: {
           </select>
         );
       case "finding":
-        return <input key={key} placeholder="소견/임프레션 검색 (F-2)" value={filters.finding ?? ""}
+        return <input key={key} placeholder="소견/임프레션 검색 (F-2)" value={filters.finding ?? ""} {...ac("finding")}
                       style={{ width: 180 }} onChange={(e) => set("finding", e.target.value)} onKeyDown={enter} />;
       case "emergency":
         return (
@@ -497,6 +537,13 @@ function FilterBar({ filters, setFilters, fields, onSearch }: {
       borderBottom: "1px solid var(--border)", alignItems: "center", flexWrap: "wrap",
     }}>
       {fields.map(F)}
+      {dirty && (
+        <button onClick={onSearch} title="입력한 조건으로 조회합니다 (Enter 와 동일)"
+                style={{ marginLeft: "auto", fontSize: 11.5, padding: "2px 10px",
+                         color: "var(--stat-emergency,#f87171)", fontWeight: 700 }}>
+          ● 조건 변경됨 — SEARCH 로 적용
+        </button>
+      )}
     </div>
   );
 }
@@ -2464,6 +2511,19 @@ function SvPerfCard({ mods }: { mods: Record<string, number> }) {
 export function Worklist() {
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [searchText, setSearchText] = useState("");
+  // ── 확정된 질의(committed query) ────────────────────────────────────────────────
+  // filters/searchText 는 **입력 상태**일 뿐이다. 서버 조회는 오직 여기 커밋된 스냅샷으로만 한다.
+  // 예전에는 조회 effect 가 filters/searchText 를 직접 의존해서, 수동 갱신 모드인데도 SEARCH 칸에
+  // 한 글자 칠 때마다 /api/worklist 가 나가고 그리드가 바뀌었다 — 기획(커밋 7c5d360)의
+  // '수동 = 내가 SEARCH 를 누를 때만 목록이 바뀐다' 계약을 조회 경로에서만 안 지킨 상태였다.
+  // 커밋은 applyAndSearch() 한 곳에서만 일어난다(입력 상태와 커밋 값이 두 개의 진실이 되지 않도록).
+  const [committed, setCommitted] = useState<CommittedQuery>(() => ({ filters: {}, searchText: "" }));
+  // worklist.prefs(default_status) 도착 전에 조회하면 '빈 조건으로 1회 → prefs 반영해 1회' 로
+  // 로드 직후 목록이 두 번 바뀐다. prefs 가 확정된 뒤에 첫 조회를 하도록 게이트한다.
+  const [prefsReady, setPrefsReady] = useState(false);
+  // 설정 저장 신호 카운터 — 목록 재조회(refreshKey)와 **분리**한다.
+  // 설정 저장은 컬럼·패널·레이아웃만 다시 해석해야 하고, 행 구성(목록)을 갈아엎으면 안 된다.
+  const [settingsTick, setSettingsTick] = useState(0);
   const [datePreset, setDatePreset] = useState("all");
   const [items, setItems] = useState<StudyRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -2723,7 +2783,22 @@ export function Worklist() {
       } else {
         setRefreshMode("manual");
       }
-      if (v.default_status) setFilters((f) => ({ ...f, status: v.default_status! }));
+      // default_status 는 **값이 달라졌을 때만** 주입한다(마지막으로 본 값과 비교).
+      //   · 매번 주입: 사용자가 카운트칩('미판독' 등)으로 바꿔 둔 상태필터가, 아무것도 안 바꾼
+      //     [저장] 한 번에 병원 기본값으로 되돌아갔다.
+      //   · 최초 1회만: 반대로 설정에서 기본 상태 필터를 **실제로 고쳐** 저장해도 그 세션에서는
+      //     필터바도 목록도 그대로여서, 새로고침해야 반영됐다(설정이 조용히 안 먹는 상태).
+      // 그래서 래치를 '한 번이라도 읽었는가' 가 아니라 '마지막으로 본 값과 달라졌는가' 로 잡는다.
+      // 주입은 커밋(setCommitted)까지 함께 해야 필터바 표시와 실제 목록이 어긋나지 않는다.
+      // 최초 로드 시점은 prefsReady 게이트 전이라 이 커밋이 여분의 조회를 만들지 않는다.
+      const ds = defaultStatusInjection(lastDefaultStatusRef.current, v.default_status);
+      if (ds.inject) {
+        lastDefaultStatusRef.current = ds.next;
+        const nf = { ...filtersRef.current, status: ds.next };
+        filtersRef.current = nf;
+        setFilters(nf);
+        setCommitted({ filters: nf, searchText: searchRef.current });
+      }
       // 공통 컬럼(read_state 도입 전 저장분엔 판독 컬럼을 맨 앞에 가산 보정) + 뷰어별 오버라이드
       if (v.columns?.length) {
         const cols = v.columns.filter((c) => COLUMN_DEFS[c]);
@@ -2737,7 +2812,41 @@ export function Worklist() {
       if (po?.d?.length === 3 && po?.e?.length === 4) setPanelOrder({ d: po.d, e: po.e });
       // 패널/크기는 뷰어별 해석 효과가 vk 확정 후 적용 — 여기서 tick 만 올려 트리거
       setWlBvTick((t) => t + 1);
-    }).catch(() => {});
+    }).catch(() => {
+      // prefs 를 못 읽어도 목록은 떠야 한다 — 기본값(=주입 없음)으로 진행하고 게이트만 finally 에서 푼다.
+      // 래치는 건드리지 않는다: 다음 번 로드가 성공하면 그때 정상적으로 주입돼야 한다.
+    }).finally(() => setPrefsReady(true));
+  }, []);
+  // 마지막으로 반영한 default_status. null = 아직 한 번도 못 읽음.
+  // '한 번 주입했으니 끝' 이 아니라 '값이 바뀌면 다시 주입' 이어야 두 요구가 동시에 성립한다
+  // (같은 값 저장 = 사용자 필터 보존 / 다른 값 저장 = 그 자리에서 반영).
+  const lastDefaultStatusRef = useRef<string | null>(null);
+
+  const filtersRef = useRef(filters);
+  const searchRef = useRef(searchText);
+  useEffect(() => { filtersRef.current = filters; searchRef.current = searchText; }, [filters, searchText]);
+
+  /* ── 검색 커밋 — 목록이 바뀌는 **유일한** 경로 ─────────────────────────────────
+     '상태 변경 + 커밋 + 재조회' 를 한 함수로 묶는다. 명시적 사용자 액션(SEARCH·카운트칩·폴더·
+     기간 프리셋·탭 전환·바로가기·AI 적용·Import 완료·모달리티 칩)만 이걸 부른다. 단순 타이핑/
+     셀렉트 변경은 입력 상태(setFilters/setSearchText)만 바꾸고 여기 오지 않는다.
+     ⚠ setState 직후의 filtersRef 는 아직 옛 값이므로(반영은 다음 렌더), 넘겨받은 next 값을
+       ref 에 **동기로** 먼저 써 넣는다 — 탭 전환처럼 setState 와 커밋이 같은 틱에 일어나는
+       경로에서 옛 조건으로 조회되는 스냅샷 타이밍 버그를 막기 위해서다. */
+  const applyAndSearch = useCallback((patch?: {
+    filters?: Record<string, string> | ((f: Record<string, string>) => Record<string, string>);
+    searchText?: string;
+  }) => {
+    const pf = patch?.filters;
+    const nextF = typeof pf === "function" ? pf(filtersRef.current) : (pf ?? filtersRef.current);
+    const nextQ = patch?.searchText ?? searchRef.current;
+    filtersRef.current = nextF;
+    searchRef.current = nextQ;
+    setFilters(nextF);
+    setSearchText(nextQ);
+    setCommitted({ filters: nextF, searchText: nextQ });
+    setPendingChange(false);        // 수동 모드 '변경 있음' 알림 띠는 커밋과 함께 내린다
+    setRefreshKey((k) => k + 1);
   }, []);
 
   useEffect(() => {
@@ -2749,8 +2858,12 @@ export function Worklist() {
     const h = (e: Event) => setViewer3dUid((e as CustomEvent).detail as string);
     window.addEventListener("sv-open-3d", h);
     // 설정 저장 시 화면 즉시 반영 — Settings 모달은 Worklist 위 오버레이라 언마운트되지 않으므로
-    // 저장 신호를 받아 worklist.prefs 재로드(컬럼·패널·크기 재해석) + 뷰어 모드(refreshKey) 재로드
-    const onSettingsSaved = () => { loadWlPrefs(); setRefreshKey((k) => k + 1); };
+    // 저장 신호를 받아 worklist.prefs 재로드(컬럼·패널·크기 재해석) + 뷰어 스킨 재해석.
+    // ⚠ 여기서 refreshKey 는 올리지 않는다 — 설정 저장은 '보여주는 방식'만 바꾸는 행위지
+    //   '어떤 행을 보여줄지'를 바꾸는 행위가 아니다. 예전에는 아무것도 안 바꾸고 [저장]만 눌러도
+    //   목록이 통째로 재조회되며 사용자가 골라 둔 상태필터까지 되돌아갔다.
+    //   컬럼/패널은 wlBvTick, 뷰어 스킨·report.prefs 는 settingsTick 경로로 반영된다.
+    const onSettingsSaved = () => { loadWlPrefs(); setSettingsTick((t) => t + 1); };
     window.addEventListener("sv-settings-saved", onSettingsSaved);
     // 07 A.2 SearchShortcut 저장/적용
     const onSave = () => {
@@ -2762,11 +2875,10 @@ export function Worklist() {
       localStorage.setItem("sv_shortcuts", JSON.stringify(list));
       alert(`'${label}' 저장됨`);
     };
+    // 바로가기 적용은 '사용자가 이 조건으로 보겠다'는 명시적 액션 → 입력 상태 + 커밋을 함께
     const onApply = (e: Event) => {
       const sc = (e as CustomEvent).detail as { filters: Record<string, string>; searchText: string };
-      setFilters(sc.filters ?? {});
-      setSearchText(sc.searchText ?? "");
-      setRefreshKey((k) => k + 1);
+      applyAndSearch({ filters: sc.filters ?? {}, searchText: sc.searchText ?? "" });
     };
     window.addEventListener("sv-save-shortcut", onSave);
     window.addEventListener("sv-apply-shortcut", onApply);
@@ -2776,10 +2888,10 @@ export function Worklist() {
       window.removeEventListener("sv-save-shortcut", onSave);
       window.removeEventListener("sv-apply-shortcut", onApply);
     };
-  }, [loadWlPrefs]);
-  const filtersRef = useRef(filters);
-  const searchRef = useRef(searchText);
-  useEffect(() => { filtersRef.current = filters; searchRef.current = searchText; }, [filters, searchText]);
+  }, [loadWlPrefs, applyAndSearch]);
+  // 입력했지만 아직 커밋되지 않은 조건이 있는가 — SEARCH 버튼/필터바에 표시만 한다(UX 안내).
+  const queryDirty = useMemo(
+    () => isQueryDirty(committed, filters, searchText), [committed, filters, searchText]);
 
   // 판독 단축키(UBPACS-Z §5): Enter=View&Draft, B=일괄검토, E=Emergency, F5=새로고침
   useEffect(() => {
@@ -2802,37 +2914,29 @@ export function Worklist() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, viewer3dUid, batchOpen, allowedAction, localMode]);
 
-  const queryParams = useMemo(() => {
-    const p: Record<string, string> = { q: searchText };
-    for (const k of ["pid", "pname", "sex", "desc", "modality", "status", "body_part", "finding", "emergency", "key"]) {
-      if (filters[k]) p[k] = filters[k];
-    }
-    if (filters.date_from_iso) p.date_from = filters.date_from_iso.replaceAll("-", "");
-    if (filters.date_to_iso) p.date_to = filters.date_to_iso.replaceAll("-", "");
-    if (filters.tree_from) p.date_from = filters.tree_from;
-    return p;
-  }, [filters, searchText]);
+  // ⚠ **커밋된** 질의로만 만든다. filters/searchText(입력 상태)를 여기에 물리면 타건마다
+  //   목록·카운트 조회가 나가 '수동 갱신인데 목록이 저 혼자 변한다'로 되돌아간다.
+  const queryParams = useMemo(() => buildWorklistQuery(committed), [committed]);
 
   useEffect(() => {
-    // SEARCH/필터/새로고침으로 재조회가 시작되면 그리드를 짧게 깜빡여 '검색이 동작했음'을 보여준다(최초 로드는 제외)
+    // prefs(default_status) 확정 전에는 조회하지 않는다 — 로드 직후 목록이 두 번 바뀌는 것 방지
+    if (!prefsReady) return;
+    // SEARCH/새로고침으로 재조회가 시작되면 그리드를 짧게 깜빡여 '검색이 동작했음'을 보여준다(최초 로드는 제외).
+    // 이 effect 자체가 이제 '커밋됐을 때만' 도는 자리이므로, 깜빡임도 자동으로 커밋 시점에만 난다.
     if (flashMountRef.current) setSearchFlash((t) => t + 1);
     else flashMountRef.current = true;
     if (localMode) {
       // LOCAL 모드 — 서버 worklist 호출 안 함. local.db 목록(q=검색어)만 표시 (미구현 서버=빈 목록)
-      api.localStudies(searchText.trim() || undefined)
+      api.localStudies(committed.searchText.trim() || undefined)
         .then((r) => { setItems(r.items.map(localToRow)); setTotal(r.items.length); })
         .catch(() => { setItems([]); setTotal(0); });
       return;
     }
     if (liveMode) {
       // LIVE 모드 — 원격 A(webpacs_api) 워크리스트 실시간 조회(vid, 복사 없음).
-      // 지원 필터만 매핑(q/pid/pname/modality/기간) — 나머지 필터는 라이브에선 무시
-      const lp: Record<string, string | number> = {};
-      for (const k of ["q", "pid", "pname", "modality", "date_from", "date_to", "limit", "offset"] as const) {
-        const v = (queryParams as Record<string, string>)[k];
-        if (v) lp[k] = v;
-      }
-      api.liveWorklist(lp)
+      // 지원 필터만 매핑(q/pid/pname/modality/기간) — 나머지 필터는 라이브에선 무시.
+      // 기획: "Live 도 같은 규칙을 따른다" → 여기도 committed 로만 조회한다.
+      api.liveWorklist(toLiveParams(queryParams))
         .then((r) => {
           setItems(r.items);
           setTotal(r.total);
@@ -2869,20 +2973,25 @@ export function Worklist() {
         selAnchorRef.current = null;
       }
     }).catch(() => {});
-  }, [queryParams, refreshKey, localMode, liveMode, searchText]);
+    // ⚠ 의존성에 filters/searchText(입력 상태)를 넣지 마라 — 넣는 순간 '타이핑 한 글자 = 재조회' 가
+    //   되살아나 수동 갱신 계약이 깨진다. 조회는 committed(=SEARCH 로 확정된 조건) + refreshKey 로만.
+  }, [queryParams, committed, refreshKey, localMode, liveMode, prefsReady]);
 
-  // Search Filter 모달리티 분포 — 모달리티 필터가 꺼진 결과에서만 갱신(필터 중 카운트 유지)
+  // Search Filter 모달리티 분포 — 모달리티 필터가 꺼진 결과에서만 갱신(필터 중 카운트 유지).
+  // 판정은 items 를 만들어 낸 **커밋된** 조건으로 한다(입력 상태로 보면 items 와 어긋난다).
   useEffect(() => {
-    if (filters.modality) return;
+    if (committed.filters.modality) return;
     const c: Record<string, number> = {};
     items.forEach((r) => { c[r.modality || ""] = (c[r.modality || ""] ?? 0) + 1; });
     setModCounts(c);
-  }, [items, filters.modality]);
+  }, [items, committed.filters.modality]);
 
   useEffect(() => {
     // 자동일 때만 주기 갱신. 수동이면 타이머를 아예 만들지 않는다.
     // ⚠ 예전에는 Live 를 min(sec||5, 5) 로 **강제**해 '끔' 으로 둬도 5초마다 목록이 바뀌었다.
     //   Live 야말로 판독 중 목록이 흔들리면 곤란한 모드라 강제를 없앴다.
+    // 자동의 뜻은 '주기적으로 **같은 조건**을 다시 본다' 이지 '입력 중에 흔들린다' 가 아니다 —
+    // 그래서 여기서도 refreshKey 만 올리고, 조회는 committed(확정된 조건)로 나간다.
     if (refreshMode !== "auto") return;
     const sec = Math.max(1, refreshSec || 10);
     const t = setInterval(() => setRefreshKey((k) => k + 1), sec * 1000);
@@ -2893,17 +3002,42 @@ export function Worklist() {
   // 여기서는 그 리비전(rev)만 가볍게 확인해 **바뀌었을 때만** 목록을 재조회한다.
   // (위 5초 폴링은 SSE 미연결·구버전 A 를 위한 폴백으로 그대로 둔다 — 이중 안전)
   const sseRevRef = useRef<number | null>(null);
+  // 이미 무효화에 반영한 changed_studies 스냅샷(값 → 등장 횟수).
+  // ⚠ 백엔드의 changed_studies 는 `(기존 + 신규)[-200:]` 로 **누적**되며 소비 후 비워지지 않는다.
+  //   틱마다 통째로 넘기면 SSE rev 가 오를 때마다 누적 200건을 다시 폐기해 '지우고 다시 받기'
+  //   폭주가 된다. 그래서 **새로 늘어난 것만** 넘긴다.
+  //   같은 검사가 두 번 바뀌면 목록에 두 번 들어오므로 '봤는가'(Set)가 아니라 **횟수**로 비교한다
+  //   — Set 으로 하면 두 번째 변경을 통째로 놓친다.
+  const sseChangedRef = useRef<Map<number, number>>(new Map());
   // 모드를 effect 의존성에 넣으면 설정을 바꿀 때마다 SSE 구독이 끊겼다 붙는다 → ref 로 읽는다
   const refreshModeRef = useRef(refreshMode);
   useEffect(() => { refreshModeRef.current = refreshMode; }, [refreshMode]);
   useEffect(() => {
     if (!liveMode) { sseRevRef.current = null; return; }
     let stop = false;
+    // 누적 목록에서 **이번에 새로 늘어난 것**만 골라 vid 로 올린다(규칙·근거는 worklistQuery 참조).
+    const freshVids = (list: number[] | undefined): number[] => {
+      const r = freshChangedVids(sseChangedRef.current, list, VID_BASE);
+      sseChangedRef.current = r.next;
+      return r.vids;
+    };
     const tick = () => api.liveSseStatus().then((s) => {
       if (stop || !s.connected) return;                  // 미연결 → 폴링 폴백에 맡김
-      if (sseRevRef.current === null) { sseRevRef.current = s.rev; return; }
+      // 첫 틱은 기준선만 잡는다 — 목록도 누적본이므로 여기서 스냅샷을 함께 떠 둬야
+      // 다음 변경 때 '이미 있던 200건'이 통째로 새것으로 보이지 않는다.
+      if (sseRevRef.current === null) { sseRevRef.current = s.rev; freshVids(s.changed_studies); return; }
       if (s.rev !== sseRevRef.current) {                  // 원격 변경 발생
         sseRevRef.current = s.rev;
+        // ⚡ 다운로드 모드 무효화 — A 에서 픽셀이 교체된 검사의 로컬 저장본을 폐기한다.
+        //   안 하면 캐시 히트가 **낡은 영상**을 계속 준다(백엔드 ETag 1시간과 같은 구멍을
+        //   시간 제한 없이 늘리는 셈 — webpacs_live.py:607 주석). 무효화 함수의 프로덕션
+        //   호출자는 여기 하나다(호출자 0 이었던 invalidate_tree 전례를 반복하지 않는다).
+        // ★ ID 공간을 맞춰서 넘긴다: changed_studies 는 **A 원본 study_idx**(작은 정수)이고
+        //   스케줄러 큐의 studyId 는 워크리스트 행 id = vid = VID_BASE + study_idx 다.
+        //   그대로 넘기면 `ids.has(q.studyId)` 가 구조적으로 절대 참이 될 수 없어 무효화가
+        //   영구 무동작이 된다(호출자는 있는데 조건이 안 맞는 형태로 invalidate_tree 전례 재현).
+        const fresh = freshVids(s.changed_studies);
+        if (fresh.length) void dlInvalidate(fresh);
         // 자동이면 즉시 반영, 수동이면 목록을 건드리지 않고 **알리기만** 한다
         // (수동의 뜻은 '내가 SEARCH 를 누를 때만 바뀐다' 이므로 여기서 바꾸면 약속을 깬다).
         if (refreshModeRef.current === "auto") setRefreshKey((k) => k + 1);
@@ -2915,6 +3049,44 @@ export function Worklist() {
     return () => { stop = true; window.clearInterval(t); };
   }, [liveMode]);
 
+  /* ── 다운로드 모드(설정>환경 '영상 취득') — 백그라운드 선다운로드 ──
+   * 이번 회차 범위는 **Live 모드 + 2D 뷰어 2종**이다. 로컬 Orthanc 모드는 /dicom-web 이
+   * 무인증이라 미결 보안과제(#30)와 얽히고, 3D 는 rendered <img> 경로를 쓰지 않아 접합점이
+   * 다르다 — 둘 다 2회차로 미룬다. 그래서 여기서 liveMode 를 게이트로 건다. */
+  useEffect(() => {
+    let dead = false;
+    // ★ 병원별 영상 전송 형식을 **먼저** 채운다(뷰어 2종이 하는 것과 같은 호출).
+    //   스케줄러의 저장 URL·캐시 키가 이 값에서 나오므로, 안 채우고 시작하면 관리자가 무손실
+    //   PNG 로 설정한 병원에서도 기본값(JPEG q90)으로 받아 버린다 — 관리자 정책이 조용히 무시된다.
+    //   실패해도 다운로드는 진행한다(기본값 = 서버 기본과 같은 JPEG q90).
+    const hid = Number(localStorage.getItem("sv_active_hospital") || 0);
+    const fmtReady = hid
+      ? api.hospImageFormat(hid).then(setImageFormat).catch(() => {})
+      : Promise.resolve();
+    void fmtReady.then(() => api.getSetting("viewer.prefs")).then((r) => {
+      if (dead || !r) return;
+      const p = readDlPrefs(r.value);
+      dlConfigure({
+        enabled: liveMode && p.mode === "download" && !dlSupportReason(),
+        limitGb: p.limitGb, concurrency: p.concurrency, scope: p.scope, recentN: p.recentN,
+      });
+    }).catch(() => {});
+    return () => { dead = true; };
+    // settingsTick — 설정 저장('sv-settings-saved')의 기존 반영 경로. 이걸 안 걸면 모드를 바꿔도
+    // 다음 SEARCH 전까지 아무 일도 일어나지 않아 '켰는데 안 받는다'로 보인다.
+  }, [liveMode, settingsTick]);
+  // 목록이 갱신될 때마다 큐 교체 — **정렬은 서버가 준 그대로** 쓴다(최신순 보장:
+  // study_service.py:227 / webpacs_live.py:285). 프론트가 재정렬하면 두 곳이 순서를 정하게 된다.
+  useEffect(() => {
+    dlSetQueue(items.map((r) => ({
+      studyId: r.id, studyUid: r.study_uid, patientKey: r.patient_key,
+      studyDate: r.study_date, modality: r.modality,
+      label: `${r.patient_name} · ${r.modality} · ${r.study_date}`,
+    })));
+  }, [items]);
+  // 창을 닫거나 워크리스트를 떠나면 다운로더도 멈춘다(Web Lock 을 붙잡은 채 남지 않게)
+  useEffect(() => () => dlStop(), []);
+
   // 판독 창 항상 열기(설정>판독) — 워크리스트 옆 별도 웹창(?report=1), 선택 동기(sync) 연동
   const readingWinRef = useRef<Window | null>(null);
   const alwaysReadingRef = useRef(false);
@@ -2922,7 +3094,9 @@ export function Worklist() {
     api.getSetting("report.prefs").then((r) => {
       alwaysReadingRef.current = !!(r.value as { always_report_window?: boolean }).always_report_window;
     }).catch(() => {});
-  }, [refreshKey]);
+    // 설정에서 바뀌는 값이므로 마운트 + 설정 저장(settingsTick)에서만 다시 읽는다.
+    // 예전엔 refreshKey 였는데, 그건 '목록 재조회' 신호라 검색할 때마다 불필요하게 재조회됐다.
+  }, [settingsTick]);
   const ensureReadingWindow = useCallback((id: number) => {
     if (!alwaysReadingRef.current) return;
     if (readingWinRef.current && !readingWinRef.current.closed) return;   // 이미 옆에 떠 있음
@@ -2987,13 +3161,24 @@ export function Worklist() {
     if (selected) api.study(selected.id).then(setSelected);
   }, [selected]);
 
-  // SEARCH — 수동 모드에서 목록이 바뀌는 **유일한** 경로. 대기 중 알림도 여기서 내린다.
-  const runSearch = useCallback(() => {
+  // SEARCH — 수동 모드에서 **조회 조건이 바뀌는** 유일한 경로. 대기 중 알림도 여기서 내린다.
+  // 지금 입력돼 있는 filters/searchText 를 그대로 커밋해 조회한다(= 눌러야 적용).
+  const runSearch = useCallback(() => { applyAndSearch(); }, [applyAndSearch]);
+
+  /* ── 새로고침 — '같은 조건을 다시 본다'. SEARCH 와 뜻이 다르다 ────────────────────
+     ⚠ 세 스킨(SaintView ⟳ · Live 수동모드 배너 [지금 갱신] · I-View/T-View 🔄)이 모두 이걸 쓴다.
+       한때 SaintView ⟳ 와 [지금 갱신] 만 applyAndSearch(=커밋) 로 바뀌어 있어서, 같은 '새로고침'
+       이름의 버튼이 스킨마다 다르게 동작했다 — ⟳ 를 눌렀는데 아직 SEARCH 하지 않은 필터바 입력까지
+       함께 적용돼 결과 집합이 바뀌었다(= '내가 SEARCH 를 누를 때만 목록이 바뀐다' 계약 위반).
+       새로고침은 **커밋된 조건 그대로** 재조회하고, 미커밋 입력은 dirty 표시로 남겨 둔다.
+       pendingChange(원격 변경 알림)는 어느 경로로 갱신하든 내려야 하므로 여기 포함한다. */
+  const reloadList = useCallback(() => {
     setPendingChange(false);
     setRefreshKey((k) => k + 1);
   }, []);
 
   const openStudy = useCallback((row: StudyRow | StudyDetail) => {
+    dlPromote(row.study_uid);   // 여는 검사를 선다운로드 큐 맨 앞으로 + 잠시 감속(A 부하 양보)
     openViewer(row.study_uid, hpFor(row.modality));
   }, []);
 
@@ -3007,6 +3192,9 @@ export function Worklist() {
     forceRoundRobin?: boolean;  // 다중선택 일괄 오픈 — 탭→모니터 예외 무시, 순수 1,2,3 순환
   }) => {
     lastViewerRef.current = cfg.addDetail ?? cfg.stackDetail ?? cfg.detail;
+    // 여는 검사를 선다운로드 큐 맨 앞으로 승격 + 잠시 감속 — '지금 보는 검사'가 최우선이고,
+    // 동시에 A 를 때리는 총량을 줄인다(백엔드가 이미 오픈마다 8워커 프리페치를 돌린다).
+    dlPromote(cfg.detail.study_uid);
     const p = new URLSearchParams({ viewer: "2d", study: String(cfg.detail.id) });
     if (cfg.cmp) p.set("cmp", "1");
     if (cfg.addDetail) p.set("add", String(cfg.addDetail.id));
@@ -3025,9 +3213,12 @@ export function Worklist() {
     const d0 = cfg.detail;
     const tabLabel = `${d0.modality} ${d0.body_part || d0.patient_name} ${d0.study_date} #${d0.id}`;
     return viewerMonitorPlan().then(async ({ slots, tabMonMap, tabBinding }) => {
-      // 닫힌 창은 추적 맵에서 정리. 살아있는 창이 하나도 없으면 라운드로빈을 1번 모니터부터 재시작.
+      // 닫힌 창은 추적 맵에서 정리 + **슬롯 장부에서도 즉시 지운다**. 브라우저 X·Ctrl+W·크래시로
+      // 닫히면 releaseViewerSlot() 이 못 돌 수 있는데, 우리가 든 핸들의 w.closed 는 그 사실을 바로
+      // 알려 준다(TTL 만료를 기다릴 필요 없다). 장부에 남겨 두면 "그 모니터에 창이 살아 있다"로
+      // 오판해 ①부트스트랩(전 모니터 오픈)을 건너뛰고 라운드로빈이 빈 모니터를 향한다.
       for (const [nm, w] of [...openedViewerWindows]) {
-        if (w.closed) openedViewerWindows.delete(nm);
+        if (w.closed) { openedViewerWindows.delete(nm); forgetViewerSlot(nm); }
       }
       // 탭→모니터 배치 예외 대상 선계산 — mm 판정(창 다수 가능성)에 포함시키기 위해 urlFor 보다 먼저.
       const activeTab = activeTabIdRef.current;
@@ -3062,8 +3253,9 @@ export function Worklist() {
         } catch { /* 무시 */ }
       }
       // 최저번호 모니터=표준 "sv_viewer"(판독창 참조·재사용), 나머지=sv_viewer_slot{index} (모니터 정체성 기준 고정)
-      const nameFor = (monitorIndex: number) =>
-        monitorIndex === slots[0]?.index ? "sv_viewer" : `sv_viewer_slot${monitorIndex}`;
+      // ⚠ 규약 본체는 lib/viewerSlots.ts 한 곳 — screens.ts 의 openSlaveWindow 도 같은 함수를 쓴다.
+      //   예전엔 두 곳에 따로 하드코딩돼 있어 한쪽만 바꾸면 같은 모니터에 창이 두 개 생겼다.
+      const nameFor = (monitorIndex: number) => viewerSlotName(monitorIndex, slots[0]?.index);
 
       // ── 워크리스트 탭 → 모니터 배치 예외 (최우선) ──
       // 검사를 연 순간의 활성 워크리스트 탭에 지정 모니터가 있으면, 뷰어 모니터 선택·멀티 여부와
@@ -3072,10 +3264,11 @@ export function Worklist() {
       if (ovMon != null) {
         const feat = await screenFeatures([ovMon], "width=1500,height=920");   // 지정 모니터 실좌표(감지 가능 시)
         const name = nameFor(ovMon);
-        postViewerAddTab(d0.id, d0.study_uid, tabLabel);   // 다른 열린 뷰어 창은 탭만 추가(리로드 없음)
+        // 다른 열린 뷰어 창은 탭만 추가(리로드 없음). 대상 창(name)은 아래에서 URL 로 통째로 로드되므로 제외.
+        postViewerAddTab(d0.id, d0.study_uid, tabLabel, name);
         const w = window.open(urlFor(ovMon), name, feat);
         applyWindowBounds(w, feat);
-        if (w) { openedViewerWindows.set(name, w); w.focus(); }
+        if (w) { openedViewerWindows.set(name, w); noteViewerSlot(name, d0.id); w.focus(); }
         else showToast("팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요", "error");
         return;
       }
@@ -3085,36 +3278,75 @@ export function Worklist() {
       if (!multi) {
         // 단일/미감지: 재사용 창 "sv_viewer" 1개. 다중→단일 전환 시 이전 보조 창은 고아이므로 닫는다.
         for (const [nm, ow] of [...openedViewerWindows]) {
-          if (nm !== "sv_viewer") { try { ow.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
+          if (nm !== "sv_viewer") {
+            try { ow.close(); } catch { /* 이미 닫힘 */ }
+            openedViewerWindows.delete(nm);
+            forgetViewerSlot(nm);
+          }
         }
         const feat = slots[0]?.features ?? "width=1500,height=920";
         const w = window.open(urlFor(slots[0]?.index ?? -1), "sv_viewer", feat);
         applyWindowBounds(w, feat);
-        if (w) openedViewerWindows.set("sv_viewer", w);
+        if (w) { openedViewerWindows.set("sv_viewer", w); noteViewerSlot("sv_viewer", d0.id); }
         w?.focus();
         return;
       }
-      // 대상 모니터 결정 — 번호순 라운드로빈(탭→모니터 예외는 위에서 이미 처리·return).
-      if (openedViewerWindows.size === 0) viewerRoundRobin = 0;   // 전부 닫힘 → 1번부터
-      const target = slots[viewerRoundRobin % slots.length];
-      viewerRoundRobin += 1;
-      const targetName = nameFor(target.index);
-      // (1) 이미 열린 다른 뷰어 창들 → 탭만 추가(리로드 없음). 대상 창은 아래 URL 로 직접 로드됨.
-      postViewerAddTab(d0.id, d0.study_uid, tabLabel);
-      // (2) 대상 모니터 창만 열기/네비게이트(=그 뷰어만 전체 리프레시) + 해당 모니터에 배치.
-      const w = window.open(urlFor(target.index), targetName, target.features);
-      applyWindowBounds(w, target.features);
-      if (w) { openedViewerWindows.set(targetName, w); w.focus(); }
-      else {
+      // ── 다중 모니터 오픈 규칙 (사용자 확정 규칙 — 되돌리면 회귀다) ───────────────────────────
+      //  ① 사이클 시작(살아 있는 뷰어 창 0개)인 **첫 오픈** = 선택된 전 모니터에 창을 열고 모두 같은 검사.
+      //     → 판독을 시작하는 순간 2·3번 모니터가 빈 화면으로 남지 않는다. (커밋 109c2cb 의 forEach 동작)
+      //  ② 두 번째 오픈부터 = 모니터 번호순으로 **대상 창 하나만** 리로드, 나머지는 Exam 탭만 추가.
+      //     (커밋 6da23e0 의 라운드로빈. 이 커밋이 ①의 부트스트랩을 지우면서 회귀가 났다.)
+      //  부트스트랩 직후 순번을 slots[1] 로 두는 것이 규칙의 핵심 — 0 으로 두면 두 번째 검사가 1번
+      //  모니터를 덮어써 "첫 영상이 사라진다".
+      //
+      //  규칙 본체는 lib/viewerSlots 의 planViewerOpen/openByPlan **한 곳**에 있다 — 여기(openV2)에
+      //  인라인으로 두었을 때는 회귀 테스트가 그 결정부의 사본을 검증해서, 분기를 죽여도 전부 초록이었다.
+      //  여기서는 '살아 있는 창 목록'만 만들어 넘기고, 결과대로 window.open 만 한다.
+      const validNames = new Set(slots.map((s) => nameFor(s.index)));
+      // 현재 선택 슬롯 집합에 없는 이전 보조 창(모니터 설정 축소 등)은 **사이클 시작 판정 전에** 닫는다.
+      // 장부에도 남겨 두면 "창이 살아 있다"로 잘못 세어 첫 오픈 부트스트랩이 건너뛰어진다.
+      // (이미 닫힌 창은 이 콜백 첫머리에서 맵·장부 양쪽에서 정리됐다.)
+      for (const [nm, ow] of [...openedViewerWindows]) {
+        if (!validNames.has(nm)) {
+          try { ow.close(); } catch { /* 이미 닫힘 */ }
+          openedViewerWindows.delete(nm);
+          forgetViewerSlot(nm);
+        }
+      }
+      // 생존 판정 = 슬롯 장부 ∪ 살아 있는 창 핸들. 핸들을 합치는 이유 둘:
+      //  · VIEWER_BASE(뷰어를 다른 오리진으로) 배치에서는 뷰어의 하트비트가 **이 오리진 장부에 안 보인다**.
+      //    핸들의 !w.closed 는 교차 출처에서도 읽히므로 그 배치에서 순번이 도는 유일한 근거다.
+      //  · 같은 오리진이어도 뷰어 창이 오래 가려져 있으면(Chrome intensive throttling) 하트비트가
+      //    늦어질 수 있다. 워크리스트가 이미 들고 있는 직접 신호를 안 쓸 이유가 없다.
+      const liveHere = new Set<string>(liveViewerSlots().keys());
+      for (const [nm, ow] of openedViewerWindows) { if (!ow.closed) liveHere.add(nm); }
+      const plan = planViewerOpen(slots, liveHere, readViewerRoundRobin());
+      // ② 라운드로빈이면 — 이미 열린 **다른** 뷰어 창들에 탭만 추가(리로드 없음). 대상 창은 곧 URL 로
+      //    통째로 로드되므로 수신자에서 제외한다(안 그러면 곧 버려질 문서가 study+seriesTree 를 왕복하고
+      //    sv_infi_exams 를 다시 써서 위 '단일 기록자' 선등록이 무의미해진다).
+      //    ① 부트스트랩이면 다른 뷰어 창이 없으므로 브로드캐스트 자체가 불필요하다.
+      if (plan.mode === "roundrobin") postViewerAddTab(d0.id, d0.study_uid, tabLabel, plan.targets[0].name);
+      // window.open 은 사용자 클릭 활성화 안에서 **동기**로 호출돼야 한다(모니터 감지 await 은 이미 끝났다).
+      let firstW: Window | null = null;
+      const opened = openByPlan(plan, d0.id, (t) => {
+        const w0 = window.open(urlFor(t.index), t.name, t.features);
+        applyWindowBounds(w0, t.features);
+        if (!w0) return false;
+        openedViewerWindows.set(t.name, w0);
+        if (!firstW) firstW = w0;
+        return true;
+      });
+      (firstW as Window | null)?.focus();
+      if (opened < plan.targets.length) {
+        // 109c2cb 에 있다가 6da23e0 에서 사라진 안내 — 부트스트랩은 창을 여러 개 여는 유일한 지점이라
+        // Chrome 팝업 차단이 첫 창 외 전부를 막는다. 안내가 없으면 "2·3번이 안 뜬다"는 민원이 된다.
         showToast(
-          "팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창의 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요",
+          plan.mode === "bootstrap"
+            ? `팝업 차단으로 ${opened}/${plan.targets.length} 모니터에만 열렸습니다 — 주소창의 팝업 아이콘에서 `
+              + `이 사이트를 '항상 허용'으로 설정한 뒤 다시 여세요`
+            : "팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창의 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요",
           "error",
         );
-      }
-      // 현재 선택 슬롯 집합에 없는 이전 보조 창(모니터 설정 축소 등)은 닫아 고아 방지
-      const validNames = new Set(slots.map((s) => nameFor(s.index)));
-      for (const [nm, ow] of [...openedViewerWindows]) {
-        if (!validNames.has(nm)) { try { ow.close(); } catch { /* 이미 닫힘 */ } openedViewerWindows.delete(nm); }
       }
     });
   }, []);
@@ -3145,7 +3377,8 @@ export function Worklist() {
     if (liveMode && !LIVE_OK_ACTIONS.has(a)) { alert(LIVE_DENIED_TIP); return; }
     const target = row ?? selected;
     switch (a) {
-      case "refresh": setRefreshKey((k) => k + 1); break;
+      // I-View/T-View 의 🔄 새로고침 — SaintView ⟳ / Live 배너와 같은 reloadList 를 쓴다(스킨별 의미 통일)
+      case "refresh": reloadList(); break;
       case "batch": setBatchOpen(true); break;
       case "viewdraft":
         // 다중 선택(Shift/Ctrl) + View 버튼 → 선택 검사를 워크리스트 순서대로 한꺼번에 오픈.
@@ -3353,7 +3586,7 @@ export function Worklist() {
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, onSelect, openStudy, onChanged, dblAction, withOpen, withOpenMode, openV2, localMode, liveMode, items, selectedIds]);
+  }, [selected, onSelect, openStudy, onChanged, dblAction, withOpen, withOpenMode, openV2, localMode, liveMode, items, selectedIds, reloadList]);
 
   const openCompare = useCallback(() => {
     if (!selected) return;
@@ -3398,7 +3631,9 @@ export function Worklist() {
   const tabLive = useRef<Record<string, {
     filters: Record<string, string>; searchText: string; datePreset: string; selNodeId: string | null;
   }>>({});
-  // 탭 전환: 현재 탭 상태를 스냅샷하고, 대상 탭의 라이브 상태(있으면) 또는 저장된 정의를 적용
+  // 탭 전환: 현재 탭 상태를 스냅샷하고, 대상 탭의 라이브 상태(있으면) 또는 저장된 정의를 적용.
+  // ⚠ 복원한 조건을 **같은 호출로** 커밋해야 한다(applyAndSearch 에 값을 명시로 넘김) —
+  //   setFilters 직후 filtersRef 를 읽으면 아직 옛 탭 조건이라 옛 목록이 조회된다.
   const pickTab = (tab: WorklistTab) => {
     tabLive.current[activeTabId] = {
       filters: filtersRef.current, searchText: searchRef.current, datePreset, selNodeId,
@@ -3406,17 +3641,14 @@ export function Worklist() {
     setActiveTabId(tab.id);
     const live = tabLive.current[tab.id];
     if (live) {
-      setFilters(live.filters);
-      setSearchText(live.searchText);
       setDatePreset(live.datePreset);
       setSelNodeId(live.selNodeId);
+      applyAndSearch({ filters: live.filters, searchText: live.searchText });
     } else {
       setSelNodeId(null);
-      setSearchText("");
       setDatePreset(tab.filter.date ?? "all");
-      setFilters(folderToFilters(tab.filter));
+      applyAndSearch({ filters: folderToFilters(tab.filter), searchText: "" });
     }
-    setRefreshKey((k) => k + 1);
   };
 
   // 새 페이지 등록 (최대 10) — 새 탭은 빈 검색으로 시작해 독립적으로 조건을 설정한다.
@@ -3435,13 +3667,11 @@ export function Worklist() {
     setTabs(next);
     setActiveTabId(tab.id);
     setSelNodeId(null);
-    setSearchText("");
     setDatePreset(tab.filter.date ?? "all");
-    setFilters(folderToFilters(tab.filter));
-    setRefreshKey((k) => k + 1);
+    applyAndSearch({ filters: folderToFilters(tab.filter), searchText: "" });
     try { await saveTabs(next); } catch (e) { alert(e instanceof Error ? e.message : "페이지 저장 실패"); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabs, datePreset, activeTabId, selNodeId]);
+  }, [tabs, datePreset, activeTabId, selNodeId, applyAndSearch]);
 
   const removeTab = useCallback(async (id: string) => {
     const t = tabs.find((x) => x.id === id);
@@ -3458,9 +3688,9 @@ export function Worklist() {
     setSelNodeId(node.id);
     const merged = mergedFilter(treeNodes, node.id) ?? node.filter;
     setDatePreset(merged.date ?? "");
-    setFilters(folderToFilters(merged));
-    setRefreshKey((k) => k + 1);
-  }, [treeNodes]);
+    // 폴더 클릭 = 명시적 사용자 액션 → 조건 적용 + 즉시 조회(커밋)
+    applyAndSearch({ filters: folderToFilters(merged) });
+  }, [treeNodes, applyAndSearch]);
 
   const onTreeChange = useCallback((next: TreeNode[]) => {
     setTreeNodes(next);
@@ -3499,10 +3729,10 @@ export function Worklist() {
     if (f.date_from) next.date_from_iso = iso(f.date_from);
     if (f.date_to) next.date_to_iso = iso(f.date_to);
     setDatePreset("all");
-    setFilters(next);
     setNlPreview(null);
-    setRefreshKey((k) => k + 1);
-  }, [nlPreview]);
+    // [적용] 버튼 = 명시적 사용자 액션 → 변환된 조건을 입력칸에 넣고 그 자리에서 커밋
+    applyAndSearch({ filters: next });
+  }, [nlPreview, applyAndSearch]);
 
   const emergencyCount = useMemo(() => items.filter((i) => i.emergency).length, [items]);
 
@@ -3560,7 +3790,9 @@ export function Worklist() {
       setOhifOn(on);
       ohifOnRef.current = on;
     }).catch(() => {});
-  }, [refreshKey]);
+    // 설정 저장(settingsTick)에서 뷰어 스킨을 즉시 재해석한다. refreshKey 도 유지해
+    // ⟳ 새로고침·명시적 재조회 때 함께 재확인 — 예전 동작(설정 저장=refreshKey)과 결과가 같다.
+  }, [refreshKey, settingsTick]);
   // (infiSz 상태·infiSzRef·persistInfiSz 는 상단 레이아웃 크기 블록으로 이동 — 뷰어별 저장)
 
   // In/SAINT VIEW 좌측 검색레일 스크롤 보장 — flex 체인 대신 실제 top 을 측정해 뷰포트 기준 maxHeight 를
@@ -3617,7 +3849,15 @@ export function Worklist() {
       case "logout":
         localStorage.setItem("sv_logout", String(Date.now()));   // 뷰어 창도 닫기
         localStorage.removeItem("sv_token"); sessionStorage.removeItem("sv_token");
-        location.href = "/"; break;
+        // ★ 다운로드 모드로 받아 둔 **환자 영상을 반드시 폐기**한다. OPFS 는 탐색기에 안 보일
+        //   뿐 '없는 것'이 아니다 — 공용 판독 PC 에서 로그아웃 후에도 남으면 사고다.
+        //   (09 세션이 같은 논리로 픽셀 쿠키 sv_pix 폐기를 강제했다.)
+        //   ⚠ location.href 를 먼저 때리면 삭제가 중간에 끊길 수 있다 — **끝난 뒤에** 이동한다.
+        //   (삭제가 걸려 있으면 3초 뒤 그냥 이동. 로그아웃이 막히는 편이 더 나쁘다.)
+        dlReset();
+        void Promise.race([opfsWipe(), new Promise((r) => setTimeout(r, 3000))])
+          .finally(() => { location.href = "/"; });
+        break;
       default: void doAction(act);
     }
   };
@@ -3790,20 +4030,22 @@ export function Worklist() {
                       onUpload={() => setImportOpen(true)} />
           {svPerf
             ? <SvPerfCard mods={modCounts} />
+            /* 카운트 칩도 **커밋된** queryParams 로 집계한다 — 입력 상태로 물리면 타건마다
+               /api/worklist/counts 가 나가고 칩 숫자가 목록보다 먼저 움직인다. */
             : <SvStatusBar queryParams={queryParams} refreshKey={refreshKey} items={items} pageOnly={liveMode}
-                           onStatus={(p) => { setFilters((f) => ({ ...f, ...p })); setRefreshKey((k) => k + 1); }}
-                           onRefresh={() => setRefreshKey((k) => k + 1)} />}
+                           onStatus={(p) => applyAndSearch({ filters: (f) => ({ ...f, ...p }) })}
+                           onRefresh={reloadList} />}
         </>
       )}
       <ActionToolbar selected={selected} onAction={(a) => doAction(a)}
                      searchText={searchText} setSearchText={setSearchText}
-                     onSearch={runSearch}
+                     onSearch={runSearch} dirty={queryDirty}
                      onNlSearch={onNlSearch}
                      withOpen={withOpen} setWithOpen={setWithOpen}
                      withOpenMode={withOpenMode} setWithOpenMode={setWithOpenMode}
                      ohifOn={ohifOn} allowed={allowedAction} />
       <FilterBar filters={filters} setFilters={setFilters} fields={findFields}
-                 onSearch={runSearch} />
+                 onSearch={runSearch} dirty={queryDirty} />
 
       {/* 수동 갱신 중 원격(A)에 변경이 생겼을 때 — 목록은 그대로 두고 알리기만 한다.
           판독 중 목록이 저 혼자 바뀌지 않으면서도 '새 검사가 왔다'는 사실은 놓치지 않게. */}
@@ -3815,8 +4057,10 @@ export function Worklist() {
           <span style={{ color: "var(--text-secondary)" }}>
             수동 갱신 모드라 목록을 그대로 두었습니다 — 설정 &gt; 환경에서 자동으로 바꿀 수 있습니다.
           </span>
+          {/* 원격 변경만 반영한다 — 사용자가 타이핑해 둔 미커밋 필터까지 함께 적용하면
+              '새로고침을 눌렀는데 조건이 바뀐다' 가 되어 SEARCH 와 구분이 사라진다. */}
           <button className="primary" style={{ marginLeft: "auto", padding: "2px 12px" }}
-                  onClick={runSearch}>지금 갱신</button>
+                  onClick={reloadList}>지금 갱신</button>
           <button style={{ padding: "2px 10px" }} onClick={() => setPendingChange(false)}>닫기</button>
         </div>
       )}
@@ -3870,12 +4114,13 @@ export function Worklist() {
           <div style={{ width: sizes.railW, display: "flex", flexDirection: "column", flexShrink: 0, minHeight: 0 }}>
             <div ref={railScrollRef}
                  style={{ flex: 1, minHeight: 0, overflow: "auto", display: "block", background: "var(--bg-panel)" }}>
+              {/* 모달리티 칩·기간 프리셋은 '눌렀다' = 명시적 액션 → 조건 반영 + 즉시 커밋(조회) */}
               <SearchRail width={sizes.railW} active={datePreset} unifiedScroll
                           mods={modCounts} activeMod={filters.modality ?? ""}
-                          onMod={(m) => setFilters((f) => ({ ...f, modality: m }))}
+                          onMod={(m) => applyAndSearch({ filters: (f) => ({ ...f, modality: m }) })}
                           onPick={(key, from) => {
                             setDatePreset(key);
-                            setFilters((f) => ({ ...f, tree_from: from, date_from_iso: "", date_to_iso: "" }));
+                            applyAndSearch({ filters: (f) => ({ ...f, tree_from: from, date_from_iso: "", date_to_iso: "" }) });
                           }} tree={
                 <FolderTreeEditor nodes={treeNodes} onChange={onTreeChange}
                                   selectedId={selNodeId} onSelect={applyFolder} applyHint />
@@ -3939,12 +4184,13 @@ export function Worklist() {
       {/* 중단: 검색 레일(기간+폴더 트리) + 메인 그리드 — 좌우 스플리터 (TY 배치) */}
       {!infiMode && !svMode && (
       <div style={{ display: "flex", flex: 2.2, minHeight: 0 }}>
+        {/* 모달리티 칩·기간 프리셋은 '눌렀다' = 명시적 액션 → 조건 반영 + 즉시 커밋(조회) */}
         <SearchRail width={sizes.railW} active={datePreset}
                     mods={modCounts} activeMod={filters.modality ?? ""}
-                    onMod={(m) => setFilters((f) => ({ ...f, modality: m }))}
+                    onMod={(m) => applyAndSearch({ filters: (f) => ({ ...f, modality: m }) })}
                     onPick={(key, from) => {
           setDatePreset(key);
-          setFilters((f) => ({ ...f, tree_from: from, date_from_iso: "", date_to_iso: "" }));
+          applyAndSearch({ filters: (f) => ({ ...f, tree_from: from, date_from_iso: "", date_to_iso: "" }) });
         }} tree={
           <FolderTreeEditor nodes={treeNodes} onChange={onTreeChange}
                             selectedId={selNodeId} onSelect={applyFolder} applyHint />
@@ -4058,9 +4304,9 @@ export function Worklist() {
                         localMode={localMode} localRoot={localRoot}
                         onDone={() => {
                           // CD 영상은 검사일이 과거인 경우가 많아 기간 필터를 '전체'로 풀어 바로 보이게 한다
+                          // (가져오기 완료 = 명시적 액션 → 조건 완화 + 즉시 커밋)
                           setDatePreset("all");
-                          setFilters((f) => ({ ...f, tree_from: "", date_from_iso: "", date_to_iso: "" }));
-                          setRefreshKey((k) => k + 1);
+                          applyAndSearch({ filters: (f) => ({ ...f, tree_from: "", date_from_iso: "", date_to_iso: "" }) });
                         }} />
         </Suspense>
       )}

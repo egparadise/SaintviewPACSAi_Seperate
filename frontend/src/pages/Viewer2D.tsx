@@ -6,9 +6,10 @@ import { annoLabel, contentRect, measureAnno, refLineOn, screenToImage } from ".
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
-import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab } from "../lib/sync";
+import { clearViewerSlots, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { Splitter, clampSz } from "../lib/Splitter";
-import { DEFAULT_WL_PRESETS, mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
+import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgReadable, mgRatioBox, mgStamp, mgWallByCol,
   mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
@@ -21,12 +22,14 @@ import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { IN_MOUSE_OPS } from "../lib/infiConfig";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
-import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
+import { isLiveStudyUid, previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { TileGridLines } from "../components/TileGridLines";
 import { ComparePicker, useCompareDefault } from "../components/ComparePicker";
 import { CORNERS, cornerLines, cornersFor, type OverlaySource } from "../lib/overlayFields";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
+import { onDlFrame, opfsFrameUrl, setDlMode } from "../lib/dlCache";
+import { readDlPrefs } from "../lib/dlPrefs";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
 
@@ -263,6 +266,16 @@ function renderedUrlAt(p: PaneState, idx: number): string | null {
   // WASM 파이프라인(베타) — 준비된 로컬 디코딩 프레임이 있으면 우선, 없으면 서버 렌더링 폴백
   const wasm = wasmFrameUrl(stu, su, inst.sop_uid, p.wl || "");
   if (wasm) return wasm;
+  // 다운로드 모드 — 로컬(OPFS)에 받아 둔 본 영상이 있으면 서버 왕복 없이 즉시 표시.
+  // ⚠ 순서가 규칙이다: WASM 이 켜져 있으면 WASM 우선(이중 다운로드 금지 규약).
+  // ⚠ p.wl 이 비었을 때만 히트한다 — 저장본은 검사 기본 W/L 로 구운 JPEG 이라, W/L 을 바꾼
+  //   상태에서 내주면 오버레이가 표시하는 W/L 과 다른 영상이 보인다(판독 오해). dlCache 참조.
+  // ⚠ **Live 검사일 때만** 히트시킨다 — 쓰기 측(dlScheduler)이 liveMode 게이트인데 읽기 측에
+  //   게이트가 없으면, 미러 배치(로컬 Orthanc + Live 병행, SOP UID 동일)에서 sv_server_mode 를
+  //   local 로 바꾼 순간 로컬 검사 화면에 **A 가 렌더한 저장본**이 뜬다. 페인 단위 판정이므로
+  //   Combine 으로 Live·로컬을 섞은 페인에서도 각 인스턴스가 제 소스로 간다.
+  const local = isLiveStudyUid(stu) ? opfsFrameUrl(inst.sop_uid, p.wl || "") : null;
+  if (local) return local;
   // WebPACS Live 검사(UID 레지스트리)는 라이브 프록시가 서버측 윈도잉 렌더 — 페인 단위 판정
   const root = renderedRootFor(stu, DICOMWEB_ROOT);
   return `${root}/studies/${stu}/series/${su}/instances/${inst.sop_uid}/rendered${wl}${renderedParams(!!wl)}`;
@@ -335,6 +348,26 @@ function loadPersistedTabs(): { id: number; uid: string; label: string }[] {
 }
 function savePersistedTabs(tabs: { id: number; uid: string; label: string }[]) {
   try { localStorage.setItem(TABS_KEY, JSON.stringify(tabs)); } catch { /* quota */ }
+}
+/** 다중 모니터 관리 배치(mm)에서의 공유 탭 기록 — **새 항목만 append**, 순서는 건드리지 않는다.
+ *  전체 덮어쓰기를 하면 각 창이 "자기 활성 검사를 맨 뒤로" 옮긴 배열을 서로 밀어내서(1186행 참조)
+ *  모니터마다 탭 순서가 달라진다. 순서의 출처는 워크리스트 선등록(단일 기록자) 하나여야 한다. */
+function mergePersistedTabs(tabs: { id: number; uid: string; label: string }[]) {
+  const cur = loadPersistedTabs();
+  const seen = new Set(cur.map((t) => t.id));
+  const add = tabs.filter((t) => !seen.has(t.id));
+  if (add.length) savePersistedTabs([...cur, ...add]);
+}
+/** Exam 탭 ✕ — 공유 목록에서 **그 항목 하나만** 뺀다.
+ *  append-only(mergePersistedTabs)로 바꾸면서 삭제 경로가 통째로 사라졌었다 → mm 창에서 탭을 닫아도
+ *  sv_viewer_tabs 에는 남고, 그 창이 라운드로빈 대상이 되어 리로드되는 순간 복원부(loadPersistedTabs)가
+ *  닫은 탭을 되살렸다. 게다가 ◀▶ 이동은 "이미 열린 검사"를 이 목록으로 건너뛰므로 닫은 검사가
+ *  영구히 스킵됐다. 단일 항목 제거는 배열 순서를 건드리지 않으므로 append-only 규약과 충돌하지 않는다
+ *  ('모니터마다 탭 순서가 갈리던' 원래 문제는 전체 덮어쓰기가 원인이었다). */
+function dropPersistedTab(id: number) {
+  const cur = loadPersistedTabs();
+  const next = cur.filter((t) => t.id !== id);
+  if (next.length !== cur.length) savePersistedTabs(next);
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -614,6 +647,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   };
   // 다른 창(Worklist/Reading)에서 환자가 바뀌면 — 열린 탭이면 그 탭으로 전환
   const loadIntoActiveRef = useRef<(id: number) => Promise<void>>(async () => {});
+  const closeTabRef = useRef<(id: number, broadcast?: boolean) => void>(() => {});
   const openTabsRef = useRef<{ id: number; uid: string; label: string }[]>([]);
   useEffect(() => {
     const off = onStudySync("viewer", (id) => {
@@ -633,6 +667,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     });
     return off;
   }, []);
+  // 다른 모니터에서 Exam 탭 ✕ → 이 창의 목록에서도 뺀다(재전파 없음). 공유 레지스트리는 발신 창이
+  // 이미 정리했다 — 여기서 빼지 않으면 이 창의 openTabs 가 다음 기록에서 그 항목을 되살린다.
+  useEffect(() => onViewerDelTab((id) => closeTabRef.current(id, false)), []);
   const [activePane, setActivePane] = useState("p0");
   const [panes, setPanes] = useState<Record<string, PaneState>>(
     Object.fromEntries(PANE_IDS.map((p) => [p, initPane(detail.study_uid)])),
@@ -736,6 +773,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setCmpSel(new Set());
     setCmpOpen(true);
     if (prefsRef.current.compare?.multi_monitor !== false) {
+      // max_open 캡은 **넘기지 않는다** — 그 값은 '검사를 열 때 순환할 모니터 개수'(라운드로빈 슬롯 수)로,
+      // Compare/과거검사가 쓸 수 있는 모니터 수가 아니다. 캡을 여기까지 적용했더니 3모니터·max_open=2 에서
+      // 비교 2건이 배치를 포기하고(=인플레이스 분할 폴백) 놀고 있는 3번 모니터를 못 쓰게 됐다.
+      // '라운드로빈이 쓰는 모니터를 덮지 않는' 보호는 placeCompareSlaves 가 살아 있는 슬롯을 피해 처리한다.
       void screenFeaturesList(prefsRef.current.monitor?.screens ?? [])
         .then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
     }
@@ -835,8 +876,20 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   }, [detail, addDetail, stackDetail]);
   // 오픈 검사 탭 — 여러 검사가 열리면 좌→우로 탭이 쌓인다(브라우저 창 메타포, UBPACS Opened Study List)
   const [openTabs, setOpenTabs] = useState<{ id: number; uid: string; label: string }[]>([]);
-  useEffect(() => { if (openTabs.length) savePersistedTabs(openTabs); }, [openTabs]);  // ✕/전체닫기 전까지 유지
+  // ✕/전체닫기 전까지 유지. mm(다중 모니터 관리 배치) 창은 **append 만** — 창마다 자기 활성 검사를
+  // 맨 뒤로 옮긴 배열로 공유 목록을 덮어쓰면 모니터마다 탭 순서가 갈린다(순서의 출처는 워크리스트 선등록).
+  const [mmWin] = useState(mmManaged);   // 창 단위로 고정(마운트 1회) — 매 렌더 sessionStorage 조회 방지
+  useEffect(() => {
+    if (!openTabs.length) return;
+    if (mmWin) mergePersistedTabs(openTabs); else savePersistedTabs(openTabs);
+  }, [openTabs, mmWin]);
   openTabsRef.current = openTabs;  // 동기 리스너·◀▶ 기준점에서 최신값 사용
+  // 다중 모니터 슬롯 하트비트 — "이 모니터 창이 살아 있고 지금 이 검사를 물고 있다"를 공유 장부에 남긴다.
+  // 워크리스트가 이 신호로 ①사이클 시작(창 0개 → 전 모니터 오픈)과 ②라운드로빈 순번을 판정한다.
+  // 창 이름이 슬롯 규약(sv_viewer / sv_viewer_slot{n})이 아니면 아무것도 하지 않는다.
+  const slotStudyRef = useRef(activeExamId);
+  slotStudyRef.current = activeExamId;
+  useEffect(() => startViewerSlotHeartbeat(() => slotStudyRef.current), []);
   // 뷰어 열림 하트비트(read_state) — 열린 검사 전체를 45s 주기로 서버에 알림(서버 TTL 120s).
   // 최신 id 목록은 ref 로 읽어 인터벌 재생성 없이 openTabs/detail 변경을 반영. 실패는 조용히 무시.
   const hbIdsRef = useRef<number[]>([]);
@@ -1055,20 +1108,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       // 다중 모니터 슬롯 사전 감지 — Compare/과거검사 '모니터 띄우기'가 클릭 시 동기 사용(팝업 허용).
       // 권한 미승인 등 실패 시 빈 캐시 유지 → 해당 기능은 Layout(인플레이스) 폴백.
       if ((merged.monitor?.screens?.length ?? 0) > 1) {
-        void screenFeaturesList(merged.monitor!.screens!)
+        void screenFeaturesList(merged.monitor!.screens!)   // max_open 캡 미적용 — 위 openCompareModal 주석 참조
           .then((s) => { cmpSlotsRef.current = s; }).catch(() => { cmpSlotsRef.current = []; });
       }
       // 2D 행잉 — 모달리티별 Series 분할(setLayout) + Image 분할(페인 il). 구 형식(문자열=Series만) 호환.
-      // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 뷰어별보다 우선. 아니면 뷰어별(sv/ty) 우선.
-      // MG(mammo)는 전용 2×2 4-view 행잉이 우선(결정적) — 2D 행잉 설정 무시(경합·타일 분할 방지).
-      const vk = skin === "saint" ? "sv" : "ty";
-      const perVMap = v.hanging2d_by_viewer?.[vk] ?? {};
-      const commonMap = merged.hanging2d ?? {};
-      const commonOn = v.hanging2d_common_on ?? true;
-      const pickHang = (m: string) => commonOn ? (commonMap[m] ?? perVMap[m]) : (perVMap[m] ?? commonMap[m]);
-      const hv = detail.modality === "MG" ? undefined : pickHang(detail.modality);
-      const sKey = typeof hv === "string" ? hv : hv?.s;
-      const iKey = typeof hv === "string" ? undefined : hv?.i;
+      // 우선순위 규정은 lib/viewerConfig.ts pickHang2d 한 곳에만 있다(공통 체크 on=공통만/off=이 뷰어만,
+      // 폴백 없음. MG 는 언제나 제외 — 전용 2×2 4-view + mg_hang 이 결정적, 경합·타일 분할 방지).
+      // ⚠ 여기서 다시 삼항으로 폴백을 넣으면 I-View 와 또 갈린다. 규정 변경은 pickHang2d 에서.
+      const hv = pickHang2d({ hanging2d: merged.hanging2d, hanging2d_common_on: v.hanging2d_common_on,
+                              hanging2d_by_viewer: v.hanging2d_by_viewer },
+                            hang2dViewerKey(skin), detail.modality);
+      const sKey = hv?.s;
+      const iKey = hv?.i;
       if (sKey && LAYOUTS[sKey]) setLayout(sKey as keyof typeof LAYOUTS);
       const ig = iKey && LAYOUTS[iKey] ? { r: LAYOUTS[iKey].rows, c: LAYOUTS[iKey].cols } : null;
       hang2dImgRef.current = ig && (ig.r > 1 || ig.c > 1) ? ig : null;   // 페인 생성(시리즈 로드)에서 사용
@@ -1400,10 +1451,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   };
   loadIntoActiveRef.current = loadIntoActive;  // 동기 리스너에서 최신 클로저 사용
 
-  /* 탭 닫기: 목록에서 제거 + 해당 검사를 보이던 페인은 주 검사로 복귀 */
-  const closeTab = (id: number) => {
+  /* 탭 닫기: 목록에서 제거 + 해당 검사를 보이던 페인은 주 검사로 복귀
+     공유 레지스트리에서도 빼고(mm 여부 무관) 다른 모니터 창에도 전파한다 — 안 그러면 이 창에서만
+     사라지고, 리로드/다음 오픈 때 다시 살아난다. broadcast=false 는 수신 창의 재전파 방지. */
+  const closeTab = (id: number, broadcast = true) => {
     const tab = openTabs.find((t) => t.id === id);
     setOpenTabs((prev) => prev.filter((t) => t.id !== id));
+    dropPersistedTab(id);
+    if (broadcast) postViewerDelTab(id);
     if (!tab) return;
     setPanes((prev) => {
       const next = { ...prev };
@@ -1416,6 +1471,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       return next;
     });
   };
+  closeTabRef.current = closeTab;   // 다른 모니터의 ✕ 전파 수신에서 최신 클로저 사용
 
   /* 과거검사 비교 로드(요청 5): related exam 클릭 → 활성 페인에 */
   const loadPrior = async (examId: number) => {
@@ -1738,6 +1794,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (keys) scKeysRef.current = { ...SC_DEFAULTS, ...keys };
       dropMenuRef.current = !!(r.value as { drop_menu?: boolean }).drop_menu;
       setWasmPipeline(!!(r.value as { wasm_pipeline?: boolean }).wasm_pipeline);
+      // 설정>환경 '영상 취득 모드' — download 면 로컬 저장본 우선 조회를 켠다
+      setDlMode(readDlPrefs(r.value).mode === "download");
     }).catch(() => {});
   }, []);
   const onPaneMouseDown = (pid: string, e: React.MouseEvent) => {
@@ -2831,7 +2889,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       closeAllMonitorsRef.current = false;
       postViewerCloseAll();
       try { localStorage.removeItem(TABS_KEY); } catch { /* 무시 */ }
+      // 모니터 벽이 통째로 비므로 슬롯 장부·라운드로빈도 초기화 — 다음 오픈이 다시 '첫 오픈'
+      // (선택 전 모니터에 같은 검사)으로 시작해야 한다.
+      clearViewerSlots();
     }
+    // 이 창은 진짜로 닫힌다(리로드 아님) → 슬롯을 즉시 반납. TTL 만료를 기다리면 그 사이의 오픈이
+    // "아직 창이 살아 있다"고 보고 부트스트랩을 건너뛴다.
+    releaseViewerSlot();
     try {
       if (mode === "save_current") {
         await api.saveAnnotations(detail.id, annos);
@@ -3188,8 +3252,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 {/* ⚡ 저해상 미리보기(원격 A 사전생성 512px JPEG) — 원본 뒤. 원본이 오면 덮인다.
                     ⚠ 원본이 한 번 뜬 뒤에는 내린다 — A 기본 W/L 로 렌더된 영상이라 W/L 드래그 중
                     드러나면 오버레이가 표시하는 W/L 과 다른 영상이 보인다(판독 오해). */}
-                {previewUrlOf(url, p.studyUid) && !(inst && prevDone[inst.sop_uid]) && (
-                  <img src={previewUrlOf(url, p.studyUid)!} alt="" draggable={false} aria-hidden
+                {previewUrlOf(url, p.studyUid, inst?.sop_uid) && !(inst && prevDone[inst.sop_uid]) && (
+                  <img src={previewUrlOf(url, p.studyUid, inst?.sop_uid)!} alt="" draggable={false} aria-hidden
                        style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
                                 objectFit: "contain", filter: paneFilter(p) }} />
                 )}
@@ -3231,8 +3295,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                          }}
                          style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0,
                                   cursor: ti ? "zoom-in" : undefined }}>
-                      {u && previewUrlOf(u, p.studyUid) && !(ti && prevDone[ti.sop_uid]) && (
-                        <img src={previewUrlOf(u, p.studyUid)!} alt="" draggable={false} aria-hidden
+                      {u && previewUrlOf(u, p.studyUid, ti?.sop_uid) && !(ti && prevDone[ti.sop_uid]) && (
+                        <img src={previewUrlOf(u, p.studyUid, ti?.sop_uid)!} alt="" draggable={false} aria-hidden
                              style={{ position: "absolute", inset: 0, width: "100%", height: "100%",
                                       objectFit: "contain",
                                       transform: mgTiles ? xf(mgApply(p, fk)) : undefined,
@@ -3954,6 +4018,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // WASM 프레임 준비 알림 — 디코딩 완료 시 재렌더(blob URL 교체 반영)
   const [, setWasmTick] = useState(0);
   useEffect(() => onWasmFrame(() => setWasmTick((t) => t + 1)), []);
+  // 다운로드 모드 — OPFS 저장본 디코드 완료 시 재렌더(같은 틱 구독을 재사용한다)
+  useEffect(() => onDlFrame(() => setWasmTick((t) => t + 1)), []);
   useEffect(() => {
     if (!qrCap) return;
     const iv = setInterval(() => {
@@ -4571,7 +4637,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                         // 슬롯 캐시 자가치유 — 이번 클릭은 캐시로 동기 시도, 다음 클릭용 재감지(권한 후승인 반영)
                         if (prefsRef.current.compare?.prior_mode === "monitor"
                             && (prefsRef.current.monitor?.screens?.length ?? 0) > 1) {
-                          void screenFeaturesList(prefsRef.current.monitor!.screens!)
+                          void screenFeaturesList(prefsRef.current.monitor!.screens!)   // max_open 캡 미적용
                             .then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
                         }
                         if (prefsRef.current.compare?.prior_mode === "monitor"

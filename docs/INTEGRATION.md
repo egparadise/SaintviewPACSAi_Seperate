@@ -309,7 +309,16 @@ postgresql://saintview:saintview_dev@<host>:5434/saintview     # pgvector/pg16
 | `VITE_API_BASE` | (빈값) | 같은 출처 프록시 / 모드 B: 대상 서버 절대 URL |
 | `VITE_DICOMWEB_ROOT` | `/dicom-web` | WADO-RS `/rendered` 루트(자체 뷰어 픽셀) |
 | `VITE_OHIF_BASE` | `http://localhost:3001` | Advance View 딥링크 베이스 |
-| `VITE_VIEWER_BASE` | (빈값=같은 출처) | 뷰어 창 별도 출처 분리 시 |
+| `VITE_VIEWER_BASE` | (빈값=같은 출처) | 뷰어 창 별도 출처 분리 시 (아래 제약 참조) |
+
+> **`VITE_VIEWER_BASE` 배치의 제약** — 뷰어 창이 워크리스트와 **다른 오리진**이 되면 `localStorage`
+> 를 공유하지 못한다. 그래서 다중 모니터 슬롯 장부(`sv_vslot_*`)와 다운로드 모드 저장본(OPFS)이
+> 워크리스트 쪽에서 보이지 않는다.
+> · 다중 모니터 순번: 워크리스트가 자기 창 핸들(`!w.closed` — 교차 출처에서도 읽힌다)로 생존을
+>   판정해 **정상 동작한다**. 다만 워크리스트를 새로고침하면 핸들이 사라지므로 그 직후 한 번은
+>   '첫 오픈'(선택 전 모니터에 같은 검사)으로 다시 시작한다. 같은 출처 배치에서는 장부가 남아
+>   순번이 그대로 이어진다.
+> · 다운로드 모드: 이 배치에서는 기능 자체가 비활성이다(`lib/opfsStore.ts` 가 안내 문구 표시).
 | `SV_API_URL` / `SV_DICOMWEB_URL` / `SV_ORTHANC_URL` | 8010/3001/8043 | vite 프록시 대상(기동 프로세스 env) |
 
 ---

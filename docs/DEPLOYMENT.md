@@ -41,6 +41,9 @@ cd backend && py -3.11 seed_sample.py
 
 - 접속: `https://localhost:5180` (자체서명 — 최초 1회 경고 통과)
 - 로그인: 병원 `SAMPLE01` / `sample_admin`(또는 `sample_dr`) / `sample1234` — 운영 전 변경
+  (로그인 칸은 **자동으로 채워지지 않는다** — 시드 계정 프리필이 브라우저 비밀번호관리자에 저장돼
+   워크리스트 SEARCH 칸으로 자동완성되던 문제 때문에 제거했다. 이미 `Sample01` 이 저장된 PC 는
+   `chrome://password-manager/passwords` 에서 해당 항목을 삭제해야 한다)
 - 시스템 관리자 API 계정: `admin`/`admin1234` — 운영 전 변경
 - 운영 전환 시: `backend/.env` 에 `SAINTVIEW_ENV=prod` + `SAINTVIEW_JWT_SECRET`(32자+)·
   관리자/Orthanc 비밀번호 지정(prod 게이트가 기본값 거부), `deploy/docker-compose.prod.yml` 오버레이 적용.

@@ -11,9 +11,13 @@ export function ClientLogin({ onLogin, onBack }: {
   onLogin: (r: LoginResp) => void; onBack?: () => void;
 }) {
   // 자동 로그인 체크 시 병원ID·개별ID·PW 를 모두 기억(localStorage)하고 다음 로드에 프리필.
+  // ⚠ 시드 계정(SAMPLE01/admin)을 기본값으로 **프리필하지 않는다**. 운영 화면에 데모 계정이 미리
+  //   채워져 있으면 브라우저 비밀번호관리자가 그 값을 이 사이트의 자격증명으로 저장해 버리고,
+  //   그 뒤로는 이름 없는 텍스트 필드(예: 워크리스트 SEARCH 칸)에 자동완성으로 흘러들어간다.
+  //   실제로 SEARCH 칸에 'Sample01' 이 들어가 목록이 비는 사고가 있었다. 안내는 placeholder 로만.
   const remembered = localStorage.getItem("sv_remember") === "1";
-  const [hospitalId, setHospitalId] = useState(remembered ? (localStorage.getItem("sv_client_hosp") ?? "SAMPLE01") : "SAMPLE01");
-  const [username, setUsername] = useState(remembered ? (localStorage.getItem("sv_client_user") ?? "admin") : "admin");
+  const [hospitalId, setHospitalId] = useState(remembered ? (localStorage.getItem("sv_client_hosp") ?? "") : "");
+  const [username, setUsername] = useState(remembered ? (localStorage.getItem("sv_client_user") ?? "") : "");
   const [password, setPassword] = useState(remembered ? (localStorage.getItem("sv_client_pw") ?? "") : "");
   const [remember, setRemember] = useState(remembered);
   // ★ 원격 PACS(A) 계정으로 직접 로그인 — 그 서버 계정으로 로그인, Live 모드 자동 진입(요구4)
@@ -101,16 +105,25 @@ export function ClientLogin({ onLogin, onBack }: {
           <input type="checkbox" checked={aMode} onChange={(e) => setAMode(e.target.checked)} />
           원격 PACS 서버 계정으로 로그인 (직결 · Live)
         </label>
+        {/* ⚠ 각 칸에 name + autoComplete 역할을 **명시**한다. 이름 없는 텍스트 필드가 둘(병원ID·아이디)
+            이고 그 뒤에 password 가 오면, 크롬은 앞의 텍스트 칸을 username 으로 보고 자격증명을
+            그쪽에 바인딩한다. 그러면 같은 문서의 다른 이름 없는 텍스트 필드(워크리스트 SEARCH 등)로
+            그 값이 자동완성돼 흘러들어간다. 역할을 못 박아 로그인 폼에만 붙게 한다. */}
         {!aMode && (
           <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>병원 ID
-            <input style={inp} placeholder="병원 코드 또는 이름(예: HOSP002, 광주씨티병원)" value={hospitalId} onChange={(e) => setHospitalId(e.target.value)} autoFocus />
+            <input style={inp} placeholder="병원 코드 또는 이름(예: HOSP002, 광주씨티병원)" value={hospitalId}
+                   name="hospital_id" autoComplete="organization" autoCapitalize="off" spellCheck={false}
+                   onChange={(e) => setHospitalId(e.target.value)} autoFocus />
           </label>
         )}
         <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>{aMode ? "PACS 계정 ID" : "개별 ID"}
-          <input style={inp} placeholder="아이디" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus={aMode} />
+          <input style={inp} placeholder="아이디" value={username}
+                 name="username" autoComplete="username" autoCapitalize="off" spellCheck={false}
+                 onChange={(e) => setUsername(e.target.value)} autoFocus={aMode} />
         </label>
         <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>Password
-          <input style={inp} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <input style={inp} type="password" value={password} name="password" autoComplete="current-password"
+                 onChange={(e) => setPassword(e.target.value)} />
         </label>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, color: "var(--text-secondary)" }}>
           <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
@@ -150,10 +163,12 @@ export function ClientLogin({ onLogin, onBack }: {
               발급받은 초기 비밀번호는 최초 1회 반드시 변경해야 합니다. 새 비밀번호를 두 번 입력하세요(8자 이상).
             </div>
             <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>새 비밀번호
-              <input style={inp} type="password" value={np1} autoFocus onChange={(e) => setNp1(e.target.value)} />
+              <input style={inp} type="password" value={np1} autoFocus
+                     name="new_password" autoComplete="new-password" onChange={(e) => setNp1(e.target.value)} />
             </label>
             <label style={{ fontSize: 12, color: "var(--text-secondary)" }}>새 비밀번호 확인
               <input style={inp} type="password" value={np2} onChange={(e) => setNp2(e.target.value)}
+                     name="new_password_confirm" autoComplete="new-password"
                      onKeyDown={(e) => { if (e.key === "Enter") void doChange(); }} />
             </label>
             {cerr && <div style={{ color: "var(--stat-emergency,#f87171)", fontSize: 12 }}>{cerr}</div>}

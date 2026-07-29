@@ -3,10 +3,26 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail } from "../api";
 import { onStudySync, postStudySync } from "../lib/sync";
+import { liveViewerSlots, noteViewerSlot } from "../lib/viewerSlots";
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { MicIcon } from "../components/MicIcon";
 
 type Tab = "read" | "hist" | "std" | "tpl";
+
+/** 판독창이 직접 여는 뷰어 창("sv_viewer") — 다중 모니터 벽이 서 있으면 mm=1 로 열어야 한다.
+ *
+ *  왜: mm(다중 모니터 관리 배치) 승격이 빠진 창은 In-View 가 공유 Exam 레지스트리 **전체**를
+ *  탭이 아니라 페인에 깐다(ViewerInfi 의 hangList 분기는 mm 일 때만 자기 배정 검사로 좁힌다).
+ *  ◀▶ 로 sv_viewer 가 **새로** 생기면 sessionStorage(sv_mm)도 비어 있어 mm=false 가 되고,
+ *  그 창에 "다른 모니터에서 연 검사들"이 함께 걸린다 — 사용자가 본 '다른 모니터 영상이 같이 보인다'.
+ *
+ *  판정은 살아 있는 슬롯 장부로 한다: sv_viewer 외 슬롯 창이 하나라도 살아 있으면 다중 모니터 벽이다.
+ *  단일 창뿐이면 mm 을 싣지 않는다(기존 단일 창 규칙·외부 선택 동기 유지). */
+function viewerUrlFor(qs: string): string {
+  const wall = [...liveViewerSlots().keys()].some((n) => n !== "sv_viewer");
+  const base = `${window.location.origin}${window.location.pathname}`;
+  return `${base}?${qs}${wall ? "&mm=1" : ""}`;
+}
 
 /* History 과거검사 썸네일 — 검사의 첫 영상 시리즈 중간 프리뷰를 지연 로드 */
 function HistThumb({ examId }: { examId: number }) {
@@ -94,7 +110,8 @@ export function ReportWindow() {
   const openCompare = (e: RelatedExam) => {
     if (!detail) return;
     // 현재 판독 검사 + 과거검사를 1:2 Compare(Add View)로 — 뷰어가 좌:현재 / 우:과거 로 배치
-    const w = window.open(`${window.location.origin}${window.location.pathname}?viewer=2d&study=${detail.id}&add=${e.id}`, "sv_viewer");
+    const w = window.open(viewerUrlFor(`viewer=2d&study=${detail.id}&add=${e.id}`), "sv_viewer");
+    if (w) noteViewerSlot("sv_viewer", detail.id);   // 라운드로빈 장부 갱신(이 모니터가 무엇을 물고 있는지)
     w?.focus();
   };
   // 판독 텍스트를 좌클릭으로 잡은 채 'V' → 현재 판독영역에 붙여넣기 (마우스업/블러=잡기 해제)
@@ -311,7 +328,9 @@ export function ReportWindow() {
     const id = navList[next];
     await loadStudy(id);   // postStudySync → 워크리스트 선택도 따라감
     // 이미지도 함께 — 뷰어 창(sv_viewer)을 그 검사로 열기/전환 (닫혀 있으면 새로 연다)
-    window.open(`${window.location.origin}${window.location.pathname}?viewer=2d&study=${id}`, "sv_viewer");
+    const w = window.open(viewerUrlFor(`viewer=2d&study=${id}`), "sv_viewer");
+    if (w) noteViewerSlot("sv_viewer", id);   // 라운드로빈 장부 갱신 — 이 모니터의 현재 검사가 바뀌었다
+
     setTimeout(() => window.focus(), 120);   // 판독창 포커스 유지(계속 넘기며 판독)
   };
 

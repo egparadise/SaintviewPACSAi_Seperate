@@ -6,11 +6,15 @@ import {
   INFI_COLUMNS, SV_COLUMNS, SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
+import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
+import { dlSupportReason, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
+import { dlForgetDone, dlProgress, type DlProgress } from "../lib/dlScheduler";
+import { dlInvalidateCache } from "../lib/dlCache";
 import {
   BASIS_LABEL, DEFAULT_COMPARE, PERIODS, PERIOD_LABEL, readCompareCfg,
   type CompareBasisKind, type CompareCfg, type ComparePeriod,
 } from "../lib/compareBasis";
-import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, TOOLBAR_DEFS, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
+import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_HP_DISPLAYS, DEFAULT_WL_PRESETS, HANG2D_MODS, TOOLBAR_DEFS, hang2dModLabel, hang2dViewerLabel, migrateHang2d, type Hang2dCell, type Hang2dPending, type HpDisplay, type HpRule, type WlPreset } from "../lib/viewerConfig";
 import { IN_PALETTE } from "../lib/infiConfig";
 import { DEFAULT_MG_CFG, MG_LAYOUTS, readMgCfg, type MgCfg } from "../lib/mgHang";
 import { OverlayLayoutEditor } from "../components/OverlayLayoutEditor";
@@ -142,27 +146,32 @@ function UsageTop({ usage, labelOf, onReset }: {
 /** SCP/SCU 장비 노드 (dicom.nodes — AE Title/IP/Port, 추가·삭제·확장 가능) */
 interface DicomNode { name: string; role: "scu" | "scp" | "both"; ae_title: string; ip: string; port: number }
 
-/** 2D 행잉 편집기 — 모달리티별 Series/Image 분할(공통·뷰어별 공용). */
-const HANG2D_MODS = ["CR", "DR", "MG", "US", "CT", "MR", "XA", "NM", "PT"];
-function Hanging2dEditor({ map, onChange }: {
+/** 2D 행잉 편집기 — 모달리티별 Series/Image 분할(공통·뷰어별 공용).
+ *  ⚠ 모달리티 목록(HANG2D_MODS)·저장본 정리(migrateHang2d)는 규정과 같이 lib/viewerConfig.ts 에 있다.
+ *     MG 는 그 목록에 없다 — 맘모는 언제나 '뷰어 공통' 단일 규정(표준 2×2 + 아래 mg_hang 전용 블록). */
+function Hanging2dEditor({ map, onChange, disabled }: {
   map: Record<string, { s: string; i: string }>;
   onChange: (m: string, next: { s: string; i: string }) => void;
+  disabled?: boolean;   // 공통 우선 적용 on 일 때 뷰어별 표 — '무시된다'를 화면에서 보이게
 }) {
   const parseG = (s: string) => { const [r, c] = s.split("x").map(Number); return { r: r || 1, c: c || 1 }; };
   const gStr = (g: { r: number; c: number }) => `${g.r}x${g.c}`;
   return (
-    <>
+    <div style={disabled ? { opacity: 0.45, pointerEvents: "none" } : undefined}
+         aria-disabled={disabled || undefined}>
       {HANG2D_MODS.map((m) => {
         const cur = map[m] ?? { s: "1x1", i: "1x1" };
         return (
           <div key={m} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-            <b style={{ width: 42, fontSize: 12 }}>{m}</b>
+            <b style={{ width: 64, fontSize: 12 }}
+               title={m === "*" ? "이 표에 행이 없는 나머지 모달리티에 적용 (같은 표 안에서만)" : undefined}>
+              {hang2dModLabel(m)}</b>
             <GridPicker label="Series" max={10} value={parseG(cur.s)} onPick={(g) => onChange(m, { ...cur, s: gStr(g) })} />
             <GridPicker label="Image" max={10} value={parseG(cur.i)} onPick={(g) => onChange(m, { ...cur, i: gStr(g) })} />
           </div>
         );
       })}
-    </>
+    </div>
   );
 }
 
@@ -237,6 +246,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [h2dMap, setH2dMap] = useState<Record<string, { s: string; i: string }>>({});
   const [h2dCommonOn, setH2dCommonOn] = useState(true);
   const [h2dByViewer, setH2dByViewer] = useState<Record<string, Record<string, { s: string; i: string }>>>({});
+  // 저장본 정리(migrateHang2d) 결과 — 0보다 크면 **모달 상단 배너**로 띄운다.
+  // ⚠ 배너를 '뷰어 공통 > 2D 행잉' 탭 안에 두면 다른 탭에서 OK 를 누른 사용자는 안내를 못 본 채
+  //   확정하게 된다 = '조용히 바꾸지 않는다'가 거짓이 된다. 그래서 탭과 무관한 자리로 올렸다.
+  const [h2dMigrated, setH2dMigrated] = useState(0);
+  // 자동으로 옮기지 않은 값(옮기면 손대지 않은 다른 뷰어까지 바뀐다) — 모달리티·뷰어·값을 그대로 찍는다
+  const [h2dPending, setH2dPending] = useState<Hang2dPending[]>([]);
+  // 2D 행잉 표에 행이 없어 어떤 뷰어도 읽지 않는 구 infi_default_layout 키
+  const [h2dDropped, setH2dDropped] = useState<string[]>([]);
   // 2D-MG — MG 좌우 사이 공기 여백 제거 모드(뷰어 3종 공통). viewer.prefs.mg_hang
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   // 오류 기록(정보 탭) — 화면 백지화 원인이 새로고침으로 사라지지 않게 보관한 것
@@ -314,6 +331,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [scKeys, setScKeys] = useState<Record<string, string>>({ ...SC_DEFAULTS });
   const [dropMenu, setDropMenu] = useState(false);  // 시리즈 드롭 동작 메뉴(기본 숨김=바로 Open)
   const [wasmPipe, setWasmPipe] = useState(false);  // WASM 디코딩 파이프라인(베타)
+  // ── 영상 취득 모드(설정>환경) — Live(볼 때 받는다) / 다운로드(미리 받아 둔다) ──
+  // ⚠ 이름 주의: sv_server_mode(local/web/live)·연동 3가지 모드(미러/Live/표준 DICOM)가 이미
+  //   '모드'를 점유하고 있다. 이 항목은 **영상 취득 모드**이고 저장은 viewer.prefs.dl_* 이다.
+  const [dl, setDl] = useState<DlPrefs>({ ...DL_DEFAULTS });
+  const [dlUse, setDlUse] = useState<DlUsage | null>(null);
+  const [dlBusy, setDlBusy] = useState(false);
+  const [dlProg, setDlProg] = useState<DlProgress | null>(null);
+  const dlWhy = dlSupportReason();
   // 정책 — ◀(왼쪽) 버튼이 시간상 어느 방향으로 갈지 (워크리스트는 최신이 위)
   const [polNavLeft, setPolNavLeft] = useState<"past" | "recent">("past");
   const [quality, setQuality] = useState<AiQuality | null>(null);
@@ -435,26 +460,40 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (icm && ["ask", "save_current", "save_all", "none"].includes(icm)) setInfCloseMode(icm);
       setOhifOn(!!(v as { ohif_enabled?: boolean }).ohif_enabled);
       setWasmPipe(!!(v as { wasm_pipeline?: boolean }).wasm_pipeline);
-      if (iv.infi_default_layout) {
-        const toStr = (l?: { r: number; c: number } | null) => (l ? `${l.r} x ${l.c}` : "");
-        setDefLay(Object.fromEntries(Object.entries(iv.infi_default_layout)
-          .map(([k, cfg]) => [k, { s: toStr(cfg.s), i: toStr(cfg.i) }])));
-      }
+      setDl(readDlPrefs(v));
       if (v.paletteSide) setPaletteSide(v.paletteSide);
       if (v.thumbSide) setThumbSide(v.thumbSide);
       if (v.thumbSize) setThumbSize(v.thumbSize);
       if (v.thumbMode) setThumbMode(v.thumbMode);
-      if (v.hanging2d) {
+      // 2D 행잉 — 공통/체크/뷰어별 + 구 infi_default_layout 을 한 블록에서 확정한다.
+      // 따로 setState 하면 마이그레이션이 체크 상태를 못 보고 굳혀 버린다(순서 의존).
+      {
         const norm: Record<string, { s: string; i: string }> = {};
-        for (const [m, val] of Object.entries(v.hanging2d)) {
+        for (const [m, val] of Object.entries(v.hanging2d ?? {})) {
           if (typeof val === "string") norm[m] = { s: val, i: "1x1" };   // 구 형식(Series만)
           else if (val && typeof val === "object") norm[m] = { s: (val as { s?: string }).s ?? "1x1", i: (val as { i?: string }).i ?? "1x1" };
         }
-        setH2dMap(norm);
+        const vv = v as { hanging2d_common_on?: boolean; hanging2d_by_viewer?: Record<string, Record<string, { s: string; i: string }>> };
+        // 키 없음 = 체크 on. 뷰어(pickHang2d)의 기본값과 반드시 같아야 한다 —
+        // 여기서 false 로 읽으면 구 계정 전부가 '체크 off + 뷰어별 비어 있음' = 전 모달리티 자동이 된다.
+        const commonOn = vv.hanging2d_common_on ?? true;
+        // 구 값은 {r,c} → "RxC". 공백을 넣으면(구 "2 x 2") Viewer2D 의 LAYOUTS 키 조회가 실패한다.
+        const gStr = (l?: { r: number; c: number } | null) => (l ? `${l.r}x${l.c}` : "");
+        const legacyInfi: Record<string, { s: string; i: string }> = Object.fromEntries(
+          Object.entries(iv.infi_default_layout ?? {}).map(([k, cfg]) => [k, { s: gStr(cfg?.s), i: gStr(cfg?.i) }]));
+        const mig = migrateHang2d(norm, vv.hanging2d_by_viewer ?? {}, commonOn, legacyInfi);
+        setH2dMap(mig.common);
+        setH2dCommonOn(commonOn);
+        setH2dByViewer(mig.byViewer);
+        setH2dMigrated(mig.moved);
+        setH2dPending(mig.pending);
+        setH2dDropped(mig.dropped);
+        // 표로 접힌 모달리티 키는 infi_default_layout 에서 뺀다. HANG2D_MODS 에 DX·'*' 행이 있으므로
+        // 구 편집기(CT/MR/CR/DX/US/XA/'*')가 만들 수 있던 키는 전부 접힌다 → 보통 여기 남는 건 없다.
+        // 남는 게 있으면 그건 어떤 뷰어도 읽지 않는 값이고, mig.dropped 로 배너에 그대로 찍힌다.
+        setDefLay(Object.fromEntries(Object.entries(legacyInfi)
+          .filter(([k]) => !HANG2D_MODS.includes(k) && k !== "MG")));
       }
-      const vv = v as { hanging2d_common_on?: boolean; hanging2d_by_viewer?: Record<string, Record<string, { s: string; i: string }>> };
-      if (vv.hanging2d_common_on !== undefined) setH2dCommonOn(!!vv.hanging2d_common_on);
-      if (vv.hanging2d_by_viewer) setH2dByViewer(vv.hanging2d_by_viewer);
       setMgCfg(readMgCfg((v as { mg_hang?: unknown }).mg_hang));
       {
         const raw = (v as { overlay_by_modality?: Record<string, unknown> }).overlay_by_modality;
@@ -546,6 +585,16 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   };
   useEffect(() => { if (page === "network") testOrthanc(); }, [page]);
 
+  // 영상 취득(환경 탭) — 사용량·진행률은 이 창의 스케줄러 상태에서 읽는다(설정 모달은
+  // 워크리스트와 같은 창에 있다). 탭을 보고 있을 때만 1초 폴링 — 다른 탭에서는 돌지 않는다.
+  useEffect(() => {
+    if (page !== "env") return;
+    const tick = () => { setDlProg(dlProgress()); void opfsUsage().then(setDlUse).catch(() => {}); };
+    tick();
+    const t = window.setInterval(tick, 1000);
+    return () => window.clearInterval(t);
+  }, [page]);
+
   // 공유 디렉토리 존재 여부 뱃지 — 입력 디바운스(400ms) 후 서버측 확인(/api/share/fs, 관리자 전용)
   useEffect(() => {
     if (!isAdmin || page !== "servernet") return;
@@ -557,7 +606,34 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     return () => clearTimeout(t);
   }, [snDir, isAdmin, page]);
 
+  /* ── 2D 행잉: 체크 상태가 바뀌면 그 자리에서 다시 정리한다 ──────────────────────────────
+     '공통 우선' 체크는 **어느 맵이 읽히는지**를 통째로 바꾼다. 로드 시점의 체크 상태로 한 번만
+     정리해 두면, 사용자가 체크를 뒤집고 OK 를 누른 순간 읽히는 쪽 맵이 비어 세 뷰어의 행잉이
+     전부 초기화된다(폴백을 없앴으므로 구제 경로가 없다). 그래서 토글 즉시 재정리해서
+     ① 값을 읽히는 쪽으로 옮기고 ② 옮기지 못한 값을 배너에 바로 보여 준다. */
+  const h2dRemigrate = (nextCommonOn: boolean) => {
+    const mig = migrateHang2d(h2dMap, h2dByViewer, nextCommonOn, {});
+    setH2dCommonOn(nextCommonOn);
+    setH2dMap(mig.common);
+    setH2dByViewer(mig.byViewer);
+    setH2dMigrated((n) => n + mig.moved);
+    setH2dPending(mig.pending);
+  };
+  /** 배너의 [공통 표로 올리기] — 자동 승격을 막은 값을 사용자가 명시적으로 공통에 올린다. */
+  const h2dPromote = (p: Hang2dPending) => {
+    const val: Hang2dCell = { s: p.cur[0].s, i: p.cur[0].i };
+    setH2dMap((prev) => ({ ...prev, [p.m]: val }));
+    setH2dPending((prev) => prev.filter((x) => x.m !== p.m));
+    setSaved(`${hang2dModLabel(p.m)} ${val.s}/${val.i} 를 공통 표에 올렸습니다 — OK(저장) 시 세 뷰어에 적용`);
+  };
+
   const save = async () => {
+    // 2D 행잉 저장 직전 재정리 — 체크박스를 뒤집은 뒤 다른 탭에서 OK 를 눌러도(=h2dRemigrate 를
+    // 안 탄 경로여도) 읽히는 쪽 맵이 비어 나가지 않게 하는 마지막 방어선. 멱등이라 두 번 돌아도 무해.
+    const h2d = migrateHang2d(h2dMap, h2dByViewer, h2dCommonOn, {});
+    setH2dMap(h2d.common); setH2dByViewer(h2d.byViewer);
+    if (h2d.moved) setH2dMigrated((n) => n + h2d.moved);
+    setH2dPending(h2d.pending);
     // 병합 저장 — 드래그 panel_order 등 다른 키를 덮어쓰지 않도록 현재 서버 값과 합친다
     const cur = (await api.getSetting("worklist.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("worklist.prefs",
@@ -567,9 +643,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     const curV = (await api.getSetting("viewer.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("viewer.prefs", {
       ...curV,
-      hanging2d: h2dMap,
+      hanging2d: h2d.common,
       hanging2d_common_on: h2dCommonOn,
-      hanging2d_by_viewer: h2dByViewer,
+      hanging2d_by_viewer: h2d.byViewer,
       mg_hang: mgCfg,
       overlay_by_modality: ovlCfg,
       client_viewer: clientViewer,
@@ -591,6 +667,11 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       ...(infUsageReset ? { infi_usage: {} } : {}),
       ohif_enabled: ohifOn,
       wasm_pipeline: wasmPipe,
+      // 영상 취득 모드 — 뷰어 2종이 소비하므로 viewer.prefs 에 둔다(worklist.prefs 아님)
+      dl_mode: dl.mode, dl_limit_gb: dl.limitGb, dl_conc: dl.concurrency,
+      dl_scope: dl.scope, dl_recent_n: dl.recentN,
+      // 구 I-View 'Modality 기본 레이아웃' — 편집 UI 는 ee88de4 에서 삭제됐다. 로드 시 모달리티 키는
+      // 2D 행잉(뷰어별 infi)으로 접었으므로 여기 남는 건 표에 자리 없는 키('*' 기타 전체)뿐이다.
       infi_default_layout: Object.fromEntries(Object.entries(defLay)
         .map(([k, v]) => {
           const parse = (s: string) => {
@@ -625,6 +706,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         stt_engine: sttEngine, stt_model: sttModel,
       }, "global");
     }
+    // 정리 안내는 '저장하면 확정됩니다'라는 예고다 — 저장에 성공했으면 예고를 내린다.
+    // pending/dropped 는 저장 뒤에도 여전히 '적용되지 않는 값'이므로 그대로 둔다.
+    setH2dMigrated(0);
     // 열려 있는 Worklist 에 즉시 반영 신호 — 컬럼·패널·크기(뷰어별) 재로드/재해석 (Refresh 없이 반영)
     window.dispatchEvent(new CustomEvent("sv-settings-saved"));
     setSaved("저장됨 — 워크리스트에 즉시 반영되었습니다");
@@ -670,6 +754,46 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   onClick={() => setMaxed((m) => !m)}>{maxed ? "❐ 복원" : "⬜ 최대화"}</button>
           <button onClick={onClose}>닫기</button>
         </div>
+        {/* 2D 행잉 저장본 정리 안내 — **탭과 무관하게** 모달 상단에 띄운다.
+            '뷰어 공통 > 2D 행잉' 탭 안에만 두면 다른 탭에서 OK 를 누른 사용자는 안내를 못 본 채
+            행잉 변경을 확정하게 된다. 저장은 어느 탭에서 눌러도 hanging2d 전체를 쓰기 때문이다. */}
+        {(h2dMigrated > 0 || h2dPending.length > 0 || h2dDropped.length > 0) && (
+          <div style={{ padding: "7px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0,
+                        background: "rgba(251,191,36,0.10)", color: "#fbbf24",
+                        fontSize: 11.5, lineHeight: 1.65, maxHeight: 168, overflowY: "auto" }}>
+            <b>2D 행잉 설정 정리</b> — 아래 내용은 <b>어느 탭에서든 OK(저장)</b> 를 누르면 확정됩니다.
+            {visibleTabs.some((t) => t.key === "viewer") && (
+              <> <span onClick={() => setPage("viewer")}
+                       style={{ textDecoration: "underline", cursor: "pointer" }}>표 열기</span></>
+            )}
+            {h2dMigrated > 0 && (
+              <div>
+                · 구 버전에서 <b>폴백</b>(설정이 없는 쪽을 반대쪽 값으로 대신 적용) 또는 구 I-View
+                <b> &lsquo;Modality 기본 레이아웃&rsquo;</b>으로 적용되던 칸 {h2dMigrated}개를
+                지금 실제로 읽히는 표({h2dCommonOn ? "공통" : "각 뷰어"})로 옮겼습니다.
+              </div>
+            )}
+            {h2dPending.map((p) => (
+              <div key={p.m}>
+                · <b>{hang2dModLabel(p.m)}</b> — {p.cur.map((x) => `${hang2dViewerLabel(x.v)} ${x.s}/${x.i}`).join(", ")}
+                {p.auto.length
+                  ? ` (${p.auto.map(hang2dViewerLabel).join("·")} 에는 설정이 없었습니다)`
+                  : " (뷰어마다 값이 다릅니다)"} —
+                공통 표로 올리면 <b>손대지 않은 다른 뷰어의 화면까지 바뀌므로</b> 자동으로 옮기지 않았습니다.
+                지금은 <b>적용되지 않습니다</b>(값은 각 뷰어 표에 그대로 있어 체크를 해제하면 다시 적용).
+                <button style={{ marginLeft: 6, fontSize: 11 }} onClick={() => h2dPromote(p)}>
+                  공통 표로 올리기 ({p.cur[0].s}/{p.cur[0].i})
+                </button>
+              </div>
+            ))}
+            {h2dDropped.length > 0 && (
+              <div>
+                · 구 I-View 설정의 <b>{h2dDropped.join(", ")}</b> 는 2D 행잉 표에 행이 없어
+                <b> 어떤 뷰어도 읽지 않습니다</b> — 필요하면 해당 모달리티를 표에서 다시 지정하세요.
+              </div>
+            )}
+          </div>
+        )}
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           {/* 좌측 트리 (INFINITT 패턴) */}
           <div style={{ width: treeW, borderRight: "1px solid var(--border)", padding: 8, background: "var(--bg-canvas)", flexShrink: 0, overflowY: "auto" }}>
@@ -898,6 +1022,124 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     </select>
                   </Row>
                 </Group>
+                <Group title="영상 취득">
+                  <Row label="모드">
+                    <span style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <input type="radio" name="dlmode" checked={dl.mode === "live"}
+                               onChange={() => setDl({ ...dl, mode: "live" })} />
+                        Live — 볼 때 받는다 (기본)
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: 4, opacity: dlWhy ? 0.45 : 1 }}>
+                        <input type="radio" name="dlmode" checked={dl.mode === "download"} disabled={!!dlWhy}
+                               onChange={() => setDl({ ...dl, mode: "download" })} />
+                        다운로드 — 미리 받아 둔다
+                      </label>
+                    </span>
+                  </Row>
+                  <Row label="">
+                    <span style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                      다운로드 모드는 워크리스트를 <b>최근 환자 순</b>으로 훑어 시리즈 썸네일 → 각 시리즈의
+                      이미지 순서로 미리 받아 둡니다. 저장 위치는 브라우저 전용 영역이라 <b>탐색기에 보이지
+                      않고 권한 프롬프트도 없습니다</b>. 받아 둔 검사는 서버 왕복 없이 열립니다.
+                      <br />⚠ 현재는 <b>Live 모드 + 2D 뷰어(SaintView·T-View·I-View)</b>에서만 동작합니다.
+                      W/L 을 조정하는 동안에는 서버 렌더로 자동 폴백합니다(저장본은 검사 기본 W/L 로 구운
+                      영상이라 그대로 쓰면 표시 W/L 과 실제 영상이 어긋납니다).
+                      <br />⚠ <b>로그아웃·세션 만료 시 받아 둔 영상은 전부 삭제됩니다</b>(공용 판독 PC 안전).
+                      {dlWhy && (
+                        <><br /><b style={{ color: "var(--warn, #f59e0b)" }}>
+                          이 환경에서는 사용할 수 없습니다 — {dlWhy}
+                        </b></>
+                      )}
+                    </span>
+                  </Row>
+                  {dl.mode === "download" && !dlWhy && (
+                    <>
+                      <Row label="저장 상한">
+                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input type="number" min={1} max={200} value={dl.limitGb} style={{ width: 70 }}
+                                 onChange={(e) => setDl({ ...dl,
+                                   limitGb: Math.min(200, Math.max(1, Math.round(Number(e.target.value) || 2))) })} />
+                          <span style={{ color: "var(--text-secondary)" }}>
+                            GB (브라우저 할당량의 절반을 넘지 않습니다 · 초과 시 <b>오래 안 본 검사부터</b> 통째로 삭제)
+                          </span>
+                        </span>
+                      </Row>
+                      <Row label="대상 범위">
+                        <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <input type="radio" name="dlscope" checked={dl.scope === "list"}
+                                   onChange={() => setDl({ ...dl, scope: "list" })} />
+                            현재 목록 전체
+                          </label>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <input type="radio" name="dlscope" checked={dl.scope === "recent"}
+                                   onChange={() => setDl({ ...dl, scope: "recent" })} />
+                            최근
+                          </label>
+                          <input type="number" min={1} max={500} value={dl.recentN}
+                                 disabled={dl.scope !== "recent"}
+                                 style={{ width: 70, opacity: dl.scope === "recent" ? 1 : 0.45 }}
+                                 onChange={(e) => setDl({ ...dl,
+                                   recentN: Math.min(500, Math.max(1, Math.round(Number(e.target.value) || 50))) })} />
+                          <span style={{ color: "var(--text-secondary)" }}>건만</span>
+                        </span>
+                      </Row>
+                      <Row label="동시 받기">
+                        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input type="number" min={1} max={4} value={dl.concurrency} style={{ width: 60 }}
+                                 onChange={(e) => setDl({ ...dl,
+                                   concurrency: Math.min(4, Math.max(1, Math.round(Number(e.target.value) || 2))) })} />
+                          <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
+                            개 — 크게 잡으면 <b>내 화면은 빨라지고 남의 화면은 느려집니다</b>(원격 PACS 공용).
+                            서버가 이미 검사마다 8워커로 예열하므로 2 를 권합니다.
+                          </span>
+                        </span>
+                      </Row>
+                      <Row label="사용량">
+                        <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12 }}>
+                            {dlUse
+                              ? `${(dlUse.bytes / 1073741824).toFixed(2)} GB · 검사 ${dlUse.studies}건 · 파일 ${dlUse.files}개`
+                              : "확인 전"}
+                          </span>
+                          <button type="button" disabled={dlBusy}
+                                  onClick={() => { setDlBusy(true); void opfsUsage().then(setDlUse).finally(() => setDlBusy(false)); }}>
+                            새로고침
+                          </button>
+                          <button type="button" disabled={dlBusy}
+                                  onClick={() => {
+                                    if (!confirm("받아 둔 영상을 전부 삭제합니다. 계속할까요?")) return;
+                                    setDlBusy(true);
+                                    // ★ 파일만 지우면 안 된다 — 설정 모달은 워크리스트와 **같은 창**이라
+                                    //   스케줄러 모듈 상태를 그대로 공유한다.
+                                    //   · dlForgetDone(): doneUids 를 비워 다시 받게 한다. 안 비우면 loop 의
+                                    //     `!doneUids.has(...)` 필터에 전부 걸려 저장소는 0GB 인데 아무것도
+                                    //     재다운로드되지 않고 진행 표시만 '검사 N/N' 으로 남는다(모순 화면).
+                                    //   · dlInvalidateCache(): 이 창과 **뷰어 창들**의 blob URL 캐시를 버린다.
+                                    //     안 버리면 이미 삭제된 파일의 blob URL 이 계속 서빙된다('비웠다'와 어긋남).
+                                    void opfsWipe()
+                                      .then(() => { dlForgetDone(); dlInvalidateCache(); return opfsUsage(); })
+                                      .then(setDlUse).finally(() => setDlBusy(false));
+                                  }}>
+                            지금 비우기
+                          </button>
+                        </span>
+                      </Row>
+                      <Row label="진행">
+                        <span style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                          {dlProg
+                            ? (dlProg.running
+                                ? `받는 중 — 검사 ${dlProg.done}/${dlProg.total} · 파일 ${dlProg.files}개` +
+                                  (dlProg.current ? ` · 현재: ${dlProg.current}` : "")
+                                : (dlProg.note || "대기 중 — 저장 후 워크리스트에서 시작됩니다."))
+                            : "—"}
+                          <br />창을 여러 개 열어도 <b>다운로드는 한 창에서만</b> 돕니다(같은 영상을 두 번 받지 않도록).
+                        </span>
+                      </Row>
+                    </>
+                  )}
+                </Group>
               </>
             )}
 
@@ -1084,7 +1326,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   {/* ── Live (원격 PACS 직결) ─────────────────────────────────
                       '어느 서버의 데이터를 볼 것인가'는 웹 서버 설정과 같은 축이라 여기에 둔다.
                       예전엔 워크리스트의 [WebPACS] 팝업에만 있어서 찾기 어려웠다. */}
-                  <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                  {/* ⚠ 자체 <form> 으로 격리한다 — form 밖에 type=password 가 있으면 크롬이 문서 전체를
+                      '주인 없는(unowned) 합성 로그인 폼'으로 묶어, 같은 문서의 이름 없는 텍스트 필드
+                      (워크리스트 SEARCH 등)에 저장된 자격증명을 자동완성으로 채워 넣는다.
+                      로그인 폼이 아니므로 autoComplete="off"(+비번은 new-password)로 저장 후보에서도 뺀다.
+                      onSubmit 은 반드시 막는다(엔터 = 페이지 리로드 방지). */}
+                  <form autoComplete="off" onSubmit={(e) => e.preventDefault()}
+                        style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
                     <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4, color: "#22c55e" }}>
                       Live — 원격 PACS 직결 (복사 없음)
                     </div>
@@ -1101,16 +1349,19 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     </Row>
                     <Row label="원격 주소">
                       <input value={lv.base_url} disabled={!isAdmin} placeholder="https://api.example.co.kr"
+                             name="live-base-url" autoComplete="off" spellCheck={false}
                              onChange={(e) => setLv((p) => ({ ...p, base_url: e.target.value }))}
                              style={{ width: 320 }} />
                     </Row>
                     <Row label="계정">
                       <input value={lv.user_id} disabled={!isAdmin} placeholder="원격 PACS 사용자 ID"
+                             name="live-user-id" autoComplete="off" spellCheck={false}
                              onChange={(e) => setLv((p) => ({ ...p, user_id: e.target.value }))}
                              style={{ width: 200 }} />
                     </Row>
                     <Row label="비밀번호">
                       <input type="password" value={lvPw} disabled={!isAdmin}
+                             name="live-password" autoComplete="new-password"
                              placeholder={lv.has_password ? "(저장됨 — 바꿀 때만 입력)" : "비밀번호"}
                              onChange={(e) => setLvPw(e.target.value)} style={{ width: 200 }} />
                     </Row>
@@ -1123,7 +1374,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     </Row>
                     {isAdmin && (
                       <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6 }}>
-                        <button className="primary" onClick={async () => {
+                        {/* form 안의 button 은 기본이 submit — 반드시 type="button" (리로드 방지) */}
+                        <button type="button" className="primary" onClick={async () => {
                           try {
                             const r = await api.webpacsSaveConfig({
                               enabled: lv.enabled, base_url: lv.base_url.trim(),
@@ -1135,7 +1387,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                             setLvMsg("Live 설정 저장됨");
                           } catch (e) { setLvMsg(e instanceof Error ? e.message : "저장 실패"); }
                         }}>Live 설정 저장</button>
-                        <button onClick={async () => {
+                        <button type="button" onClick={async () => {
                           setLvMsg("연결 테스트 중…");
                           try {
                             const r = await api.webpacsTest();
@@ -1146,7 +1398,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                         {lvMsg && <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{lvMsg}</span>}
                       </div>
                     )}
-                  </div>
+                  </form>
                 </Group>
                 <Group title="연결 테스트 (Ping · DICOM Echo · DB)">
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1688,9 +1940,15 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               </div>
               <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                  이 뷰어 전용 2D 행잉. 뷰어 공통의 <b>'공통 우선 적용'</b>이 켜져 있으면 공통 설정이 우선합니다.
+                  이 뷰어 전용 2D 행잉. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.
                 </div>
-                <Hanging2dEditor map={h2dByViewer.infi ?? {}} onChange={(m, next) =>
+                {h2dCommonOn && (
+                  <div style={{ fontSize: 11, color: "#fbbf24", marginBottom: 5 }}>
+                    ⚠ 뷰어 공통의 <b>&lsquo;이 공통 설정을 모든 뷰어에 우선 적용&rsquo;</b>이 켜져 있어
+                    <b> 이 설정은 무시</b>됩니다. 사용하려면 뷰어 공통에서 그 체크를 해제하세요.
+                  </div>
+                )}
+                <Hanging2dEditor map={h2dByViewer.infi ?? {}} disabled={h2dCommonOn} onChange={(m, next) =>
                   setH2dByViewer((p) => ({ ...p, infi: { ...(p.infi ?? {}), [m]: next } }))} />
               </Group>
               <Group title="In Viewer 표시 (계정별 저장)">
@@ -1825,12 +2083,17 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             {page === "viewer" && (
               <Group title="2D 행잉 (모달리티 → Series / Image 분할) — 공통">
                 <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
-                  <input type="checkbox" checked={h2dCommonOn} onChange={(e) => setH2dCommonOn(e.target.checked)} />
+                  {/* 체크만 바꾸고 끝내면 안 된다 — 읽히는 맵이 통째로 바뀌므로 그 자리에서 재정리 */}
+                  <input type="checkbox" checked={h2dCommonOn} onChange={(e) => h2dRemigrate(e.target.checked)} />
                   이 공통 설정을 모든 뷰어에 우선 적용
                 </label>
-                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                  체크 시 SaintView/I-View/T-View 각 뷰어의 개별 2D 행잉보다 <b>이 공통 설정이 우선</b>합니다.
-                  해제하면 각 뷰어(뷰어 공통 &gt; SaintView/I-View/T-View)의 개별 설정을 사용합니다.<br />
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5, lineHeight: 1.7 }}>
+                  <b>체크</b>: SaintView/I-View/T-View 각 뷰어의 개별 2D 행잉은 <b>무시</b>됩니다 — 이 표만 적용(폴백 없음).<br />
+                  <b>해제</b>: 이 공통 표는 적용되지 않고 각 뷰어(뷰어 공통 &gt; SaintView/I-View/T-View)의 개별 설정만 사용합니다.<br />
+                  어느 쪽이든 해당 모달리티 칸을 지정하지 않았으면 <b>설정 없음</b> = 뷰어 자동 규칙(1×1, CT/MR 3×3 등)입니다.<br />
+                  맘모(<b>MG</b>)는 체크와 무관하게 언제나 아래 <b>&lsquo;MG — 유방 사이 여백 제거&rsquo;</b> 규정을 따릅니다(이 표에 MG 행이 없는 이유).<br />
+                  <b>기타(전체)</b> 행은 이 표에 행이 없는 나머지 모달리티에 적용됩니다 — <b>같은 표 안에서만</b>
+                  (공통을 읽는 중이면 공통의 기타, 각 뷰어를 읽는 중이면 그 뷰어의 기타).<br />
                   검사를 열 때 모달리티별 기본 분할 — <b>Series</b>(뷰포트 개수) + <b>Image</b>(페인 내 이미지 타일). 그리드에서 선택.
                 </div>
                 <Hanging2dEditor map={h2dMap} onChange={(m, next) => setH2dMap((p) => ({ ...p, [m]: next }))} />
@@ -1942,9 +2205,15 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   return (
                     <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
                       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                        이 뷰어 전용 2D 행잉. 뷰어 공통의 <b>'공통 우선 적용'</b>이 켜져 있으면 공통 설정이 우선합니다.
+                        이 뷰어 전용 2D 행잉. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.
                       </div>
-                      <Hanging2dEditor map={vmap} onChange={(m, next) =>
+                      {h2dCommonOn && (
+                        <div style={{ fontSize: 11, color: "#fbbf24", marginBottom: 5 }}>
+                          ⚠ 뷰어 공통의 <b>&lsquo;이 공통 설정을 모든 뷰어에 우선 적용&rsquo;</b>이 켜져 있어
+                          <b> 이 설정은 무시</b>됩니다. 사용하려면 뷰어 공통에서 그 체크를 해제하세요.
+                        </div>
+                      )}
+                      <Hanging2dEditor map={vmap} disabled={h2dCommonOn} onChange={(m, next) =>
                         setH2dByViewer((p) => ({ ...p, [vk]: { ...(p[vk] ?? {}), [m]: next } }))} />
                     </Group>
                   );
@@ -2390,10 +2659,15 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   <div style={{ fontSize: 11.5, color: "var(--text-secondary)", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
                     <b>사용 방법:</b> ① 모니터 감지 → 🔢 모니터 확인(각 화면에 번호 표시·목록 번호와 대조)
                     → ② 창별 모니터 지정 → ③ 하단 <b>OK(저장)</b> → ④ 다음 오픈부터 적용.<br />
-                    · <b>뷰어 ☑</b>: 1대=해당 모니터 / <b>2대 이상=검사를 열 때마다 모니터 번호순으로 순환 배치</b>(1,2,3,1,2,3…) / 0대=기본 크기<br />
+                    · <b>뷰어 ☑</b>: 1대=해당 모니터 / 2대 이상=아래 규칙 / 0대=기본 크기<br />
+                    &nbsp;&nbsp;&nbsp;① <b>첫 영상(뷰어 창이 하나도 없을 때)은 선택한 모든 모니터에 같은 검사</b>로 뜹니다.<br />
+                    &nbsp;&nbsp;&nbsp;② <b>두 번째 영상부터는 모니터 번호순으로 한 대씩</b> 바뀝니다(2,3,…,1,2,3…).<br />
                     &nbsp;&nbsp;&nbsp;검사가 열리는 그 모니터만 새로 로드되고, 나머지 모니터 뷰어는 <b>깜빡임 없이 Exam 탭만 추가</b>됩니다.<br />
                     &nbsp;&nbsp;&nbsp;순환할 모니터 수는 위 <b>최대 열 영상 수</b>로 조절(0=선택 전부).
-                    최초 오픈 시 팝업이 차단되면 주소창 팝업 아이콘에서 이 사이트 <b>항상 허용</b>으로 설정하세요.<br />
+                    이 값은 <b>순환 범위에만</b> 적용됩니다 — Compare·과거검사 '모니터 띄우기'는 선택한 모니터
+                    전부를 쓰되 <b>지금 검사가 떠 있는 모니터는 뒤로 미뤄</b> 비어 있는 모니터부터 사용합니다.
+                    순서는 워크리스트를 새로고침해도 <b>살아 있는 뷰어 창</b>을 기준으로 이어집니다.
+                    최초 오픈은 창을 여러 개 동시에 열므로 팝업이 차단되면 주소창 팝업 아이콘에서 이 사이트 <b>항상 허용</b>으로 설정하세요.<br />
                     · <b>워크리스트 ◉</b>: 위 버튼으로 해당 모니터에 새 창 오픈 (라디오 재클릭=해제)<br />
                     · <b>판독 ◉</b>: 뷰어의 [Reading] 버튼이 해당 모니터에 판독 창을 띄움
                   </div>

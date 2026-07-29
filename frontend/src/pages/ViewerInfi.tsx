@@ -16,11 +16,13 @@ const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewe
 import { api, openViewer, type Anno, type GspsItem, type InstanceNode, type SeriesNode, type StudyDetail } from "../api";
 import { annoLabel, measureAnno } from "../lib/annotations";
 import { DICOMWEB_ROOT, renderedParams, setImageFormat } from "../lib/imageFormat";
-import { previewUrlOf, renderedRootFor } from "../lib/liveUids";
+import { isLiveStudyUid, previewUrlOf, renderedRootFor } from "../lib/liveUids";
 import { clampPage, lastPage, pageLabel, snapTileIndex } from "../lib/seriesPage";
 import { TileGridLines } from "../components/TileGridLines";
 import { CORNERS, cornerLines, cornersFor, type OverlaySource } from "../lib/overlayFields";
 import { isWasmPipeline, onWasmFrame, setWasmPipeline, wasmFrameUrl } from "../lib/wasmPixels";
+import { onDlFrame, opfsFrameUrl, setDlMode } from "../lib/dlCache";
+import { readDlPrefs } from "../lib/dlPrefs";
 import { ComparePicker, useCompareDefault } from "../components/ComparePicker";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
@@ -30,7 +32,8 @@ import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
-import { mammoAssign, mammoView, type HpRule } from "../lib/viewerConfig";
+import { clearViewerSlots, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
+import { activeHang2dMap, mammoAssign, mammoView, pickHang2d, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgReadable, mgRatioBox,
   mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
@@ -173,6 +176,12 @@ function instUrl(studyUid: string, s: SeriesNode, inst: InstanceNode, wl: string
   const stu = inst.study_uid ?? studyUid;
   const wasm = wasmFrameUrl(stu, su, inst.sop_uid, wl || "");
   if (wasm) return wasm;
+  // 다운로드 모드 — 로컬(OPFS)에 받아 둔 본 영상 우선. 순서가 규칙이다: WASM 이 켜져 있으면
+  // WASM 우선(이중 다운로드 금지), wl 이 비었을 때만 히트(W/L 오염 방지). dlCache 참조.
+  // ⚠ **Live 검사일 때만** 히트시킨다(쓰기 측 liveMode 게이트와 대칭) — 미러 배치에서는 로컬
+  //   Orthanc 검사도 SOP UID 가 같아서, 게이트가 없으면 LOCAL 모드 화면에 A 저장본이 뜬다.
+  const local = isLiveStudyUid(stu) ? opfsFrameUrl(inst.sop_uid, wl || "") : null;
+  if (local) return local;
   // WebPACS Live 검사(UID 레지스트리)는 라이브 프록시가 서버측 윈도잉 렌더 — 페인 단위 판정
   const root = renderedRootFor(stu, DICOMWEB_ROOT);
   return `${root}/studies/${stu}/series/${su}/instances/${inst.sop_uid}/rendered${q}${renderedParams(!!q)}`;
@@ -430,6 +439,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const cmpCfgRef = useRef(cmpCfg);
   useEffect(() => { cmpCfgRef.current = cmpCfg; }, [cmpCfg]);
   const monScreensRef = useRef<number[]>([]);
+  // ⚠ 설정>모니터 '최대 열 영상 수'(max_open)는 여기에 적용하지 않는다 — 그 값은 '검사를 열 때
+  // 순환할 모니터 개수'(워크리스트 라운드로빈 슬롯 수)다. Compare·과거검사까지 캡을 걸면
+  // 라운드로빈이 쓰지도 않는 여분 모니터를 못 쓰게 만들 뿐이다(max_open=1 이면 prior_mode="monitor"
+  // 가 항상 Layout 폴백). 라운드로빈 모니터를 덮지 않는 보호는 screens.ts 가 살아 있는 슬롯을
+  // 피해 배치하는 쪽으로 한다.
   // Compare 모달 열기 — 기능 off면 무시 + 다중 모니터 슬롯 사전 감지(클릭 활성화 유지 → 이후 window.open 팝업 허용)
   const openCompareModal = () => {
     if (cmpCfgRef.current.enabled === false) return;
@@ -507,6 +521,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const dropMenuRef = useRef(false);   // 드롭 동작 메뉴(설정>뷰어 drop_menu, 기본 숨김=바로 Open)
   const [, setWasmTick] = useState(0);
   useEffect(() => onWasmFrame(() => setWasmTick((t) => t + 1)), []);   // WASM 프레임 준비 시 재렌더
+  useEffect(() => onDlFrame(() => setWasmTick((t) => t + 1)), []);     // OPFS 저장본 디코드 완료 시 재렌더
   const drag = useRef<{ x: number; y: number; sx: number; sy: number; btn: number; pane: number; moved: boolean; shift: boolean } | null>(null);
   // 드래그로 그리기(§A) — 시작 이미지픽셀/현재 이미지픽셀을 추적, 놓을 때 3px 이상이면 finishTool.
   const annoDragRef = useRef<{ pi: number; sop: string; inst: InstanceNode; tileEl: HTMLElement;
@@ -597,20 +612,35 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       const mg = readMgCfg(prefsV.mg_hang);
       setMgCfg(mg);
       setMgOn(mg.on);
-      // In-View 기본 레이아웃 = infi_default_layout. 뷰어 공통 2D 행잉(공통/뷰어별 infi)을 병합:
-      // 공통 우선(hanging2d_common_on, 기본 on)이면 공통이 우선. RxC 문자열 → {r,c} 변환.
-      const defMap: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }> =
-        { ...(prefsV.infi_default_layout ?? {}) };
+      // In-View 기본 레이아웃(defMap) = 뷰어 공통 2D 행잉 규정의 산물. 규정은 lib/viewerConfig.ts
+      // pickHang2d 한 곳에만 있다 — 공통 체크 on 이면 공통 맵만, off 면 이 뷰어(infi) 맵만. 폴백 없음.
+      // ⚠ 예전엔 `공통 키 ∪ 뷰어별 키` 를 돌며 양방향 폴백을 했다. 그러면 체크 on 인데 뷰어별에만 있는
+      //    모달리티가 defMap 에 주입돼 '공통 우선'이 무의미해지고, Viewer2D(sv/ty)와 결과가 갈렸다.
+      const defMap: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }> = {};
       {
         const toRC = (s?: string) => { if (!s) return null; const [rr, cc] = s.split("x").map(Number); return { r: rr || 1, c: cc || 1 }; };
-        const toE = (val?: string | { s: string; i: string }) =>
-          !val ? null : typeof val === "string" ? { s: toRC(val), i: null } : { s: toRC(val.s), i: toRC(val.i) };
-        const commonH = prefsV.hanging2d ?? {};
-        const perVH = prefsV.hanging2d_by_viewer?.infi ?? {};
         const commonOn = prefsV.hanging2d_common_on ?? true;
-        for (const mm of new Set([...Object.keys(commonH), ...Object.keys(perVH)])) {
-          const h = commonOn ? (toE(commonH[mm]) ?? toE(perVH[mm])) : (toE(perVH[mm]) ?? toE(commonH[mm]));
-          if (h && (h.s || h.i)) defMap[mm] = { s: h.s ?? defMap[mm]?.s ?? null, i: h.i ?? defMap[mm]?.i ?? null };
+        // 읽히는 쪽 맵의 키만 순회한다(반대쪽 키가 섞이면 '무시'가 깨진다). MG 는 pickHang2d 가 null →
+        // defMap 에 안 들어간다 = 맘모는 언제나 뷰어 공통 규정(표준 2×2 + mg_hang). Viewer2D 와 동일.
+        for (const mm of Object.keys(activeHang2dMap(prefsV, "infi"))) {
+          const h = pickHang2d(prefsV, "infi", mm);
+          if (!h) continue;
+          const s = toRC(h.s), i = toRC(h.i);
+          if (s || i) defMap[mm] = { s, i };
+        }
+        // 구 infi_default_layout — 편집 UI 가 삭제(ee88de4)된 유령 값. base 로 깔면 규칙 밖에서 I-View 만
+        // 다르게 뜬다(공통 체크 on 인데 이 값이 먹음 = 규정 ② 위반, SaintView·T-View 와 결과가 갈린다).
+        // '체크 해제=뷰어별 사용' 일 때, 규칙이 정하지 않은 모달리티에 한해서만 남긴다(하위호환).
+        // ⚠ 체크 on 계정에서 이 값이 안 읽히는 건 의도다 — 대신 설정 화면이 이 값을 2D 행잉 표
+        //   (뷰어별 infi)로 접고, 옮기지 못한 값은 상단 배너에 모달리티·뷰어·값으로 찍어 준다.
+        //   표에는 DX 행과 '기타(전체)'('*') 행이 있으므로 구 편집기의 7행이 전부 되살아난다 —
+        //   예전처럼 '저장본에는 남아 있는데 아무도 안 읽고 다시 지정할 수도 없는' 값은 없다.
+        // 설정 화면을 한 번 열고 저장하면 hanging2d_by_viewer.infi 로 접혀 사라진다(SettingsModal 마이그레이션).
+        if (!commonOn) {
+          for (const [mm, cfg] of Object.entries(prefsV.infi_default_layout ?? {})) {
+            if (mm === "MG" || defMap[mm] || !cfg) continue;
+            defMap[mm] = { s: cfg.s ?? null, i: cfg.i ?? null };
+          }
         }
       }
       // IN-2 ①: 규칙 기반 행잉 프로토콜(viewer.hp) — 모달리티×부위×Projection 첫 일치 자동 적용
@@ -674,7 +704,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // ①②: 페인 구성 — 단독 검사는 Modality 기본 레이아웃(설정) 우선, 다중 검사는 오른쪽 누적
       const single = hangList.length === 1;
       const mod = hangList[0]?.d.modality ?? "";
-      const defCfg = single ? (defMap[mod] ?? defMap["*"]) : undefined;
+      // MG 는 2D 행잉 표 밖(뷰어 공통 맘모 규정 = 표준 2×2 + mg_hang). defMap 에는 MG 키가 없지만
+      // '*'(기타 전체, 구 infi_default_layout) 가 흘러들면 맘모 페인의 타일 분할(p.il)을 덮어쓴다 →
+      // 4칸이 16칸이 됐다. Viewer2D(sv/ty)는 MG 를 통째로 배제하므로 여기서도 같게 막는다.
+      const defCfg = single && mod !== "MG" ? (defMap[mod] ?? defMap["*"]) : undefined;
       // Mammo(MG) 전용 행잉 — 표준 2×2 [R CC, L CC, R MLO, L MLO] + 오버레이 텍스트 제거 (전 뷰어 공통 규칙)
       const mammo = single && mod === "MG";
       const ma = mammo ? mammoAssign(hangList[0].series) : null;
@@ -767,7 +800,14 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   };
   const proceedCloseAll = () => {
     // close_scope="current"면 이 창만 닫으므로 공유 EXAMS_KEY(다른 창의 탭 복원용)를 지우지 않는다.
-    if (closeScopeRef.current !== "current") localStorage.removeItem(EXAMS_KEY);
+    if (closeScopeRef.current !== "current") {
+      localStorage.removeItem(EXAMS_KEY);
+      // 모니터 벽이 통째로 비므로 슬롯 장부·라운드로빈도 초기화 — 다음 오픈은 다시 '첫 오픈'
+      // (선택 전 모니터에 같은 검사)으로 시작해야 한다.
+      clearViewerSlots();
+    }
+    // 이 창은 진짜로 닫힌다(리로드 아님) → 슬롯 즉시 반납(TTL 만료를 기다리면 그 사이 오픈이 부트스트랩을 건너뛴다)
+    releaseViewerSlot();
     gotoWorklist();
     window.close();
     onClose();
@@ -1007,6 +1047,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
      해당 검사의 Exam 탭이 열려 있을 때만 그 탭으로 전환 (TY onStudySync 정책 동일) */
   const examsRef = useRef(exams);
   useEffect(() => { examsRef.current = exams; }, [exams]);
+  // 다중 모니터 슬롯 하트비트 — "이 모니터 창이 살아 있고 지금 이 검사를 물고 있다"를 공유 장부에 남긴다.
+  // 워크리스트가 이 신호로 ①사이클 시작(창 0개 → 선택 전 모니터에 같은 검사)과 ②라운드로빈 순번을
+  // 판정한다. 창 이름이 슬롯 규약(sv_viewer / sv_viewer_slot{n})이 아니면 아무것도 하지 않는다.
+  const activeExamRef = useRef(activeExam);
+  activeExamRef.current = activeExam;
+  useEffect(() => startViewerSlotHeartbeat(
+    () => examsRef.current[activeExamRef.current]?.d.id ?? detail.id), [detail.id]);
   useEffect(() => onStudySync("viewer", (id) => {
     // 다중 모니터 관리 배치(mm) — 탭이 전 창 공유이므로 외부(워크리스트/판독창) 선택 동기로 전환하면
     // 모든 모니터가 같은 검사로 일제 전환되어 "모니터별 열린 순서 배치"가 깨진다 → mm 창은 전환 안 함(탭 클릭으로만).
@@ -2368,7 +2415,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     // 슬롯 캐시 자가치유 — 이번 클릭은 기존 캐시로 동기 시도(팝업 허용), 다음 클릭을 위해 비동기 재감지
     // (마운트 후 권한 승인·모니터 구성 변경 반영. 실패는 무시 — 캐시 유지)
     if (cmpCfgRef.current.prior_mode === "monitor" && monScreensRef.current.length > 1) {
-      void screenFeaturesList(monScreensRef.current).then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
+      void screenFeaturesList(monScreensRef.current)
+        .then((s) => { cmpSlotsRef.current = s; }).catch(() => {});
     }
     if (cmpCfgRef.current.prior_mode === "monitor"
         && placePriorAdjacent(cmpSlotsRef.current, window.name, examId)) {
@@ -2432,6 +2480,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     api.getSetting("viewer.prefs").then((r) => {
       dropMenuRef.current = !!(r.value as { drop_menu?: boolean }).drop_menu;
       setWasmPipeline(!!(r.value as { wasm_pipeline?: boolean }).wasm_pipeline);
+      // 설정>환경 '영상 취득 모드' — download 면 로컬 저장본 우선 조회를 켠다
+      setDlMode(readDlPrefs(r.value).mode === "download");
       const v = r.value as { infi_overlay_font?: number; infi_overlay_visible?: boolean;
                              infi_sel_color?: string; infi_toolbar?: Record<string, boolean> };
       if (v.infi_overlay_font) setOvlFont(v.infi_overlay_font);
@@ -2458,7 +2508,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // IN-2: 썸네일 로밍(⑤) · 판독창 모니터 배치(⑥) · OHIF 게이트(⑦)
       const n2 = r.value as { infi_thumb_size?: number; infi_thumb_mode?: "series" | "all";
                               ohif_enabled?: boolean;
-                              monitor?: { report?: number | null; close_scope?: "all" | "current"; screens?: number[] };
+                              // max_open 은 읽지 않는다 — 라운드로빈 슬롯 수(워크리스트 전용)라서
+                              // Compare/과거검사 배치에 걸면 여분 모니터만 못 쓰게 된다(위 주석).
+                              monitor?: { report?: number | null; close_scope?: "all" | "current";
+                                          screens?: number[] };
                               compare?: Partial<{ enabled: boolean; multi_monitor: boolean; labels: boolean;
                                                   prior_mode: "layout" | "monitor" }> };
       const tsz = n2.infi_thumb_size;
@@ -2765,7 +2818,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                 <>
                   {(() => {
                   const full = instUrl(p.studyUid || pd.study_uid, p.series, inst, p.wl);
-                  const prev = previewUrlOf(full, p.studyUid || pd.study_uid);
+                  const prev = previewUrlOf(full, p.studyUid || pd.study_uid, inst.sop_uid);
                   const xform = `translate(${pT.tx}px,${pT.ty}px) scale(${pT.zoom * (p.flipH ? -1 : 1)},${pT.zoom * (p.flipV ? -1 : 1)}) rotate(${p.rot}deg)`;
                   const box: React.CSSProperties = { position: "absolute", inset: 0, width: "100%", height: "100%",
                                                      objectFit: "contain", transform: xform,

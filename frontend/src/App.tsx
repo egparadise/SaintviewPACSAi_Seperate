@@ -77,8 +77,12 @@ function AdminLogin({ onLogin, onBack }: { onLogin: (r: LoginResp) => void; onBa
                                        border: "1px solid var(--border)", width: 320, display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ fontSize: 18, fontWeight: 700 }}>Saintview <span style={{ color: "var(--ai)" }}>PACS AI</span></div>
         <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: -6 }}>관리자 로그인</div>
-        <input placeholder="아이디" value={username} onChange={(e) => setUsername(e.target.value)} />
-        <input placeholder="비밀번호" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {/* name/autoComplete 를 명시 — 이름 없는 필드는 크롬이 문서 전체를 합성 로그인 폼으로 묶을 때
+            엉뚱한 칸(예: 워크리스트 SEARCH)에 저장 자격증명을 채워 넣는 원인이 된다 */}
+        <input placeholder="아이디" value={username} name="username" autoComplete="username"
+               autoCapitalize="off" spellCheck={false} onChange={(e) => setUsername(e.target.value)} />
+        <input placeholder="비밀번호" type="password" value={password} name="password"
+               autoComplete="current-password" onChange={(e) => setPassword(e.target.value)} />
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, color: "var(--text-secondary)" }}>
           <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> 자동 로그인
         </label>
