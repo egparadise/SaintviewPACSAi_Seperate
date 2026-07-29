@@ -218,3 +218,34 @@ def import_status(remote_idx: int, db: Session = Depends(get_db),
     if out.get("status") in ("done", "exists") and not out.get("study_id"):
         out["study_id"] = find_local_study_id(db, str(out.get("study_uid") or ""))
     return out
+
+
+class MirrorBody(BaseModel):
+    """A 계정 미러링 옵션."""
+    hospital_id: int | None = None   # 새로 만들 계정을 귀속시킬 병원(없으면 전역)
+    dry_run: bool = False            # 미리보기 — 아무것도 바꾸지 않고 결과만 센다
+
+
+@router.post("/mirror-accounts")
+def mirror_accounts(body: MirrorBody | None = None, db: Session = Depends(get_db),
+                    user: dict = Depends(admin_user)):
+    """원격 PACS(A) 사용자 목록을 우리 계정으로 미러링 — **아이디·이름·역할만**.
+
+    비밀번호는 가져오지 않는다. 가져올 수도 없다:
+      · A 는 목록 응답에서 user_passwd 를 빼고 준다(router/User.py `users_columns.remove`)
+      · 설령 있어도 A 는 sha256(salt+pw)+'.'+salt 단방향이라 원문 복원이 불가능하다
+    그래서 미러 계정의 password_hash 는 빈 문자열이고 **로컬 비번 로그인이 구조적으로 막힌다**.
+    로그인은 `/api/auth/webpacs-login`(A 가 검증)으로만 된다 — 자격증명의 단일 출처는 계속 A 다.
+
+    관리자 전용이며, A 쪽도 이 목록 API 를 관리자용으로 규정한다(브리지 계정 권한 필요).
+    """
+    from app.services import account_mirror
+    from app.services.webpacs_live import service_client
+
+    b = body or MirrorBody()
+    try:
+        rows = service_client(db).list_users()
+    except Exception as e:  # noqa: BLE001 — A 실패는 우리 계정을 건드리지 않고 그대로 알린다
+        raise HTTPException(status_code=502, detail=f"원격 사용자 목록 조회 실패: {str(e)[:160]}")
+    res = account_mirror.sync_accounts(db, rows, hospital_id=b.hospital_id, dry_run=b.dry_run)
+    return {"ok": True, "dry_run": b.dry_run, "fetched": len(rows), **res.as_dict()}

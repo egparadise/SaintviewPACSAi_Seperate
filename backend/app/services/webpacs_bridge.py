@@ -259,6 +259,17 @@ class WebPacsClient:
         return r.json()
 
     # ── 검사 탐색 (원격 REST — 내부 PK study_idx 기반) ──────
+    def list_users(self, params: dict | None = None) -> list[dict]:
+        """A 사용자 목록 — `GET /api/user/`.
+
+        A 는 이 응답에서 **user_passwd 를 빼고** 전 컬럼을 준다(router/User.py:35
+        `users_columns.remove('user_passwd')`). 그래서 이 경로로는 비밀번호가 넘어올 수 없다 —
+        미러링이 자격증명 복제가 되지 않는 구조적 근거다.
+        관리자 권한 계정으로 호출해야 한다(A 가 관리자용 API 로 규정).
+        """
+        body = self._json("/api/user/", params=params or {})
+        return body.get("users_data") or []
+
     def list_studies(self, params: dict | None = None) -> list[dict]:
         body = self._json("/api/study/", params=params or {})
         return body.get("study_data") or []

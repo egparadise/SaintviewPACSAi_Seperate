@@ -312,6 +312,27 @@ _REL_MAX = 256
 _REL_LOCK = threading.Lock()
 
 
+def same_patient(row: dict, pid: str, pidx: object = None) -> bool:
+    """A 가 준 검사 행이 **정말 같은 환자**인가.
+
+    ⚠ 상류(A)의 필터를 믿지 않는다. A 의 patient_id 조회가 부분일치로 도는 지점이 있고
+      (router/Patient.py:22 `patient_id__like=f'%{...}%'`, Dicomweb.py:1820 fuzzymatching),
+      차트번호는 짧은 숫자인 경우가 많아 **긴 번호가 짧은 번호를 포함**한다.
+      실제 사고: 환자 '7139' 의 과거검사 목록에 '10171393' 환자의 Knee MRI 가 섞여 들어와
+      Chest PA 옆에 다른 환자 영상이 떴다. 판독 사고로 직결되는 종류다.
+
+    그래서 **우리가 정확일치로 다시 거른다.** patient_idx(A 내부 PK)를 알면 그것까지 본다 —
+    차트번호는 병원마다 재사용·재발급될 수 있지만 PK 는 그렇지 않다.
+    """
+    if str(row.get("patient_id") or "").strip() != str(pid or "").strip():
+        return False
+    if pidx not in (None, "", 0):
+        rx = row.get("patient_idx")
+        if rx not in (None, "") and str(rx) != str(pidx):
+            return False
+    return True
+
+
 def live_related(db: Session, vid: int, user: dict | None = None,
                  row: dict | None = None) -> list[dict]:
     """동일 환자의 다른 A 검사 목록(과거검사).
@@ -329,6 +350,7 @@ def live_related(db: Session, vid: int, user: dict | None = None,
     pid = str(r.get("patient_id") or "")
     if not pid:
         return []
+    pidx = r.get("patient_idx")   # A 내부 PK — 있으면 조회·검증 양쪽에서 더 강한 기준이 된다
     ck = f"{getattr(client, 'base_url', '')}|{pid}"
     now = time.time()
     with _REL_LOCK:
@@ -337,11 +359,15 @@ def live_related(db: Session, vid: int, user: dict | None = None,
             return [x for x in hit[1] if x["id"] != vid]
     out: list[dict] = []
     try:
-        others = client.list_studies({
-            "patient_id": pid, "limit": "30",
-            "order_json": json.dumps([{"key": "study_idx", "order": "desc"}]),
-        })
+        q = {"patient_id": pid, "limit": "30",
+             "order_json": json.dumps([{"key": "study_idx", "order": "desc"}])}
+        if pidx not in (None, "", 0):
+            q["patient_idx"] = str(pidx)      # A 가 지원하는 정확 키(dependencies/Study.py)
+        others = client.list_studies(q)
         for o in others:
+            # ★ 상류 필터를 믿지 않고 여기서 다시 거른다 — same_patient 주석의 사고 참조
+            if not same_patient(o, pid, pidx):
+                continue
             od, _ = _split_datetime(str(o.get("study_datetime") or ""))
             st, _, _ = _map_status(str(o.get("study_status") or ""))
             out.append({

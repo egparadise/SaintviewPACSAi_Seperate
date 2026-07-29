@@ -212,6 +212,12 @@ class Account(Base):
     #    발급(좌석) 계정 운영 요구로 명시 채택 — 인증 자체는 여전히 password_hash(argon2)로만 수행.
     pw_plain: Mapped[str] = mapped_column(String(128), default="")
     client_id: Mapped[int | None] = mapped_column(ForeignKey("clients.id"), nullable=True, index=True)  # 발급 좌석 연동
+    # ── 원격 PACS(A) 계정 미러 ──
+    # A 의 user_idx. **0/NULL 이면 손으로 만든 로컬 계정**이고, 값이 있으면 A 목록에서 온 미러다.
+    # 미러 계정은 password_hash 가 빈 문자열이라 로컬 비번 로그인이 구조적으로 불가능하고,
+    # 인증은 /api/auth/webpacs-login(A 가 검증)으로만 된다. 동기화가 손으로 만든 계정을
+    # 건드리지 않게 가르는 기준이기도 하다(app/services/account_mirror.py 참조).
+    a_user_idx: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class Phrase(Base):

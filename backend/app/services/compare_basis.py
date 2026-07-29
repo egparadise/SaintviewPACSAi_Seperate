@@ -172,11 +172,14 @@ def live_candidates(db: Session, vid: int, user: dict, *, basis: str = "patient"
         "limit": str(max(1, limit) * 8),
         "order_json": json.dumps([{"key": "study_idx", "order": "desc"}]),
     }
+    pidx = row.get("patient_idx")
     if basis == "patient":
         pid = str(row.get("patient_key") or "")
         if not pid:
             return []
         q["patient_id"] = pid
+        if pidx not in (None, "", 0):
+            q["patient_idx"] = str(pidx)
     if by_modality:
         q["study_modality"] = mod
     lo = _cutoff(anchor, period)
@@ -213,6 +216,11 @@ def live_candidates(db: Session, vid: int, user: dict, *, basis: str = "patient"
         except (TypeError, ValueError):
             continue
         if rid == vid:
+            continue
+        # ★ 환자 기준인데 다른 환자가 섞이면 판독 사고다. A 의 patient_id 조회가 부분일치로
+        #   도는 지점이 있어(짧은 차트번호가 긴 번호에 포함된다) 여기서 정확일치로 다시 거른다.
+        #   실제 사고: '7139' 의 과거검사에 '10171393' 환자의 검사가 섞여 나왔다.
+        if basis == "patient" and not live.same_patient(o, str(row.get("patient_key") or ""), pidx):
             continue
         if by_body_part and _norm(str(o.get("study_body_part") or "")) != part:
             continue
