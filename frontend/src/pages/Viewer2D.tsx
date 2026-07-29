@@ -11,7 +11,12 @@ import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerCl
 import { clearViewerSlots, isViewerSlotName, otherLiveViewerCount, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
 import { Splitter, clampSz } from "../lib/Splitter";
-import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d, type HpRule } from "../lib/viewerConfig";
+import { hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
+import { XLINK_DEFAULT, pickLineSources, type XlinkState } from "../lib/scoutLines";
+import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
+import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pickHpScreen } from "../lib/hpCapture";
+import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
+import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgReadable, mgRatioBox, mgStamp, mgWallByCol,
   mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
@@ -161,14 +166,16 @@ const initPane = (studyUid: string): PaneState => ({
   playing: false, media: null,
 });
 
-/* ── TY-3: Crosslink 5모드 — 기존 Link 단일 토글을 확장 (In IN_CROSSLINK_MODES 이식, 단일 선택형) ── */
-type XlinkMode = "off" | "auto_sync" | "sync_other" | "scout" | "all_lines";
-const XLINK_MODES: { key: XlinkMode; label: string; desc: string }[] = [
-  { key: "off", label: "Link:Off", desc: "연동 없음" },
+/* ── Crosslink 5기능 — **독립 토글**(I-View 기준으로 통일).
+      예전엔 5개 중 하나만 고르는 단일 선택(union)이라 'Crosslink + Scout' 같은 조합이 아예
+      불가능했다. 그래서 T-View/SaintView 가 I-View 와 다르게 동작했다. 모델을 I-View 와
+      같은 독립 불리언 5개로 바꾸고, 계산은 lib/scoutLines 한 벌을 3뷰어가 함께 쓴다. ── */
+const XLINK_MODES: { key: keyof XlinkState; label: string; desc: string }[] = [
+  { key: "crosslink", label: "Crosslink", desc: "페인 간 연동 마스터" },
   { key: "auto_sync", label: "AutoSync", desc: "같은 검사 페인 동기 스크롤" },
-  { key: "sync_other", label: "SyncOther", desc: "다른 검사(과거) 포함 전체 페인 동기 스크롤" },
-  { key: "scout", label: "Scout", desc: "활성 페인 현재 이미지의 교차선 표시 (기존 Ref 통합)" },
-  { key: "all_lines", label: "AllLines", desc: "활성 시리즈 전체 이미지의 교차선 표시" },
+  { key: "sync_other", label: "SyncOther", desc: "다른 검사(과거) 페인까지 동기 스크롤" },
+  { key: "scout", label: "Scout", desc: "활성 페인 현재 이미지의 교차선 표시" },
+  { key: "all_lines", label: "AllLines", desc: "기준 뷰와 **같은 축**의 전체 교차선" },
 ];
 
 /* ── TY-3: 3D Cursor 기하 — DICOM Position/Orientation 평면 계산 (In geomOf 이식, 최소 부분) ── */
@@ -382,7 +389,7 @@ function dropPersistedTab(id: number) {
 // eslint-disable-next-line react-refresh/only-export-components
 /* SAINT VIEW 스킨 상단 가로 메뉴 툴바 — 드롭다운 4종(Image Tool/Measurement/Reading Support/Additional)
    + 좌측 환자 ◀▶ 이동 + 활성 마우스모드/툴 칩. 항목 run 은 기존 툴 함수 그대로 호출(기능=TY 뷰어 동일). */
-function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled, side = "top", onGripDown, quick }: {
+function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled, side = "top", onGripDown, onHide, quick }: {
   menus: { title: string; items: { id: string; label: string; icon?: string; run: () => void }[] }[];
   activeId: string;                 // 현재 활성 마우스모드/툴 id (드롭다운·칩 하이라이트)
   onNav: (dir: 1 | -1) => void;     // 환자(검사) ◀▶ 이동
@@ -390,6 +397,7 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
   navNextDisabled: boolean;
   side?: "top" | "bottom" | "left" | "right";   // 도킹 위치(설정 툴 팔레트 위치와 연동)
   onGripDown?: (e: React.PointerEvent) => void; // ⠿ 그립 — 드래그 도킹 시작
+  onHide?: () => void;              // Tools 감추기 — 도킹된 쪽으로 접는다(가는 띠만 남는다)
   quick?: { id: string; label: string; icon?: string; run: () => void }[];  // ★Quick — 세로 모드 2열 그리드(최대 6)
 }) {
   const vertical = side === "left" || side === "right";
@@ -414,7 +422,16 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
       <div title="드래그로 툴 파레트(메뉴바) 위치 이동 — 화면 가장자리로 끌어 놓으세요"
            onPointerDown={onGripDown}
            style={{ cursor: "grab", fontSize: 10, color: "var(--text-secondary)", userSelect: "none",
-                    textAlign: "center", padding: vertical ? "0 0 2px" : "0 4px", flexShrink: 0 }}>⠿</div>
+                    textAlign: "center", padding: vertical ? "0 0 2px" : "0 4px", flexShrink: 0,
+                    ...(vertical ? {} : { display: "inline-block" }) }}>⠿</div>
+      {/* Tools 감추기 — SaintView 에는 이 버튼이 없어서 메뉴바를 접을 방법이 아예 없었다 */}
+      {onHide && (
+        <button title={railSpec(side).hideTitle} onClick={onHide}
+                style={{ fontSize: 11, padding: vertical ? "3px 0" : "3px 7px", flexShrink: 0,
+                         ...(vertical ? { width: "100%" } : {}) }}>
+          {railSpec(side).hideArrow} Hide
+        </button>
+      )}
       {/* 환자 ◀▶ 이동 — 한 줄 */}
       <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
         <button title="◀ 이전 검사" disabled={navPrevDisabled} onClick={() => onNav(-1)}
@@ -588,6 +605,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // HP(행잉 프로토콜) + W/L 프리셋(All 적용) + 타이틀바 드롭다운
   const [hpRules, setHpRules] = useState<HpRule[]>([]);
   const [hpName, setHpName] = useState("기본");
+  // 사양 4·6: 규칙의 screens(모니터별 배치 + 칸별 시간대 슬롯)를 화면에 거는 함수.
+  // applyHp(useCallback[])이 최신 state(series·priorTrees·detail)를 봐야 하므로 ref 로 건넨다 —
+  // deps 에 넣으면 자동매칭 effect 가 시리즈 로드마다 다시 돌아 사용자가 잡은 화면을 덮어쓴다.
+  const applyHpCellsRef = useRef<(rule: HpRule) => void>(() => {});
+  // 시리즈가 아직 도착하지 않은 상태에서 HP 가 걸리면(검사 열기 직후) 칸 배정을 보류했다가 한 번 다시 건다.
+  const pendingHpRef = useRef<HpRule | null>(null);
   const [wlAll, setWlAll] = useState(false);  // W/L 프리셋을 전체 페인에 적용 (UBPACS All)
   const [menu, setMenu] = useState<null | "opened" | "related" | "series" | "hp">(null);
   const [mprOn, setMprOn] = useState(false);  // 내장 MPR/MIP (CT/MR — 뷰포트 영역 전환)
@@ -718,10 +741,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const { sizes: tileSizes, sizeRef } = useTileSizes();
   // window 리스너(빈 deps) 안의 드래그 경로가 최신 보정 함수를 쓰도록 — 아래 mgAt 정의 후 대입
   const mgAtRef = useRef<(p: PaneState, rect: { width: number; height: number }) => PaneState>((p) => p);
-  // TY-3(3): Crosslink 5모드 — 기존 syncScroll(Link 단일)을 확장. off/auto_sync/sync_other/scout/all_lines
-  const [xmode, setXmode] = useState<XlinkMode>("off");
-  const xmodeRef = useRef(xmode);
-  useEffect(() => { xmodeRef.current = xmode; }, [xmode]);
+  // Crosslink 5기능 — I-View 와 같은 독립 토글. 기본값도 I-View 와 같다(XLINK_DEFAULT).
+  const [xlink, setXlink] = useState<XlinkState>(XLINK_DEFAULT);
+  const xlinkRef = useRef(xlink);
+  useEffect(() => { xlinkRef.current = xlink; }, [xlink]);
   // 듀얼모드 Stack 동기 — true=Spatial(DICOM 좌표 해부학적 정합, Infinitt식), false=Index(1:1 인덱스, TY식). 'G' 로 토글.
   const [spatialSync, setSpatialSync] = useState(true);
   const spatialSyncRef = useRef(spatialSync);
@@ -798,7 +821,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [thumbOpen, setThumbOpen] = useState(true);
-  const [paletteOpen, setPaletteOpen] = useState(true);
+  // Tools 패널 접기 — 접힌 채로 두면 **다시 열어도 접힌 채**다(lib/toolPanel).
+  // 스킨마다 따로 기억한다: T-View 를 접었다고 SaintView 까지 접히면 안 된다.
+  const toolPanelKind = skin === "saint" ? "saint" : "ty";
+  const [paletteOpen, setPaletteOpen] = useState(() => readToolPanelOpen(toolPanelKind));
+  const togglePalette = useCallback((open: boolean) => {
+    setPaletteOpen(open);
+    writeToolPanelOpen(toolPanelKind, open);
+  }, [toolPanelKind]);
   const [reportCollapsed, setReportCollapsed] = useState(false);  // 판독창 오른쪽 접기/펼치기
   const [overlayOn, setOverlayOn] = useState(true);
   // 키이미지 마크 — 열린 검사의 key_images SOP 집합(반응형). 페인에 🔑 마크 표시, 토글 시 즉시 갱신
@@ -992,9 +1022,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     });
   }, []);
   const targetsOf = (pid: string): string[] => {
-    // In Viewer 정합: 멀티 선택 연동 조작은 Crosslink 마스터(xmode≠off)일 때만 (In targetsOf 동일 게이트)
+    // In Viewer 정합: 멀티 선택 연동 조작은 Crosslink 마스터 ON 일 때만 (In targetsOf 동일 게이트)
     const s = selPanesRef.current;
-    return xmodeRef.current !== "off" && s.size > 1 && s.has(pid) ? [...s] : [pid];
+    return xlinkRef.current.crosslink && s.size > 1 && s.has(pid) ? [...s] : [pid];
   };
 
   /* ── TY-3(1): 작업 히스토리 ◀◯▶ — 스냅샷 최대 50, Undo/초기화/Redo (In pushHist/histGo 이식) ── */
@@ -1100,11 +1130,17 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       setPanes((prev) => Object.fromEntries(
         Object.entries(prev).map(([k, p]) => [k, { ...p, wl: rule.wl ?? "" }])));
     }
-    // 옵션 → 단일 xmode 매핑(우선순위: cross_link>scout>scroll_sync>link). 켜진 옵션 없으면 유지.
-    const xm = rule.cross_link ? "all_lines" : rule.scout_image ? "scout"
-             : rule.full_scroll_sync ? "sync_other" : rule.full_link ? "auto_sync" : null;
-    if (xm) setXmode(xm);
+    // 규칙의 옵션을 **각각** 반영(I-View 와 동일). 예전엔 우선순위로 하나만 골랐는데,
+    // 그러면 규칙이 Scout+SyncOther 를 함께 켜도 하나만 살아남았다.
+    setXlink((x) => ({ ...x,
+      crosslink: rule.cross_link ?? x.crosslink,
+      auto_sync: rule.full_link ?? x.auto_sync,
+      sync_other: rule.full_scroll_sync ?? x.sync_other,
+      scout: rule.scout_image ?? x.scout }));
     setHpName(rule.name);
+    // 사양 4·4-2 — screens 가 있으면 이 모니터의 화면(칸별 시리즈·칸별 과거검사)까지 건다.
+    // screens 가 없는 구 규칙이면 아무것도 하지 않는다 = 위의 구 경로 그대로.
+    applyHpCellsRef.current(rule);
   }, []);
 
   /* 설정 로드 + 행잉 적용(모달리티→분할) + HP 규칙 자동 매칭 */
@@ -1175,18 +1211,19 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (t.ty_sel_color) setTySelColor(t.ty_sel_color);
       if (t.ty_cine_sec) setTyCineSec(Math.min(10, Math.max(0.05, t.ty_cine_sec)));
     }).catch(() => {});
-    // HP: 장비×부위×Projection 매칭 — 첫 일치 규칙 자동 적용 (hanging2d보다 우선)
+    // HP: 장비×부위(고른 DICOM 출처)×Projection 매칭 — '가장 우선 적용' 규칙 → 그 외 순.
+    // 규정·순서는 lib/hangingProtocol.ts 의 matchHpRule 이 유일한 구현이다(뷰어 3종 공용).
     api.getSetting("viewer.hp").then((r) => {
-      const rules = ((r.value as { rules?: HpRule[] }).rules) ?? [];
-      setHpRules(rules);
-      const up = (s: string) => (s || "").toUpperCase();
-      const m = rules.find((x) =>
-        (!x.modality || x.modality === detail.modality) &&
-        (!x.body_part || up(detail.body_part).includes(up(x.body_part))) &&
-        (!x.projection || up(detail.study_desc).includes(up(x.projection))));
-      if (m && m.use_on_exam_open !== false) applyHp(m);   // 'Exam 열 때 HP 사용' 꺼진 규칙은 자동적용 제외(수동 메뉴로 적용)
+      const doc = readHpDoc(r.value);
+      setHpRules(hpRuleOrder(doc.rules));            // 드롭다운 순서 = 매칭 순서
+      const m = matchHpRule({
+        modality: detail.modality, body_part: detail.body_part,
+        study_desc: detail.study_desc, order_name: detail.order_name,
+        study_date: detail.study_date,
+      }, doc.rules, { forExamOpen: true });           // 'Exam 열 때 HP 사용' 꺼진 규칙은 건너뛰고 다음 규칙을 본다
+      if (m) applyHp(m);
     }).catch(() => {});
-  }, [detail.modality, detail.body_part, detail.study_desc, applyHp]);
+  }, [detail.modality, detail.body_part, detail.study_desc, detail.order_name, detail.study_date, applyHp]);
 
   /* 2D-MG 행잉 — 4-view 가 한 시리즈에 다 들어 있는 MG 검사(대부분)는 Series 2×2 로 걸면 3칸이 빈다.
      설정(뷰어 공통 > 2D 행잉 > MG)의 Image layout(1×2/2×2/2×3) 타일로 건다.
@@ -1513,7 +1550,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     } else {
       patch(activePane, { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
     }
-    setXmode("sync_other");
+    setXlink((x) => ({ ...x, crosslink: true, auto_sync: true, sync_other: true }));
     setStatus("비교 모드: 과거검사 로드 + 동기 스크롤 ON (SyncOther)");
   };
 
@@ -1532,6 +1569,113 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       setStatus("Stack View: 선택 검사 중첩 — 기존 영상은 썸네일·다른 페인에 유지");
     } catch { setStatus("Stack View 로드 실패"); }
   };
+
+  /* ══════════ 사양 6 — HP '직접설정' 읽기 / screens 되돌리기 ══════════
+     규정(무엇을 저장하고 무엇을 못 하는지·기간 슬롯·왕복 검증)은 lib/hpCapture.ts 한 곳뿐이다.
+     I-View(ViewerInfi)도 같은 함수를 부른다 — 여기서 로직을 복사하면 또 갈린다. */
+
+  /** 이 창이 붙어 있는 모니터 인덱스 — window.name 규약의 역산(Setting>모니터 선택으로 보정). */
+  const hpMon = () => hpMonitorIndex(window.name, prefs.monitor?.screens);
+  /** 검사 uid → 그 검사의 시리즈 목록(칸의 '몇 번째 시리즈' 를 세는 기준). */
+  const hpSeriesOf = (uid: string): SeriesNode[] =>
+    uid === detail.study_uid ? series
+      : (Object.values(priorTrees).find((t) => t.uid === uid)?.series ?? []);
+  /** 슬롯이 고를 후보 — **기간 필터를 걸지 않은 넓은 목록**을 넘겨야 한다(슬롯이 스스로 자른다).
+   *  compareCandidates 처럼 이미 period 로 잘린 목록을 넣으면 이중으로 잘려 후보가 사라진다. */
+  const hpPriors = () => detail.related_exams.map((e) => ({
+    id: e.id, study_date: e.study_date, study_uid: e.study_uid,
+  }));
+  const hpCtx = () => ({
+    currentUid: detail.study_uid, anchorDate: detail.study_date,
+    priors: hpPriors(), currentId: detail.id,
+  });
+
+  /** 지금 화면 → HpScreen(+경고). 영상이 없으면 null(HpMenu 가 안내를 띄운다). */
+  const hpCaptureNow = (): HpMenuCapture | null => {
+    if (!series.length) return null;
+    const vis = PANE_IDS.slice(0, LAYOUTS[layout].count);
+    const snapPanes = vis.map((pid) => {
+      const p = panes[pid];
+      const uid = p?.series ? (p.studyUid || detail.study_uid) : "";
+      const k = p?.series ? hpSeriesOf(uid).findIndex((s) => s.series_uid === p.series!.series_uid) : -1;
+      return { studyUid: uid, seriesNo: k >= 0 ? k + 1 : null };
+    });
+    const cap = hpCaptureScreen({
+      monitor: hpMon(),
+      resolution: `${window.screen.width} * ${window.screen.height}`,
+      s: { r: LAYOUTS[layout].rows, c: LAYOUTS[layout].cols },
+      i: imgLay,
+      panes: snapPanes,
+    }, hpCtx());
+    return {
+      ...cap,
+      modality: detail.modality,
+      wl: panes[activePane]?.wl ?? "",
+      options: { full_link: xlink.auto_sync, full_scroll_sync: xlink.sync_other,
+                 cross_link: xlink.crosslink, scout_image: xlink.scout },
+    };
+  };
+
+  /** 규칙의 screens → 이 화면. 칸별 시리즈 순번 + 칸별 시간대 슬롯(과거검사)을 실제로 건다. */
+  const applyHpCells = (rule: HpRule) => {
+    const sc = pickHpScreen(rule, hpMon());
+    if (!sc) return;                                   // screens 없는 구 규칙 — 구 경로(applyHp)가 이미 처리했다
+    const key = `${sc.s.r}x${sc.s.c}`;
+    if (LAYOUTS[key]) setLayout(key);
+    setImgLay(sc.i);
+    // 칸 정보가 없는 규칙(설정에서 그리드만 잡은 구 규칙)은 레이아웃만 바꾸고 페인은 그대로 둔다 —
+    // 사용자가 잡아 둔 비교 배치를 갈아엎지 않기 위해서다(구 동작 보존).
+    if (!hpScreenHasPlacement(sc)) return;
+    if (!series.length) { pendingHpRef.current = rule; return; }   // 시리즈 도착 후 아래 effect 가 다시 건다
+    pendingHpRef.current = null;
+    const plan = hpPlanCells(sc, hpCtx());
+    const vis = PANE_IDS.slice(0, LAYOUTS[key]?.count ?? plan.length);
+    // ① 현재 검사 칸은 동기로 — 과거검사 로드를 기다리는 동안 화면이 비어 보이지 않게 먼저 깐다.
+    setPanes((prev) => {
+      const next = { ...prev };
+      vis.forEach((pid, k) => {
+        const pl = plan[k];
+        if (!pl || pl.skip || pl.prior) { next[pid] = { ...initPane(detail.study_uid), il: sc.i }; return; }
+        const s = (pl.series ? series[pl.series - 1] : series[k]) ?? null;
+        next[pid] = { ...initPane(detail.study_uid), series: s, il: sc.i,
+                      index: snapTileIndex(Math.floor((s?.instances.length ?? 1) / 2),
+                                           Math.max(1, sc.i.r * sc.i.c), s?.instances.length) };
+      });
+      return next;
+    });
+    // ② 과거검사 칸 — 시리즈 트리를 받아 와야 하므로 비동기. 실패한 칸은 빈 칸으로 남는다(거짓 배치 금지).
+    const priorCells = vis.map((pid, k) => ({ pid, pl: plan[k] })).filter((x) => x.pl?.prior);
+    if (priorCells.length) {
+      void (async () => {
+        for (const { pid, pl } of priorCells) {
+          try {
+            const tree = await getTree(pl!.prior!.id);
+            const s = (pl!.series ? tree.series[pl!.series - 1] : tree.series[0]) ?? null;
+            if (!s) continue;
+            addOpenTab(pl!.prior!.id, tree.uid);
+            patch(pid, { ...initPane(tree.uid), series: s, il: sc.i,
+                         index: Math.floor(s.instances.length / 2) });
+          } catch { /* 그 칸만 빈 채로 둔다 */ }
+        }
+      })();
+    }
+    // ③ 복원하지 못한 칸을 **숨기지 않고** 알린다 — 저장은 됐는데 조용히 안 뜨는 것이 가장 나쁘다.
+    const none = plan.map((p, k) => (p.skip === "none" ? k + 1 : 0)).filter(Boolean);
+    const d3 = plan.map((p, k) => (p.skip === "3d" ? k + 1 : 0)).filter(Boolean);
+    if (none.length || d3.length) {
+      setStatus([`HP ${rule.name} 적용`,
+                 none.length ? `${none.join("·")}번 칸: 조건에 맞는 과거검사 없음` : "",
+                 d3.length ? `${d3.join("·")}번 칸: 3D 영상은 뷰어가 복원하지 않습니다` : ""]
+                .filter(Boolean).join(" — "));
+    }
+  };
+  applyHpCellsRef.current = applyHpCells;   // applyHp(useCallback[])가 최신 클로저로 부른다
+  /* 시리즈가 늦게 도착한 경우 보류해 둔 HP 를 한 번 더 건다(검사 열기 직후 자동 적용 경로). */
+  useEffect(() => {
+    const r = pendingHpRef.current;
+    if (r && series.length) { pendingHpRef.current = null; applyHpCellsRef.current(r); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [series]);
 
   /* Refresh Exam — 활성 페인의 검사 시리즈를 서버에서 재조회해 갱신 (In Viewer loadSeries 이식) */
   const refreshExam = async () => {
@@ -1621,7 +1765,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         patch(PANE_IDS[i + 1], { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
       } catch { /* 개별 실패 무시 */ }
     }
-    setXmode("sync_other");
+    setXlink((x) => ({ ...x, crosslink: true, auto_sync: true, sync_other: true }));
     setStatus(`Study With Open (ADD VIEW): Related ${take.length}건 함께 오픈`);
   };
   const loadStackMany = async (ids: number[]) => {
@@ -1653,8 +1797,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       // 2) 동기 타깃(마스터 제외): auto_sync=같은 검사, sync_other=전체(과거검사 포함), 멀티선택 연동
       const vis = PANE_IDS.slice(0, LAYOUTS[layout].count);
       const targets = new Set<string>();
-      if (xmode === "sync_other") vis.forEach((v) => { if (v !== pid) targets.add(v); });
-      else if (xmode === "auto_sync") vis.forEach((v) => { if (v !== pid && prev[v]?.studyUid === prev[pid]?.studyUid) targets.add(v); });
+      // I-View 와 같은 판정: crosslink 마스터가 켜져 있어야 하고, 그 안에서
+      // auto_sync=같은 검사 / sync_other=다른 검사(과거). 둘 다 켜면 둘 다 따라온다.
+      if (xlink.crosslink) vis.forEach((v) => {
+        if (v === pid) return;
+        const same = prev[v]?.studyUid === prev[pid]?.studyUid;
+        if ((xlink.auto_sync && same) || (xlink.sync_other && !same)) targets.add(v);
+      });
       const sel = selPanesRef.current;
       if (sel.size > 1 && sel.has(pid)) sel.forEach((v) => { if (v !== pid) targets.add(v); });
       // 3) 타깃 동기 — 듀얼모드: Spatial(DICOM 좌표 해부학적 최근접) 우선, 좌표 없으면 Index(1:1) 폴백
@@ -1670,7 +1819,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       });
       return next;
     });
-  }, [xmode, layout]);
+  }, [xlink, layout]);
 
   // ── 인접 슬라이스 프리페치 — 인덱스/시리즈가 바뀔 때만 진행 방향 앞 8·뒤 3장 선제 로드.
   //    (W/L·zoom 등 다른 페인 상태 변경에는 발동하지 않음 — 드래그 중 요청 폭주 방지) ──
@@ -2720,7 +2869,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         patch(PANE_IDS[i + 1], { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
       } catch { /* 개별 실패 무시 */ }
     }
-    setXmode("sync_other");
+    setXlink((x) => ({ ...x, crosslink: true, auto_sync: true, sync_other: true }));
     setStatus(`Compare — 과거검사 ${ids.length}건 비교 오픈 (SyncOther ON)`);
   };
   const openCompare = async () => {
@@ -2759,23 +2908,20 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const items = annos.filter((a) =>
       a.sop_uid === inst.sop_uid || (!a.sop_uid && p.studyUid === detail.study_uid));
     const dr = draft && draft.pid === pid ? draft : null;
-    // 교차선(Scout) — 기존 Ref 토글 + TY-3(3) Crosslink scout/all_lines 모드 통합.
-    // scout/Ref=활성 페인 현재 이미지 1선, all_lines=활성 시리즈 전체(현재 이미지는 진하게)
+    // 교차선 — Ref 버튼 + Scout/All Lines. 소스 선택은 lib/scoutLines 한 곳에서만 정한다.
+    // All Lines = **스크롤 기준 뷰와 같은 축**의 전체(사용자 확정 규칙). 로컬라이저처럼 한 시리즈에
+    // SAG·COR·AX 가 섞여 있으면 예전 구현은 관계없는 방향까지 다 그려 화면을 덮었다.
     const refSegs: { seg: [number, number][]; current: boolean }[] = [];
-    if ((refOn || xmode === "scout" || xmode === "all_lines") && pid !== activePane) {
+    if ((refOn || xlink.scout || xlink.all_lines) && pid !== activePane) {
       const act = panes[activePane];
-      const actInst = act.series?.instances[act.index];
-      if (act.series && actInst) {
-        if (xmode === "all_lines") {
-          act.series.instances.forEach((si, k) => {
-            if (si.sop_uid === inst.sop_uid) return;
-            const seg = refLineOn(si, inst);
-            if (seg) refSegs.push({ seg, current: k === act.index });
-          });
-        } else if (actInst.sop_uid !== inst.sop_uid) {
-          const seg = refLineOn(actInst, inst);
-          if (seg) refSegs.push({ seg, current: true });
-        }
+      if (act.series) {
+        const srcs = pickLineSources(act.series.instances, act.index,
+                                     { scout: xlink.scout || refOn, all_lines: xlink.all_lines });
+        srcs.forEach((sc) => {
+          if (sc.inst.sop_uid === inst.sop_uid) return;
+          const seg = refLineOn(sc.inst, inst);
+          if (seg) refSegs.push({ seg, current: sc.current });
+        });
       }
     }
     // TY-3(4): 3D Cursor 십자 마커 — 해당 페인의 마커가 현재 이미지에 귀속될 때만
@@ -3650,6 +3796,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                     },
                   }))}
                   onGripDown={(e) => { dockDragRef.current = { kind: "palette", sx: e.clientX, sy: e.clientY }; }}
+                  onHide={() => togglePalette(false)}
                   onNav={navPatient}
                   navPrevDisabled={navTarget(-1) === undefined}
                   navNextDisabled={navTarget(1) === undefined} />
@@ -3710,13 +3857,23 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       {/* TY-3(3): Crosslink 5모드 — off/AutoSync(같은 검사)/SyncOther(과거 포함)/Scout/AllLines (In §3.3) */}
       {tbOn("xlink") && (
         <>
-          <select value={xmode} onChange={(e) => setXmode(e.target.value as XlinkMode)}
-                  title={`Crosslink 모드 (L 키=Off↔AutoSync 토글) — ${XLINK_MODES.map((m) => `${m.label}: ${m.desc}`).join(" · ")}`}
-                  style={{ fontSize: 11, width: paletteHoriz ? 86 : "100%", padding: "4px 2px",
-                           background: xmode !== "off" ? "var(--accent)" : undefined,
-                           color: xmode !== "off" ? "#fff" : undefined }}>
-            {XLINK_MODES.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-          </select>
+          {/* 독립 체크박스 5개 — I-View 와 같은 모양. 드롭다운(단일 선택)이었을 때는
+              Crosslink 와 Scout 를 함께 켤 수 없었다. */}
+          <div style={{ display: "flex", flexDirection: paletteHoriz ? "row" : "column",
+                        gap: paletteHoriz ? 8 : 2, fontSize: 10.5,
+                        width: paletteHoriz ? undefined : "100%" }}>
+            {XLINK_MODES.map((m) => (
+              <label key={m.key} title={m.desc}
+                     style={{ display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap",
+                              cursor: "pointer",
+                              opacity: m.key === "crosslink" || xlink.crosslink
+                                       || m.key === "scout" || m.key === "all_lines" ? 1 : 0.45 }}>
+                <input type="checkbox" checked={xlink[m.key]}
+                       onChange={(e) => setXlink((x) => ({ ...x, [m.key]: e.target.checked }))} />
+                {m.label}
+              </label>
+            ))}
+          </div>
           {/* 듀얼모드 Stack 동기 방식 (G 키) — Spatial=DICOM 좌표 정합 / Index=1:1 */}
           <button title="Stack 동기 방식 (G 키) — Spatial: DICOM 좌표로 해부학적 정합(두께·각도·장수 달라도) / Index: 1:1 인덱스(좌표 없는 로컬 데이터·강제 정합)"
                   onClick={() => setSpatialSync((s) => !s)}
@@ -3727,7 +3884,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         </>
       )}
       <button style={{ padding: "6px 6px", fontSize: 12 }} onClick={() => setThumbOpen((t) => !t)}>Thumb</button>
-      <button style={{ padding: "6px 6px", fontSize: 12 }} onClick={() => setPaletteOpen(false)}>Hide</button>
+      <button style={{ padding: "6px 6px", fontSize: 12 }}
+              title={railSpec(prefs.paletteSide).hideTitle}
+              onClick={() => togglePalette(false)}>
+        {railSpec(prefs.paletteSide).hideArrow} Hide
+      </button>
       {/* Common 이하만 스크롤 — ★Quick·이동·레이아웃·Sync·Thumb/Hide 상단 블록은 고정 */}
       <div style={paletteHoriz ? { display: "flex", gap: 3, alignItems: "center" }
                                : { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
@@ -4025,7 +4186,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       case "invert": act("invert"); break;
       case "rotate_r": act("rotR"); break;
       case "fit": act("fit"); break;
-      case "crosslink": setXmode((x) => (x === "off" ? "auto_sync" : "off")); break;
+      case "crosslink": setXlink((x) => ({ ...x, crosslink: !x.crosslink })); break;
       case "spatial":
         setSpatialSync((s0) => { setStatus(!s0 ? "Stack 동기: Spatial(DICOM 좌표 정합)" : "Stack 동기: Index(1:1)"); return !s0; });
         break;
@@ -4517,14 +4678,15 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                        ...initPane(uidOfSeries(s.series_uid)), series: s, index: Math.floor(s.instances.length / 2),
                      }),
                    }))} />
-        <TitleMenu id="hp" icon={`HP:${hpName}`} title="Hanging Protocol — 설정>행잉(HP)에서 규칙 관리" menu={menu} setMenu={setMenu}
-                   items={[
-                     { label: "기본 (HP 해제)", onClick: () => { setHpName("기본"); setImgLay({ r: 1, c: 1 }); setLayout("1x1"); } },
-                     ...hpRules.map((r) => ({
-                       label: `${r.name} — ${r.modality || "*"}/${r.body_part || "*"}/${r.projection || "*"} · S${r.s.r}×${r.s.c} I${r.i.r}×${r.i.c}${r.wl ? ` · W/L ${r.wl}` : ""}`,
-                       onClick: () => applyHp(r),
-                     })),
-                   ]} />
+        {/* 사양 6 — HP 드롭다운은 components/HpMenu.tsx 한 벌뿐이다(SaintView·T-View·I-View 공용).
+            '기본 (HP 해제)' + 등록 규칙 + '직접설정' 체크박스가 그 안에 있다. */}
+        <HpMenu hpName={hpName} rules={hpRules}
+                open={menu === "hp"} setOpen={(v) => setMenu(v ? "hp" : null)}
+                onSelect={applyHp}
+                onClear={() => { setHpName("기본"); setImgLay({ r: 1, c: 1 }); setLayout("1x1"); }}
+                capture={hpCaptureNow}
+                onSaved={(next) => setHpRules(next)}
+                onStatus={setStatus} />
         <span>[{panes[activePane].index + 1}/{panes[activePane].series?.instances.length ?? 0}]</span>
         <span style={{ color: "var(--text-primary)" }}>
           {detail.status.toUpperCase()}, {detail.patient_name}, {detail.modality}, {detail.study_date}, {detail.study_desc}
@@ -4555,34 +4717,29 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             </select>
           </span>
         )}
-        {/* SaintView — In-View 크로스링크 바(체크박스)를 상태바에 통합. xmode 5모드 매핑 */}
+        {/* SaintView — 크로스링크 바. I-View 와 **같은 독립 체크박스**다.
+            예전에는 하나를 켜면 다른 것이 꺼지는 단일 선택이라(Scout 을 켜면 Crosslink 가 풀렸다)
+            같은 체크박스를 눌러도 I-View 와 결과가 달랐다. */}
         {skin === "saint" && (() => {
           const XB: React.CSSProperties = { display: "flex", alignItems: "center", gap: 4, fontSize: 11.5,
                                             whiteSpace: "nowrap", cursor: "pointer" };
-          const linkOn = xmode !== "off";
-          const syncSub = xmode === "auto_sync" || xmode === "sync_other";
+          const SAINT_X: { key: keyof XlinkState; label: string; title: string; sub?: boolean }[] = [
+            { key: "crosslink", label: "Crosslink", title: "Crosslink — 페인 간 연동 마스터" },
+            { key: "auto_sync", label: "Auto Sync", title: "같은 검사 페인끼리 스크롤 동기", sub: true },
+            { key: "sync_other", label: "Sync With Other Exams", title: "다른 검사(과거검사 포함) 페인까지 스크롤 동기", sub: true },
+            { key: "scout", label: "Scout Line", title: "Scout Line — 활성 페인 현재 이미지의 교차선을 다른 페인에 표시" },
+            { key: "all_lines", label: "All Lines", title: "All Lines — 기준 뷰와 같은 축의 전체 교차선(현재 이미지는 색이 다르다)" },
+          ];
           return (
             <span style={{ display: "flex", alignItems: "center", gap: 14, marginRight: 16 }}>
-              <label style={XB} title="Crosslink — 페인 간 스크롤 동기 마스터(켜면 Auto Sync 기본)">
-                <input type="checkbox" checked={linkOn}
-                       onChange={(e) => setXmode(e.target.checked ? "auto_sync" : "off")} />Crosslink
-              </label>
-              <label style={{ ...XB, opacity: linkOn ? 1 : 0.45 }} title="같은 검사 페인끼리 스크롤 동기">
-                <input type="checkbox" checked={xmode === "auto_sync"} disabled={!linkOn && !syncSub}
-                       onChange={(e) => setXmode(e.target.checked ? "auto_sync" : "off")} />Auto Sync
-              </label>
-              <label style={{ ...XB, opacity: linkOn ? 1 : 0.45 }} title="다른 검사(과거검사 포함) 페인까지 스크롤 동기">
-                <input type="checkbox" checked={xmode === "sync_other"} disabled={!linkOn && !syncSub}
-                       onChange={(e) => setXmode(e.target.checked ? "sync_other" : "auto_sync")} />Sync With Other Exams
-              </label>
-              <label style={XB} title="Scout Line — 활성 페인 현재 이미지의 교차선을 다른 페인에 표시">
-                <input type="checkbox" checked={xmode === "scout"}
-                       onChange={(e) => setXmode(e.target.checked ? "scout" : "off")} />Scout Line
-              </label>
-              <label style={XB} title="All Lines — 활성 시리즈 전체 이미지의 교차선 표시(현재 이미지는 진하게)">
-                <input type="checkbox" checked={xmode === "all_lines"}
-                       onChange={(e) => setXmode(e.target.checked ? "all_lines" : "off")} />All Lines
-              </label>
+              {SAINT_X.map((m) => (
+                <label key={m.key} title={m.title}
+                       style={{ ...XB, opacity: m.sub && !xlink.crosslink ? 0.45 : 1 }}>
+                  <input type="checkbox" checked={xlink[m.key]}
+                         onChange={(e) => setXlink((x) => ({ ...x, [m.key]: e.target.checked }))} />
+                  {m.label}
+                </label>
+              ))}
             </span>
           );
         })()}
@@ -4602,18 +4759,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         )}
       </div>
 
-      {skin === "saint" && prefs.paletteSide === "top" && saintBar}
+      {skin === "saint" && prefs.paletteSide === "top" && paletteOpen && saintBar}
       {prefs.paletteSide === "top" && palette}
       {prefs.thumbSide === "top" && thumbs}
+      {/* 위/아래 도킹일 때의 펴기 띠 — 예전엔 좌/우에만 있어서 위/아래로 접으면 되돌릴 수 없었다 */}
+      {!paletteOpen && prefs.paletteSide === "top" && (
+        <button onClick={() => togglePalette(true)} title={railSpec("top").showTitle}
+                style={railStyle("top")}>{railSpec("top").showArrow}</button>
+      )}
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         {prefs.paletteSide === "left" && palette}
-        {skin === "saint" && prefs.paletteSide === "left" && saintBar}
+        {skin === "saint" && prefs.paletteSide === "left" && paletteOpen && saintBar}
         {skin !== "saint" && prefs.paletteSide === "left" && paletteOpen && (
           <Splitter dir="v" onEnd={persistViewerSizes}
                     onDrag={(dx) => setPrefs((p) => ({ ...p, paletteW: clampSz(p.paletteW + dx, 64, 240) }))} />
         )}
-        {skin !== "saint" && !paletteOpen && prefs.paletteSide === "left" && (
-          <button onClick={() => setPaletteOpen(true)} style={{ width: 18, borderRadius: 0, padding: 0 }}>▸</button>
+        {!paletteOpen && prefs.paletteSide === "left" && (
+          <button onClick={() => togglePalette(true)} title={railSpec("left").showTitle}
+                  style={railStyle("left")}>{railSpec("left").showArrow}</button>
         )}
         {prefs.thumbSide === "left" && thumbs}
         {prefs.thumbSide === "left" && thumbOpen && (
@@ -4677,10 +4840,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           <Splitter dir="v" onEnd={persistViewerSizes}
                     onDrag={(dx) => setPrefs((p) => ({ ...p, paletteW: clampSz(p.paletteW - dx, 64, 240) }))} />
         )}
-        {skin === "saint" && prefs.paletteSide === "right" && saintBar}
+        {skin === "saint" && prefs.paletteSide === "right" && paletteOpen && saintBar}
         {paletteRight && palette}
-        {skin !== "saint" && !paletteOpen && paletteRight && (
-          <button onClick={() => setPaletteOpen(true)} style={{ width: 18, borderRadius: 0, padding: 0 }}>◂</button>
+        {!paletteOpen && paletteRight && (
+          <button onClick={() => togglePalette(true)} title={railSpec("right").showTitle}
+                  style={railStyle("right")}>{railSpec("right").showArrow}</button>
         )}
         {prefs.reportDock && !reportCollapsed && (
           <Splitter dir="v" onEnd={persistViewerSizes}
@@ -4730,7 +4894,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       </div>
       {prefs.thumbSide === "bottom" && thumbs}
       {prefs.paletteSide === "bottom" && palette}
-      {skin === "saint" && prefs.paletteSide === "bottom" && saintBar}
+      {skin === "saint" && prefs.paletteSide === "bottom" && paletteOpen && saintBar}
+      {!paletteOpen && prefs.paletteSide === "bottom" && (
+        <button onClick={() => togglePalette(true)} title={railSpec("bottom").showTitle}
+                style={railStyle("bottom")}>{railSpec("bottom").showArrow}</button>
+      )}
       {/* 휴대폰 촬영 QR 다이얼로그 */}
       {qrCap && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 600 }}

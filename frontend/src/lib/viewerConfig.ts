@@ -211,43 +211,11 @@ export const CLIENT_VIEWERS: { id: string; label: string; desc: string; availabl
 ];
 export const DEFAULT_CLIENT_VIEWER = "ty";
 
-/** 행잉 프로토콜 — 디스플레이(모니터) 한 개. role=viewer 는 Series 그리드를 가짐,
- *  worklist_report 는 워크리스트+판독 창(뷰어 미사용). 물리적 배치는 정보용(런타임 배치는 추후). */
-export interface HpDisplay {
-  id: string;
-  role: "viewer" | "worklist_report";
-  label: string;          // 표시용 인덱스 라벨 ("1-2", "2-1" …)
-  resolution: string;     // 정보용 ("2560 * 1080 (100%)")
-  grid: { r: number; c: number };   // viewer 그리드(Series 분할)
-  cells: (number | null)[];         // 셀별 시리즈 순번(1-base, null=자동) — 길이 r*c
-}
-
-/** 행잉 프로토콜 규칙 (Setting>행잉(HP)) — 장비×부위×Projection → 레이아웃·옵션·디스플레이.
- *  s/i/wl 은 하위호환(단일 뷰어 Series/Image 분할). displays 가 있으면 viewer 디스플레이가 우선. */
-export interface HpRule {
-  id: string;
-  name: string;
-  modality: string;     // 빈값=모든 장비
-  body_part: string;    // 부위 포함 매칭 (빈값=무관)
-  projection: string;   // 검사명에 포함 매칭 (PA/AP/LAT…, 빈값=무관)
-  description?: string;  // 설명
-  s: { r: number; c: number };  // Series layout (하위호환)
-  i: { r: number; c: number };  // Image layout
-  wl?: string;          // "center,width" (빈값=기본)
-  // 옵션 (그림) — 뷰어 런타임 반영
-  use_on_exam_open?: boolean;   // Exam 열 때 HP 자동 사용
-  full_link?: boolean;          // 전체 링크(페인 동기)
-  full_scroll_sync?: boolean;   // 전체 스크롤 동기화
-  cross_link?: boolean;         // Cross Link(교차 위치 동기)
-  scout_image?: boolean;        // Scout 이미지(교차선) 사용
-  displays?: HpDisplay[];       // 디스플레이 레이아웃(멀티모니터)
-}
-
-/** HP 디스플레이 기본값 — 그림 등가(뷰어 1 + 워크리스트+판독 1) */
-export const DEFAULT_HP_DISPLAYS = (): HpDisplay[] => [
-  { id: "d1", role: "viewer", label: "1-2", resolution: "2560 * 1080 (100%)", grid: { r: 1, c: 1 }, cells: [null] },
-  { id: "d2", role: "worklist_report", label: "2-1", resolution: "1600 * 1067 (150%)", grid: { r: 1, c: 1 }, cells: [null] },
-];
+/* 행잉 프로토콜(HP) 의 계약(HpRule·HpDisplay·DEFAULT_HP_DISPLAYS·매칭·시간대 슬롯·마이그레이션)은
+   **lib/hangingProtocol.ts** 에 있다. 여기에 다시 두지 마라 — 정의가 갈린다.
+   ⚠ 여기서 re-export 도 하지 않는다: tests/*.test.mjs 가 Node 의 타입 스트리핑으로 이 .ts 를 직접
+     import 하는데, 확장자 없는 상대 import 는 Node ESM 이 해석하지 못해 테스트가 통째로 죽는다
+     (실제로 그렇게 hang2d_rule.test.mjs 가 ERR_MODULE_NOT_FOUND 로 깨졌다). */
 
 /** W/L 프리셋 (Presetting — Setting>뷰어에서 편집, 계정 로밍) */
 export interface WlPreset { key: string; label: string; q: string }

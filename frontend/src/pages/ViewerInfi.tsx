@@ -35,7 +35,14 @@ import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewe
 import { decideCloseScope, markViewerClosing, markViewerMounted, shouldCloseAllMonitors } from "../lib/viewerClose";
 import { clearViewerSlots, isViewerSlotName, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
-import { activeHang2dMap, mammoAssign, mammoView, pickHang2d, type HpRule } from "../lib/viewerConfig";
+import { hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
+import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pickHpScreen } from "../lib/hpCapture";
+import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
+// vdot/vsub 은 3D Cursor(가장 가까운 슬라이스 찾기, 아래 1720행대)가 아직 직접 쓴다 —
+// 기하 헬퍼를 lib/scoutLines 로 추출할 때 이 둘만 import 에서 빠져 빌드가 깨져 있었다.
+import { axisOf, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment, vdot, vsub } from "../lib/scoutLines";
+import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
+import { activeHang2dMap, mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgReadable, mgRatioBox,
   mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
@@ -122,55 +129,10 @@ const initPane = (studyUid = ""): Pane => ({
   flipH: false, flipV: false, invert: false, wl: "", fx: "", il: { r: 1, c: 1 },
 });
 
-/* ── Scout line 기하 — DICOM ImagePosition/Orientation 으로 소스 이미지의 절단선을
-      타깃 이미지 픽셀좌표에 투영 (§3.3 ④⑤ Scout Line / All Lines) ── */
-type V3 = number[];
-const vsub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const vdot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const vcross = (a: V3, b: V3): V3 =>
-  [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-interface Geom { pos: V3; row: V3; col: V3; rs: number; cs: number; n: V3; rows: number; cols: number }
-/** 평면의 지배 축(0=SAG,1=COR,2=AX 근사) — 크로스 라인 축별 1개 제한용 */
-function axisOf(g: Geom): number {
-  const a = [Math.abs(g.n[0]), Math.abs(g.n[1]), Math.abs(g.n[2])];
-  return a.indexOf(Math.max(...a));
-}
-function geomOf(inst: InstanceNode): Geom | null {
-  if (inst.position?.length !== 3 || inst.orientation?.length !== 6 || inst.pixel_spacing?.length !== 2) return null;
-  const row = inst.orientation.slice(0, 3), col = inst.orientation.slice(3, 6);
-  return { pos: inst.position, row, col, rs: inst.pixel_spacing[0], cs: inst.pixel_spacing[1],
-           n: vcross(row, col), rows: inst.rows || 1, cols: inst.cols || 1 };
-}
-/** 소스 평면(src)과 타깃(tgt) 평면의 **정확한 교차선**을 타깃 픽셀좌표로 반환.
- *  타깃 이미지 경계를 약간(5%) 넘는 범위로 클리핑 — 상하/좌우 전체를 관통하는 풀 레인지 라인.
- *  평행 평면이면 null. (기존 모서리 투영 근사는 대각선 오류가 있어 폐기) */
-function scoutSegment(src: Geom, tgt: Geom): { x1: number; y1: number; x2: number; y2: number } | null {
-  const nsLen = Math.hypot(...src.n), ntLen = Math.hypot(...tgt.n);
-  if (nsLen < 1e-9 || ntLen < 1e-9) return null;
-  if (Math.abs(vdot(src.n, tgt.n) / (nsLen * ntLen)) > 0.999) return null;   // 평행
-  // 타깃 평면 위 점 Q(x,y) = pos + (x·cs)·row + (y·rs)·col 가 소스 평면 위에 있을 조건:
-  //   A·x + B·y + C = 0  (x=열 px, y=행 px)
-  const A = vdot(src.n, tgt.row) * tgt.cs;
-  const B = vdot(src.n, tgt.col) * tgt.rs;
-  const C = vdot(src.n, vsub(tgt.pos, src.pos));
-  // 이미지 경계 + 5% 여유로 클리핑
-  const mx = Math.max(2, (tgt.cols - 1) * 0.05), my = Math.max(2, (tgt.rows - 1) * 0.05);
-  const X0 = -mx, X1 = (tgt.cols - 1) + mx, Y0 = -my, Y1 = (tgt.rows - 1) + my;
-  const pts: { x: number; y: number }[] = [];
-  const add = (x: number, y: number) => {
-    if (x >= X0 - 1e-6 && x <= X1 + 1e-6 && y >= Y0 - 1e-6 && y <= Y1 + 1e-6) pts.push({ x, y });
-  };
-  if (Math.abs(B) > 1e-9) { add(X0, (-C - A * X0) / B); add(X1, (-C - A * X1) / B); }
-  if (Math.abs(A) > 1e-9) { add((-C - B * Y0) / A, Y0); add((-C - B * Y1) / A, Y1); }
-  if (pts.length < 2) return null;
-  let bi: [number, number] = [0, 1], bd = -1;
-  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-    const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
-    if (d > bd) { bd = d; bi = [i, j]; }
-  }
-  if (bd < 1e-6) return null;
-  return { x1: pts[bi[0]].x, y1: pts[bi[0]].y, x2: pts[bi[1]].x, y2: pts[bi[1]].y };
-}
+/* ── Scout line 기하 — lib/scoutLines 로 옮겼다(3뷰어 공용).
+      여기 있던 사본을 지운 이유: 같은 계산이 Viewer2D 에도 따로 있어 두 뷰어의 동작이 갈렸다.
+      한 벌만 두면 어긋남이 다시 생기지 않고, 순수 함수라 브라우저 없이 테스트로 고정된다.
+      (frontend/tests/scout_lines_rule.test.mjs) ── */
 
 function instUrl(studyUid: string, s: SeriesNode, inst: InstanceNode, wl: string): string {
   const q = wl ? `?window=${wl},linear` : "";
@@ -466,6 +428,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // IN-2 ①: 행잉 프로토콜 규칙(viewer.hp) — 검사 로드 시 자동 매칭 + 행잉 콤보에서 선택 (TY applyHp 등가)
   const [hpRules, setHpRules] = useState<HpRule[]>([]);
   const [hpName, setHpName] = useState("기본");
+  const [hpOpen, setHpOpen] = useState(false);   // 사양 6 HP 드롭다운 열림(공용 HpMenu)
+  // 검사 열기 자동 매칭에서 걸린 규칙의 screens(칸별 배치)는 exams·시리즈가 들어온 **뒤에** 걸어야 한다
+  // — 아래 행잉 effect 가 마지막에 setPanes 로 전체를 덮으므로 그 안에서 걸면 지워진다.
+  const pendingHpRef = useRef<HpRule | null>(null);
+  const applyHpCellsRef = useRef<(rule: HpRule) => void>(() => {});
   // IN-2 ⑦: OHIF 게이트(viewer.prefs.ohif_enabled — 켠 계정만 '기타' 구획에 버튼 노출)
   const [ohifOn, setOhifOn] = useState(false);
   // IN-2 ⑥: 판독창(📝) 모니터 배치 — Setting>모니터의 monitor.report 인덱스
@@ -645,18 +612,16 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           }
         }
       }
-      // IN-2 ①: 규칙 기반 행잉 프로토콜(viewer.hp) — 모달리티×부위×Projection 첫 일치 자동 적용
-      //          (TY hpRules/applyHp 등가 — 단독 검사에서 Modality 기본 레이아웃보다 우선)
-      const hpv = hpRes.value as
-        { rules?: HpRule[] };
-      const rules = hpv.rules ?? [];
-      setHpRules(rules);
-      const up = (s: string) => (s || "").toUpperCase();
-      const hpMatch = rules.find((x) =>
-        x.use_on_exam_open !== false &&   // 'Exam 열 때 HP 사용' 꺼진 규칙은 자동적용 제외(행잉 콤보에서 수동 적용)
-        (!x.modality || x.modality === detail.modality) &&
-        (!x.body_part || up(detail.body_part).includes(up(x.body_part))) &&
-        (!x.projection || up(detail.study_desc).includes(up(x.projection)))) ?? null;
+      // IN-2 ①: 규칙 기반 행잉 프로토콜(viewer.hp) — '가장 우선 적용' 규칙 → 그 외 순으로 첫 일치 자동 적용
+      //          (단독 검사에서 Modality 기본 레이아웃보다 우선)
+      //          규정은 lib/hangingProtocol.ts 의 matchHpRule 하나뿐이다 — 뷰어마다 find 를 복사하면 또 갈린다.
+      const hpDoc = readHpDoc(hpRes.value);
+      setHpRules(hpRuleOrder(hpDoc.rules));          // 행잉 콤보 순서 = 매칭 순서
+      const hpMatch = matchHpRule({
+        modality: detail.modality, body_part: detail.body_part,
+        study_desc: detail.study_desc, order_name: detail.order_name,
+        study_date: detail.study_date,
+      }, hpDoc.rules, { forExamOpen: true });
       // ⑤ Key Image View: 주 검사의 시리즈를 키이미지 SOP 만 남긴 [KEY] 시리즈로 필터
       if (keySops?.length) {
         const prim = list.find((e) => e.d.id === detail.id);
@@ -743,6 +708,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           sync_other: hpMatch.full_scroll_sync ?? x.sync_other,
           scout: hpMatch.scout_image ?? x.scout,
         }));
+        // 사양 4·4-2 — 칸별 배치는 아래 setPanes 가 끝난 뒤(exams 도착) 걸어야 지워지지 않는다
+        if (hpMatch.screens?.length) pendingHpRef.current = hpMatch;
       }
       else if (defCfg?.s) { r = defCfg.s.r; c = defCfg.s.c; }
       else { const n = Math.max(1, hangList.length); c = Math.min(n, 4); r = Math.ceil(n / c); }
@@ -940,7 +907,100 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     }));
     setHpName(rule.name);
     say(`행잉 프로토콜 적용 — ${rule.name}`);
+    applyHpCells(rule);   // 사양 4·4-2 — screens 가 있으면 칸별 시리즈·과거검사까지 건다
   };
+
+  /* ══════════ 사양 6 — HP '직접설정' 읽기 / screens 되돌리기 (Viewer2D 와 같은 lib/hpCapture) ══════════
+     규정(무엇을 저장하고 무엇을 못 하는지·기간 슬롯·왕복 검증)은 lib/hpCapture.ts 한 곳뿐이다.
+     여기서 로직을 복사하면 두 뷰어가 또 갈린다 — 예전 HP 매칭이 실제로 그렇게 갈렸다. */
+  const hpMon = () => hpMonitorIndex(window.name, monScreensRef.current);
+  /** 검사 uid → 시리즈 목록. 주 검사는 exams, 과거검사는 로드해 둔 priorSeries 를 모은다. */
+  const hpSeriesOf = (uid: string): SeriesNode[] => {
+    const ex = exams.find((e) => e.d.study_uid === uid);
+    if (ex) return ex.series;
+    return priorSeries.filter((p) => p.uid === uid).map((p) => p.s);
+  };
+  /** 후보는 **기간 필터를 걸지 않은** 관련검사 전체 — 슬롯이 스스로 자른다(이중 절단 금지). */
+  const hpCtx = () => ({
+    currentUid: curD.study_uid, anchorDate: curD.study_date,
+    priors: (curD.related_exams ?? []).map((e) => ({
+      id: e.id, study_date: e.study_date, study_uid: e.study_uid })),
+    currentId: curD.id,
+  });
+
+  const hpCaptureNow = (): HpMenuCapture | null => {
+    const list = hpSeriesOf(curD.study_uid);
+    if (!list.length) return null;
+    const n = Math.max(1, sLayout.r * sLayout.c);
+    const snapPanes = Array.from({ length: n }, (_, k) => {
+      const p = panes[k];
+      const uid = p?.series ? (p.studyUid || curD.study_uid) : "";
+      const idx = p?.series ? hpSeriesOf(uid).findIndex((s) => s.series_uid === p.series!.series_uid) : -1;
+      return { studyUid: uid, seriesNo: idx >= 0 ? idx + 1 : null };
+    });
+    const cap = hpCaptureScreen({
+      monitor: hpMon(),
+      resolution: `${window.screen.width} * ${window.screen.height}`,
+      s: sLayout,
+      i: panes[active]?.il ?? { r: 1, c: 1 },
+      panes: snapPanes,
+    }, hpCtx());
+    return {
+      ...cap, modality: curD.modality, wl: panes[active]?.wl ?? "",
+      options: { full_link: !!xlink.auto_sync, full_scroll_sync: !!xlink.sync_other,
+                 cross_link: !!xlink.crosslink, scout_image: !!xlink.scout },
+    };
+  };
+
+  /** 규칙의 screens → 이 화면(I-View 는 panes 가 배열이라 인덱스가 곧 칸 번호다). */
+  const applyHpCells = (rule: HpRule) => {
+    const sc = pickHpScreen(rule, hpMon());
+    if (!sc) return;                       // screens 없는 구 규칙 — 위 구 경로가 이미 처리했다
+    const cur = hpSeriesOf(curD.study_uid);
+    applySLayout({ r: sc.s.r, c: sc.s.c });
+    // 칸 정보가 없는 구 규칙은 레이아웃만 — 사용자가 잡아 둔 비교 배치를 갈아엎지 않는다(구 동작 보존)
+    if (!hpScreenHasPlacement(sc)) return;
+    if (!cur.length) return;               // 시리즈가 아직 없다 — 레이아웃만 걸고 배정은 포기(거짓 배치 금지)
+    const plan = hpPlanCells(sc, hpCtx());
+    setPanes(() => Array.from({ length: Math.max(1, sc.s.r * sc.s.c) }, (_, k) => {
+      const pl = plan[k];
+      if (!pl || pl.skip || pl.prior) return { ...initPane(curD.study_uid), il: sc.i };
+      const s = (pl.series ? cur[pl.series - 1] : cur[k]) ?? null;
+      return { ...initPane(curD.study_uid), series: s, il: sc.i,
+               index: snapTileIndex(0, Math.max(1, sc.i.r * sc.i.c), s?.instances.length) };
+    }));
+    // 과거검사 칸 — 시리즈 트리를 받아 와야 하므로 비동기. 실패한 칸은 빈 칸으로 남긴다.
+    const priorCells = plan.map((pl, k) => ({ k, pl })).filter((x) => x.pl?.prior);
+    if (priorCells.length) {
+      void (async () => {
+        for (const { k, pl } of priorCells) {
+          const pr = pl!.prior!;
+          try {
+            const r = await api.seriesTree(pr.id);
+            const s = (pl!.series ? r.series[pl!.series - 1] : r.series[0]) ?? null;
+            if (!s) continue;
+            setPriorLoaded((old) => new Set(old).add(pr.id));
+            setPriorSeries((ps) => ps.some((x) => x.s.series_uid === s.series_uid) ? ps
+              : [...ps, ...r.series.map((x) => ({ uid: pr.study_uid, label: pr.study_date, s: x }))]);
+            setPanes((ps) => ps.map((p, i) => (i === k
+              ? { ...initPane(pr.study_uid), series: s, il: sc.i, index: Math.floor(s.instances.length / 2) }
+              : p)));
+          } catch { /* 그 칸만 빈 채로 둔다 */ }
+        }
+      })();
+    }
+    const none = plan.map((p, k) => (p.skip === "none" ? k + 1 : 0)).filter(Boolean);
+    const d3 = plan.map((p, k) => (p.skip === "3d" ? k + 1 : 0)).filter(Boolean);
+    if (none.length) say(`${none.join("·")}번 칸: 조건에 맞는 과거검사가 없습니다`);
+    else if (d3.length) say(`${d3.join("·")}번 칸: 3D 영상은 뷰어가 복원하지 않습니다`);
+  };
+  applyHpCellsRef.current = applyHpCells;
+  /* 검사 열기 자동 매칭이 남긴 규칙을 exams(=시리즈)가 도착한 뒤 한 번 건다 — 사양 6 '가장 우선 적용' 포함 */
+  useEffect(() => {
+    const r = pendingHpRef.current;
+    if (r && exams.length) { pendingHpRef.current = null; applyHpCellsRef.current(r); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exams]);
   // 과거검사 시리즈 로드는 우측 판독 도크의 History 탭 → dockLoadPrior 단일 경로로 통합했다.
   // (썸네일 패널의 중복 "+MMDD" 버튼을 제거하면서 그 전용 loadPrior 도 함께 제거 — 죽은 코드 방지)
   const upd = useCallback((i: number, patch: Partial<Pane>) => {
@@ -2515,6 +2575,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [usage, setUsage] = useState<Record<string, number>>({});
   const [usageRec, setUsageRec] = useState(true);
   const [quickRow, setQuickRow] = useState(true);
+  // Tools 패널 접기 — I-View 에는 아예 없던 기능. 접힘은 다시 열어도 유지된다(lib/toolPanel).
+  const [toolsOpen, setToolsOpen] = useState(() => readToolPanelOpen("infi"));
+  const toggleTools = useCallback((open: boolean) => {
+    setToolsOpen(open);
+    writeToolPanelOpen("infi", open);
+  }, []);
   const usageRef = useRef(usage);
   const usageTimer = useRef<number | null>(null);
   const tHeld = useRef(false);
@@ -3127,17 +3193,18 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                  current: boolean; cross?: boolean; label?: string }[] = [];
     // 1) 활성(기준) 시리즈의 절단선 — 다른 시리즈 타일 위 (노랑=현재, 파랑=All Lines)
     if (act?.series && act.series.series_uid !== tileSeriesUid) {
-      const srcs = xlink.all_lines ? act.series.instances
-        : act.series.instances[act.index] ? [act.series.instances[act.index]] : [];
-      const total = act.series.instances.length;
-      srcs.forEach((si, k) => {
-        const sg = geomOf(si);
+      // All Lines = **스크롤 기준 뷰와 같은 축**의 전체(사용자 확정 규칙).
+      // 예전엔 시리즈 전체를 그대로 썼는데, 로컬라이저처럼 한 시리즈에 SAG·COR·AX 가 섞여 있으면
+      // 관계없는 방향의 선까지 겹쳐 그려져 화면이 읽히지 않았다.
+      const srcs = pickLineSources(act.series.instances, act.index,
+                                   { scout: !!xlink.scout, all_lines: !!xlink.all_lines });
+      const label = positionLabel(srcs);      // 축으로 거른 **뒤** 기준의 '현재/전체'
+      srcs.forEach((s) => {
+        const sg = geomOf(s.inst);
         if (!sg) return;
         const seg = scoutSegment(sg, tg);
         if (!seg) return;
-        const current = xlink.all_lines ? k === act.index : true;
-        out.push({ ...seg, current,
-                   label: current ? `${act.index + 1}/${total}` : undefined });   // "현재/전체"
+        out.push({ ...seg, current: s.current, label: s.current ? label : undefined });
       });
     }
     // 2) 상호 참조(십자) — §3.3 ① 'Crosslink'는 다중 이미지 연동의 마스터.
@@ -3381,9 +3448,20 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       </div>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        {/* 접혔을 때 남는 펴기 띠 — 이게 없으면 되돌릴 방법이 사라진다 */}
+        {!toolsOpen && (
+          <button onClick={() => toggleTools(true)} title={railSpec("left").showTitle}
+                  style={railStyle("left")}>{railSpec("left").showArrow}</button>
+        )}
         {/* ── 좌측 2열 아이콘 툴바 (p.11~14 전 툴) ── */}
+        {toolsOpen && (
         <div style={{ width: ui.toolW, background: "var(--bg-panel)", borderRight: "1px solid var(--border)",
                       display: "flex", flexDirection: "column", padding: "6px 5px", gap: 5, flexShrink: 0 }}>
+          {/* Tools 감추기 — 판독 중에는 화면이 넓을수록 좋다 */}
+          <button title={railSpec("left").hideTitle} onClick={() => toggleTools(false)}
+                  style={{ fontSize: 11, padding: "3px 0", width: "100%" }}>
+            {railSpec("left").hideArrow} Hide
+          </button>
           {/* §3.1 툴바 상단(원본 이미지2): Prev/Next · Crosslink · 행잉 · Worklist/Report · Close */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <button title="Prev — 워크리스트의 위 검사 열기" onClick={() => void nav(-1)}
@@ -3398,25 +3476,25 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                            color: xlink.crosslink ? "#fff" : undefined }}>
             ⛓ Crosslink
           </button>
-          <select title={`행잉 프로토콜 — 현재: ${hpName}. 규칙(장비×부위×Projection)은 설정>행잉(HP)에서 관리, 검사 로드 시 첫 일치 규칙 자동 적용`}
-                  defaultValue=""
+          {/* 사양 6 — HP 드롭다운은 components/HpMenu.tsx 한 벌뿐이다(SaintView·T-View·I-View 공용).
+              예전엔 여기 <select> 와 Viewer2D 의 TitleMenu 가 따로 있었고 항목·표기가 서로 달랐다. */}
+          <HpMenu hpName={hpName} rules={hpRules} compact
+                  open={hpOpen} setOpen={setHpOpen}
+                  onSelect={applyHpIn}
+                  onClear={() => { applySLayout({ r: 1, c: 1 }); upd(0, { il: { r: 1, c: 1 } }); setHpName("기본"); }}
+                  capture={hpCaptureNow}
+                  onSaved={(next) => setHpRules(next)}
+                  onStatus={say} />
+          {/* 빠른 레이아웃(HP 규칙이 아니다) — HP 드롭다운에서 분리해 뜻을 섞지 않는다 */}
+          <select title="빠른 레이아웃 — 행잉 규칙과 무관한 즉석 분할" defaultValue=""
                   onChange={(e) => {
                     const v = e.target.value;
-                    if (v.startsWith("hp:")) {   // IN-2 ①: 규칙 기반 행잉 선택 적용
-                      const rule = hpRules[Number(v.slice(3))];
-                      if (rule) applyHpIn(rule);
-                    }
-                    else if (v === "stack") { applySLayout({ r: 1, c: 1 }); upd(0, { il: { r: 1, c: 1 } }); setHpName("기본"); }
+                    if (v === "stack") { applySLayout({ r: 1, c: 1 }); upd(0, { il: { r: 1, c: 1 } }); setHpName("기본"); }
                     else if (v === "tile") { applySLayout({ r: 1, c: 1 }); setPaneIl(0, { r: 3, c: 3 }); setHpName("기본"); }
                     else if (v === "cmp") { applySLayout({ r: 1, c: 2 }); setHpName("기본"); }
                     e.target.value = "";
                   }} style={{ fontSize: 10 }}>
-            <option value="" disabled>HP: {hpName}</option>
-            {hpRules.map((r, i) => (
-              <option key={r.id} value={`hp:${i}`}>
-                {r.name} — {r.modality || "*"}/{r.body_part || "*"} · S{r.s.r}×{r.s.c} I{r.i.r}×{r.i.c}
-              </option>
-            ))}
+            <option value="" disabled>빠른 레이아웃</option>
             <option value="stack">Stack 1x1</option>
             <option value="tile">Tile 3x3</option>
             <option value="cmp">Compare 1x2</option>
@@ -3572,10 +3650,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
             </button>
           </div>
         </div>
+        )}
 
-        {/* 툴바 ↔ 썸네일 폭 조절 */}
-        <Splitter dir="v" onEnd={saveUi}
-                  onDrag={(dx) => setUi((u) => ({ ...u, toolW: clampW(u.toolW + dx, 72, 240) }))} />
+        {/* 툴바 ↔ 썸네일 폭 조절 — 접혀 있으면 조절할 폭이 없다 */}
+        {toolsOpen && (
+          <Splitter dir="v" onEnd={saveUi}
+                    onDrag={(dx) => setUi((u) => ({ ...u, toolW: clampW(u.toolW + dx, 72, 240) }))} />
+        )}
 
         {/* ── 세로 시리즈 썸네일 열 (원본 이미지4) ── */}
         {thumbCol}
@@ -3927,13 +4008,13 @@ function TileAnno({ inst, pane, annos, pend, pendTool = "", selIdx = -1, selIdxs
         const e = p1.x >= p2.x ? p1 : p2;
         const lx = Math.min(Math.max(e.x - 34, 2), dim.w - 40);
         const ly = Math.min(Math.max(e.y - 4, 10), dim.h - 4);
-        const color = sc.current ? "#facc15" : sc.cross ? "#22d3ee" : "#38bdf8";
+        // 색·굵기는 공용 규칙(lib/scoutLines.lineStyle) — 3뷰어가 같은 선을 그린다
+        const st = lineStyle(sc.current ? "current" : sc.cross ? "cross" : "other");
+        const color = st.color;
         return (
           <g key={`s${i}`}>
             <line x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-                  stroke={color}
-                  strokeWidth={sc.current ? 1.6 : sc.cross ? 1.1 : 0.7}
-                  opacity={sc.current ? 1 : sc.cross ? 0.85 : 0.65} />
+                  stroke={color} strokeWidth={st.width} opacity={st.opacity} />
             {sc.label && (
               <text x={lx} y={ly} fill={color} fontSize={11} fontWeight={700}
                     style={{ paintOrder: "stroke", stroke: "#000", strokeWidth: 3 }}>
