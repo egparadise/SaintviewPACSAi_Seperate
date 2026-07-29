@@ -2,7 +2,10 @@
 // Study Open 옵션(Add/Stack/Key/With Open)을 URL 파라미터로 전달받아 Viewer2D를 전체 화면으로 띄운다.
 import { Suspense, lazy, useEffect, useState } from "react";
 import { api, ensureToken, isLiveId, type StudyDetail } from "../api";
+import { onViewerCloseAll } from "../lib/sync";
+import { closeAllDelayMs, isViewerClosing, isViewerMounted, shouldForceCloseNow } from "../lib/viewerClose";
 import { DEFAULT_CLIENT_VIEWER } from "../lib/viewerConfig";
+import { releaseViewerSlot } from "../lib/viewerSlots";
 import { folderToFilters, loadTabs } from "./WorklistTree";
 
 const Viewer2D = lazy(() => import("./Viewer2D").then((m) => ({ default: m.Viewer2D })));
@@ -59,6 +62,29 @@ export function ViewerWindow() {
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+  // 다른 모니터의 All Close 방송 — **뷰어 컴포넌트 밖**(로그아웃 리스너와 같은 자리)에서 받는다.
+  // 왜 여기여야 하나: 아래의 `if (!detail) return <뷰어 로딩…>` 게이트와 <Suspense> 때문에, 이 창은
+  // api.study() 응답과 lazy 청크가 도착할 때까지 Viewer2D/ViewerInfi 를 아예 마운트하지 않는다.
+  // 그 구간(부팅·리로드·에러 화면)에는 뷰어 안의 구독이 존재하지 않아 방송을 통째로 놓쳤고,
+  // 다중 모니터는 검사를 열 때마다 대상 창을 URL 로 리로드하므로 이 '귀머거리 구간'을 상시 지나간다.
+  // 뷰어가 마운트돼 있으면 그쪽이 주석 저장을 끝내고 스스로 닫는 게 정상 — 여기서 먼저 닫으면
+  // 주석이 유실되므로 유예(closeAllDelayMs) 뒤에 닫는 **안전망**으로만 동작한다.
+  useEffect(() => onViewerCloseAll(() => {
+    // 저장(await)보다 먼저 슬롯을 반납한다 — 남아 있으면 2초 하트비트가 sv_vslot_* 를 되살려
+    // All Close 직후의 다음 오픈이 ①부트스트랩 대신 라운드로빈으로 떨어진다.
+    releaseViewerSlot();
+    const step = closeAllDelayMs(isViewerMounted());
+    if (step <= 0) { window.close(); return; }   // 뷰어 미마운트 = 저장할 것이 없다 → 즉시
+    // 뷰어가 붙어 있으면 양보한다. 다만 '한 번 재우고 무조건 닫기'는 위험하다 — 저장이 1.5초를
+    // 넘기는 순간 문서가 사라져 주석이 유실된다. 뷰어가 아직 닫는 중이면 하드 캡까지 계속 기다린다.
+    let waited = 0;
+    const t = window.setInterval(() => {
+      waited += step;
+      if (!shouldForceCloseNow(isViewerClosing(), waited)) return;
+      window.clearInterval(t);
+      window.close();
+    }, step);
+  }), []);
   const [addDetail, setAddDetail] = useState<StudyDetail | null>(null);
   const [stackDetail, setStackDetail] = useState<StudyDetail | null>(null);
   const [err, setErr] = useState("");

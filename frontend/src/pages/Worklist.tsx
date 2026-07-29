@@ -13,12 +13,13 @@ import {
 } from "react";
 import { ExportDialog } from "./ExportDialog";
 import { readDlPrefs } from "../lib/dlPrefs";
-import { dlConfigure, dlInvalidate, dlPromote, dlReset, dlSetQueue, dlStop } from "../lib/dlScheduler";
+import { dlConfigure, dlInvalidate, dlPromote, dlReset, dlResume, dlSetQueue, dlStop } from "../lib/dlScheduler";
 import { dlSupportReason, opfsWipe } from "../lib/opfsStore";
 import { setImageFormat } from "../lib/imageFormat";
 // 조회 질의는 '확정된 조건(committed)'에서만 만든다 — 규칙과 근거는 lib/worklistQuery.ts 참조
 import {
   buildWorklistQuery,
+  decideDlScope,
   defaultStatusInjection,
   freshChangedVids,
   isQueryDirty,
@@ -73,10 +74,10 @@ import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { screenFeatures, screenFeaturesList } from "../lib/screens";
 import { showToast } from "../lib/toast";
-import { onStudySync, postStudySync, postViewerAddTab } from "../lib/sync";
+import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
 import {
-  forgetViewerSlot, liveViewerSlots, noteViewerSlot, openByPlan, planViewerOpen,
-  readViewerRoundRobin, viewerSlotName, writeViewerRoundRobin,
+  decideBaselineArm, decideBaselineRelease, forgetViewerSlot, liveViewerSlots, noteViewerSlot,
+  openByPlan, planViewerOpen, readViewerRoundRobin, viewerSlotName, writeViewerRoundRobin,
 } from "../lib/viewerSlots";
 import { Splitter, clampSz } from "../lib/Splitter";
 
@@ -2531,7 +2532,54 @@ export function Worklist() {
   // 다중선택 — Shift=범위, Ctrl/Cmd=개별 토글, 일반=단일. selected(포커스)와 별개의 선택 집합.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [exportRows, setExportRows] = useState<StudyRow[] | null>(null);   // DICOM 반출 대상
+  // 다운로드 모드 기준선 — **첫 이미지를 연 시각**. 조건 없는 워크리스트는 곧 전체 아카이브라
+  // 통째로 받으면 안 되고, 판독을 시작한 시점부터가 '이 세션에서 볼 것' 이다(lib/worklistQuery 참조).
+  // sessionStorage 인 이유: 새로고침으로 기준선이 리셋되면 이미 받은 범위를 다시 계산하게 된다.
+  const [dlOpenedAt, setDlOpenedAt] = useState<number>(() => {
+    const v = Number(sessionStorage.getItem("sv_dl_opened_at") ?? 0);
+    return Number.isFinite(v) ? v : 0;
+  });
+  // 다운로드 모드가 실제로 켜져 있는가(= dlConfigure 에 넘긴 enabled 와 같은 값).
+  // 아래 뷰어 생존 폴링 훅의 게이트다 — 기준선이 **없을 때도** 돌아야 하기 때문에(상승 에지 관측)
+  // '기준선이 있는가' 를 게이트로 쓸 수 없다. 다운로드 모드가 꺼져 있으면 관측할 이유가 없으므로
+  // 평상시 비용은 그대로 0 이다.
+  const [dlEnabled, setDlEnabled] = useState(false);
+  // 기준선은 **판독 세션 단위**다: 뷰어가 열려 있는 동안은 처음 연 시각을 유지하고,
+  // 뷰어를 닫으면 풀린다(clearDlOpened). 그래서 다시 열면 **그때 연 영상이 새 기준**이 된다.
+  // 매 오픈마다 밀면 이미 받던 범위가 계속 잘려 '받다 말다' 를 반복한다.
+  //  · 호출자는 둘이다: openV2(이 창에서 여는 경로) + 아래 뷰어 생존 폴링 훅의 **상승 에지**
+  //    (판독창 ◀▶·Compare·다른 워크리스트 탭에서 연 경우 — 그 창들은 이 함수를 부를 수 없다).
+  const markDlOpened = useCallback(() => {
+    // ★ 재개는 기준선 유무와 **무관하게 매번** 부른다. 뷰어를 닫으면 clearDlOpened 가 dlStop 을
+    //   부르는데, 그 뒤 다시 열었을 때 되살릴 곳이 여기밖에 없다(dlStart 는 dlConfigure 안에서만
+    //   불린다 — 설정 저장이나 서버모드 전환을 해야만 살아나는 상태였다).
+    //   dlResume 은 다운로드 모드가 꺼져 있으면 no-op 이고 dlStart 자체가 멱등이라 매번 불러도 무해.
+    dlResume();
+    setDlOpenedAt((prev) => {
+      if (prev) return prev;                       // 세션 안에서는 첫 번째만
+      const now = Date.now();
+      try { sessionStorage.setItem("sv_dl_opened_at", String(now)); } catch { /* 무시 */ }
+      return now;
+    });
+  }, []);
+  /** 뷰어가 **모두** 닫혔다 — 기준선을 풀고 백그라운드 다운로드도 멈춘다.
+   *  · 정지는 조건부가 아니라 **항상**이다(사용자 문장: "일단 멈추고"). 검색 조건을 걸어 둔
+   *    ①'filtered' 범위도 함께 멈춘다 — 그 대신 markDlOpened 의 dlResume 이 **항상** 되살린다.
+   *    둘은 한 쌍이다: 재개 없이 이 정지만 배선하면 '한 번 뷰어를 닫으면 그 세션 내내 다운로드가
+   *    죽는' 상태가 된다(지금보다 나쁘다).
+   *  · 호출자는 아래 폴링 훅 하나다(하강 에지에서만). */
+  const clearDlOpened = useCallback(() => {
+    try { sessionStorage.removeItem("sv_dl_opened_at"); } catch { /* 무시 */ }
+    setDlOpenedAt(0);
+    dlStop();
+  }, []);
   const selAnchorRef = useRef<number | null>(null);   // Shift 범위 기준점(마지막 단일/토글 클릭)
+  // 하이라이트 전용 **동기** 포커스 id.
+  // ⚠ 예전에는 그리드가 selected?.id(= api.study 응답으로 채워지는 상세)를 봤다. 그런데 클릭 즉시
+  //   바뀌는 것은 selectedIds 뿐이라, 상세 왕복이 끝나기 전까지 **옛 행과 새 행이 동시에 강조**됐다
+  //   ("클릭 한 번인데 두 개가 선택된 것처럼 보인다"). 원격 A 가 느리면 그 시간이 그대로 늘어난다.
+  //   하이라이트는 네트워크를 기다릴 이유가 없다 — 화면 상태는 화면 상태로만 정한다.
+  const [focusId, setFocusId] = useState<number | null>(null);
   const [compareSet, setCompareSet] = useState<CompareItem[]>([]);
   const [refreshKey, setRefreshKey] = useState(0);
   // 목록 갱신 정책 — 기본은 **수동**(SEARCH 를 눌러야 갱신). 설정 > 환경에서 자동/초 지정.
@@ -3064,13 +3112,19 @@ export function Worklist() {
       ? api.hospImageFormat(hid).then(setImageFormat).catch(() => {})
       : Promise.resolve();
     void fmtReady.then(() => api.getSetting("viewer.prefs")).then((r) => {
-      if (dead || !r) return;
+      if (dead || !r) { if (!dead) setDlEnabled(false); return; }
       const p = readDlPrefs(r.value);
+      const on = liveMode && p.mode === "download" && !dlSupportReason();
+      setDlEnabled(on);   // 뷰어 생존 폴링 훅의 게이트 — 기준선이 없을 때도 돌아야 한다
       dlConfigure({
-        enabled: liveMode && p.mode === "download" && !dlSupportReason(),
+        enabled: on,
         limitGb: p.limitGb, concurrency: p.concurrency, scope: p.scope, recentN: p.recentN,
+        // 용량 초과 정책 — **여기서 안 넘기면 스케줄러는 영영 기본값으로 돈다**(설정 UI 가
+        // 있어도 아무 효과가 없다. 이 저장소가 두 번 겪은 '함수는 있는데 호출자가 없다' 형태).
+        autoEvict: p.autoEvict, evictBy: p.evictBy,
+        warnNearLimit: p.warnNearLimit, warnAtPct: p.warnAtPct,
       });
-    }).catch(() => {});
+    }).catch(() => { if (!dead) setDlEnabled(false); });
     return () => { dead = true; };
     // settingsTick — 설정 저장('sv-settings-saved')의 기존 반영 경로. 이걸 안 걸면 모드를 바꿔도
     // 다음 SEARCH 전까지 아무 일도 일어나지 않아 '켰는데 안 받는다'로 보인다.
@@ -3078,14 +3132,88 @@ export function Worklist() {
   // 목록이 갱신될 때마다 큐 교체 — **정렬은 서버가 준 그대로** 쓴다(최신순 보장:
   // study_service.py:227 / webpacs_live.py:285). 프론트가 재정렬하면 두 곳이 순서를 정하게 된다.
   useEffect(() => {
-    dlSetQueue(items.map((r) => ({
+    // **무조건 받지 않는다.** 조건이 있으면 그 결과가 대상이고(①), 없으면 첫 이미지를 연
+    // 시각 이후만 받는다(②). 아직 아무것도 안 열었으면 큐가 비어 다운로더가 놀고 있는다.
+    const d = decideDlScope({
+      committed,
+      autoStatus: lastDefaultStatusRef.current ?? "",
+      openedAt: dlOpenedAt,
+      rows: items.map((r) => ({ studyDate: r.study_date, studyTime: r.study_time })),
+    });
+    dlSetQueue(d.take.map((n) => items[n]).filter(Boolean).map((r) => ({
       studyId: r.id, studyUid: r.study_uid, patientKey: r.patient_key,
       studyDate: r.study_date, modality: r.modality,
       label: `${r.patient_name} · ${r.modality} · ${r.study_date}`,
     })));
-  }, [items]);
+  }, [items, committed, dlOpenedAt]);
   // 창을 닫거나 워크리스트를 떠나면 다운로더도 멈춘다(Web Lock 을 붙잡은 채 남지 않게)
   useEffect(() => () => dlStop(), []);
+  // 뷰어 창이 **전부** 닫히면 판독 세션이 끝난 것 — 기준선을 풀고 백그라운드 다운로드도 멈춘다.
+  // 그래야 다음에 여는 영상이 새 기준이 된다(요구: "새로운 영상을 열면 그 영상을 기준으로").
+  // ⚠ 마지막 창이 닫혔을 때만 — 한 창만 닫아도 풀리면 판독 중에 기준선이 사라진다.
+  // window.closed 폴링인 이유: 다른 창의 unload 를 신뢰성 있게 받을 방법이 없다(창이 죽으면
+  // 이벤트도 같이 죽는다). openV2 안의 w.closed 정리는 **다음 검사를 열기 전까지** 돌지 않고,
+  // postViewerCloseAll 은 'All Close 버튼 + close_scope≠current' 에서만 나가 브라우저 X·Ctrl+W·
+  // 마지막 Exam 탭 닫기를 못 잡는다(대용 불가). 2초는 사용자가 체감하지 못하면서 A 를 때리지도
+  // 않는 간격이다.
+  // ⚠ 판정은 **에지 트리거**여야 한다(래치 seenLive). 레벨 트리거(alive===0 이면 해제)로 짜면
+  //   (a) 아무것도 안 연 상태 (b) 워크리스트 F5 직후(창 핸들이 사라지고 교차 출처면 장부도 안 보인다)
+  //   (c) 방금 해제한 직후 의 0 에서 매 폴마다 clearDlOpened→dlStop 이 불리고, 재개 훅(dlResume)과
+  //   맞물려 stop/start 가 진동한다. 진리표는 lib/viewerSlots.decideBaselineRelease + 그 테스트 참조.
+  //
+  // ★ 이 훅은 **양쪽 에지**를 본다(하강=해제, 상승=재개). 한때 게이트가 `if (!dlOpenedAt) return`
+  //   이라 기준선이 있을 때만 돌았고, 그래서 재개 경로가 openV2 **하나뿐**이었다. 그런데 sv_viewer
+  //   창을 여는 곳은 openV2 만이 아니다 — 판독창(ReportWindow)의 ◀▶ 넘기기(:351)와 과거검사
+  //   Compare(:114)는 다른 창의 다른 문서라 markDlOpened 를 부를 수 없다. 결과:
+  //     뷰어 ✕(→dlStop) → 판독창 ◀▶ 로 다음 검사 오픈 → 뷰어는 멀쩡히 떠 있는데 다운로드는
+  //     그 세션 내내 죽은 채(워크리스트에서 다시 더블클릭하기 전까지 복구 불가).
+  //   오픈 '경로'를 하나씩 배선하는 대신 '뷰어가 살아 있는가' 라는 **상태**로 판정한다
+  //   (lib/viewerSlots.decideBaselineArm). 그래서 게이트는 dlEnabled 다.
+  // ★ 이 상태 판정은 워크리스트 탭이 2개인 배치도 함께 닫는다. 기준선(sv_dl_opened_at)은
+  //   sessionStorage=탭별이고 dlStop 은 모듈 변수=문서별인데, 슬롯 장부(liveViewerSlots)는
+  //   **localStorage=오리진 공유**다. 그래서 탭 B 에서 연 뷰어를 탭 A 도 관측해 같이 세우고
+  //   같이 재개한다(예전에는 탭 A 가 게이트에 걸려 아무 신호도 못 받고 계속 받았다).
+  //   ⚠ 교차 출처(VITE_VIEWER_BASE) 배치에서는 장부가 안 보이지만, 그 배치는 dlSupportReason()
+  //     이 다운로드 기능 자체를 끄므로(opfsStore.ts) dlEnabled=false 라 이 훅이 아예 안 돈다.
+  const dlSeenLiveRef = useRef(false);
+  useEffect(() => {
+    if (!dlOpenedAt && !dlEnabled) return;     // 기준선도 없고 다운로드 모드도 꺼짐 = 관측할 것 없음
+    const scan = () => {
+      for (const [nm, w] of [...openedViewerWindows]) {
+        if (w.closed) { openedViewerWindows.delete(nm); forgetViewerSlot(nm); }
+      }
+      // ⚠ 이 Map 의 크기만으로 '전부 닫혔다'를 판정하면 안 된다 — 창이 살아 있어도 0 일 수 있다
+      //   (교차 출처 배치·다른 경로로 열린 창). 라운드로빈이 이미 그 함정에 빠졌던 자리라
+      //   같은 판정을 쓴다: 하트비트 장부(liveViewerSlots) + 이 Map 의 !closed 를 합친다.
+      //   반대 방향도 있다 — Chrome 이 완전히 가려진 창을 동결하면 장부가 만료돼 '전부 닫힘'으로
+      //   오판한다. 창 핸들의 !closed 는 스로틀·동결과 무관하므로 반드시 합집합에 넣는다.
+      const alive = new Set<string>(liveViewerSlots().keys());
+      for (const [nm, ow] of openedViewerWindows) { if (!ow.closed) alive.add(nm); }
+      const d = decideBaselineRelease(dlSeenLiveRef.current, alive);
+      dlSeenLiveRef.current = d.seenLive;
+      if (d.release) { clearDlOpened(); return; }
+      // 상승 에지 — 뷰어가 살아 있는데 기준선이 없다(판독창 ◀▶·Compare·다른 탭에서 연 경우).
+      // markDlOpened 는 '세션 첫 1회만 기록' + dlResume 멱등이라 중복 호출이 무해하다.
+      if (dlEnabled && decideBaselineArm(!!dlOpenedAt, alive).arm) markDlOpened();
+    };
+    scan();
+    // 기준선이 있을 때(=판독 중)는 닫힘 반응성이 중요하므로 2초, 없을 때는 재개만 기다리는
+    // 상태라 5초로 낮춘다. 어차피 아래 두 방송이 폴을 앞당긴다.
+    const t = window.setInterval(scan, dlOpenedAt ? 2000 : 5000);
+    window.addEventListener("focus", scan);    // 워크리스트로 돌아온 순간 = 뷰어를 닫았을 확률이 높다
+    // 두 방송은 **저지연 트리거**로만 쓴다 — 판정은 위 scan 이 장부를 다시 읽어 한다.
+    //  · CloseAll: 발신 창이 아직 닫히기 전에 뿌리므로 곧바로 해제하면 살아 있는 창이 남은 순간에
+    //    기준선이 풀린다. 폴 한 번을 앞당길 뿐이다.
+    //  · ViewerOpened: 뷰어 문서가 뜰 때마다 나간다(판독창 ◀▶ 포함) — 재개를 5초 기다리지 않는다.
+    let fast = 0;
+    const soon = (ms: number) => { window.clearTimeout(fast); fast = window.setTimeout(scan, ms); };
+    const offClose = onViewerCloseAll(() => soon(500));
+    const offOpen = onViewerOpened(() => soon(200));
+    return () => {
+      window.clearInterval(t); window.clearTimeout(fast);
+      window.removeEventListener("focus", scan); offClose(); offOpen();
+    };
+  }, [dlOpenedAt, dlEnabled, clearDlOpened, markDlOpened]);
 
   // 판독 창 항상 열기(설정>판독) — 워크리스트 옆 별도 웹창(?report=1), 선택 동기(sync) 연동
   const readingWinRef = useRef<Window | null>(null);
@@ -3138,6 +3266,7 @@ export function Worklist() {
       if (isCtx && prev.has(row.id) && prev.size > 1) return prev;   // 우클릭: 선택 유지(배치 컨텍스트)
       return new Set([row.id]);
     });
+    setFocusId(row.id);                 // 하이라이트는 즉시 — 상세(api.study)를 기다리지 않는다
     // 범위가 실제로 형성될 때만 기준점 유지 — 그 외(단일/Ctrl/기준점 없음·필터아웃)는 클릭 행을 새 기준점으로(범위 기능 사망 방지)
     const rangeFormed = isShift && selAnchorRef.current != null && items.some((r) => r.id === selAnchorRef.current);
     if (!rangeFormed) selAnchorRef.current = row.id;
@@ -3152,6 +3281,7 @@ export function Worklist() {
     const off = onStudySync("worklist", (id) => {
       api.study(id).then(setSelected).catch(() => {});
       setSelectedIds(new Set([id]));   // 외부 창 포커스 변경 → 다중선택 축소(stale 하이라이트 방지)
+      setFocusId(id);
       selAnchorRef.current = id;
     });
     return off;
@@ -3179,18 +3309,25 @@ export function Worklist() {
 
   const openStudy = useCallback((row: StudyRow | StudyDetail) => {
     dlPromote(row.study_uid);   // 여는 검사를 선다운로드 큐 맨 앞으로 + 잠시 감속(A 부하 양보)
+    // ⚠ 여기서는 markDlOpened() 를 **일부러 부르지 않는다**(확정). 이 경로는 OHIF(외부 뷰어)를
+    //   window.open(..., "_blank") 로 여는 것이라 뷰어 슬롯 이름을 갖지 않는다 → 아래 폴링 훅이
+    //   '살아 있는 창'으로 셀 수 없다. 기준선만 찍히고 영영 안 풀리는 상태가 된다.
+    //   다운로드 모드 범위는 이번 회차 확정대로 **Live + 2D 뷰어 2종(openV2)** 뿐이다.
     openViewer(row.study_uid, hpFor(row.modality));
   }, []);
 
 
 
   // 자체 뷰어 오픈 — 새 창(별도 웹페이지, ?viewer=2d)으로 연다. lastViewerRef = UBPACS "기존 영상"
+  // ⚠ 기준선은 **영상을 실제로 여는 곳**에서 찍어야 한다. 행 선택·상세 조회로 찍으면
+  //   목록을 훑기만 해도 기준선이 생겨 '첫 이미지를 연 이후' 라는 규칙이 무너진다.
   const openV2 = useCallback((cfg: {
     detail: StudyDetail; addDetail?: StudyDetail; stackDetail?: StudyDetail; keySops?: string[];
     withOpen?: { mode: "add" | "stack"; ids: number[] };
     cmp?: boolean;  // ⇄ Compare 진입 — 뷰어 로드 후 Compare 모달 자동 오픈
     forceRoundRobin?: boolean;  // 다중선택 일괄 오픈 — 탭→모니터 예외 무시, 순수 1,2,3 순환
   }) => {
+    markDlOpened();                    // 다운로드 모드 기준선(첫 1회만 기록)
     lastViewerRef.current = cfg.addDetail ?? cfg.stackDetail ?? cfg.detail;
     // 여는 검사를 선다운로드 큐 맨 앞으로 승격 + 잠시 감속 — '지금 보는 검사'가 최우선이고,
     // 동시에 A 를 때리는 총량을 줄인다(백엔드가 이미 오픈마다 8워커 프리페치를 돌린다).
@@ -4147,7 +4284,7 @@ export function Worklist() {
           <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 60, display: "flex",
                           ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
-              <StudyGrid items={items} columns={columns} variant="infi" selectedId={selected?.id ?? null} selectedIds={selectedIds}
+              <StudyGrid items={items} columns={columns} variant="infi" selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                          treeDisabled={localMode}
                          onSelect={onSelect}
                          onOpen={(r) => { if (localMode) setLocalViewerRow(r); else void doAction("viewdraft", r); }}
@@ -4199,7 +4336,7 @@ export function Worklist() {
                   onDrag={(dx) => setSizes((s) => ({ ...s, railW: clampSz(s.railW + dx, 100, 420) }))} />
         <div style={{ flex: 1, minWidth: 0, display: "flex",
                       ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
-          <StudyGrid items={items} columns={columns} selectedId={selected?.id ?? null} selectedIds={selectedIds}
+          <StudyGrid items={items} columns={columns} selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                      treeDisabled={localMode}
                      onSelect={onSelect}
                      onOpen={(r) => { if (localMode) setLocalViewerRow(r); else void doAction("viewdraft", r); }}

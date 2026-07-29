@@ -100,6 +100,31 @@ export function onDlInvalidate(handler: (uids: string[]) => void): () => void {
   return () => channel.removeEventListener("message", fn);
 }
 
+// 뷰어 창이 **떴다** — 다운로드 모드 기준선의 상승 에지 저지연 트리거.
+//
+// 왜 필요한가: 워크리스트는 '뷰어가 살아 있는가'를 슬롯 장부 폴링으로 관측한다(viewerSlots.
+// decideBaselineArm). 폴링만으로도 정확하지만, 기준선이 없는 동안은 간격을 늦춰 두므로
+// 판독창 ◀▶ 로 다음 검사를 여는 흐름에서 재개가 몇 초 밀린다. 이 방송은 그 폴 한 번을 앞당길
+// 뿐이다 — **판정 근거가 아니다**(수신 측은 방송을 믿지 않고 장부를 다시 읽는다). 그래야
+// 방송이 유실되거나(BroadcastChannel 미지원) 워크리스트 F5 로 구독이 끊겨도 폴이 덮는다.
+//
+// ⚠ onViewerCloseAll 과 대칭이지만 대칭이 아닌 점 하나: CloseAll 은 '버튼을 눌렀다'는 **행위**라
+//   발신 경로가 하나뿐인 반면, 이것은 뷰어 문서가 뜰 때마다 나가므로 openV2·판독창 ◀▶·Compare·
+//   screens.openSlaveWindow 등 **모든** 오픈 경로가 한 신호로 덮인다(경로가 늘어도 새지 않는다).
+export function postViewerOpened(name: string, studyId: number) {
+  try { channel?.postMessage({ type: "viewer-opened", name, id: studyId }); } catch { /* 무시 */ }
+}
+
+export function onViewerOpened(handler: (name: string, id: number) => void): () => void {
+  if (!channel) return () => {};
+  const fn = (e: MessageEvent) => {
+    const m = e.data as { type?: string; name?: string; id?: number };
+    if (m?.type === "viewer-opened") handler(String(m.name ?? ""), Number(m.id) || 0);
+  };
+  channel.addEventListener("message", fn);
+  return () => channel.removeEventListener("message", fn);
+}
+
 export function onViewerCloseAll(handler: () => void): () => void {
   if (!channel) return () => {};
   const fn = (e: MessageEvent) => {

@@ -124,3 +124,71 @@ export function freshChangedVids(
   for (const [idx, n] of next) if (n > (prev.get(idx) ?? 0)) vids.push(idx + vidBase);
   return { vids, next };
 }
+
+/* ── 다운로드 모드 대상 결정 ─────────────────────────────────────────────────
+ * 사용자 규칙(확정): **무조건 받지 않는다.**
+ *   ① Search Filter 에 조건이 있으면 → 그 조건의 **최신 데이터**를 기준으로 받는다.
+ *   ② 조건이 하나도 없으면 → **첫 이미지를 연 시각**을 기준으로, 그 이후 것만 받는다.
+ *
+ * 왜 ② 가 '아무것도 안 받음' 이 아니라 '연 시각 기준' 인가: 조건 없는 워크리스트는 곧
+ * 전체 아카이브다. 그걸 통째로 받으면 디스크·회선·원격 PACS 를 다 때리면서 정작 지금
+ * 판독할 검사는 뒤로 밀린다. 판독을 시작한 시점부터가 '이 세션에서 볼 것' 이므로
+ * 그때를 기준선으로 삼는다. 아직 아무것도 안 열었으면 기준선이 없으니 받지 않는다.
+ */
+
+/** 사용자가 실제로 건 조건이 있는가.
+ *  ⚠ status 는 **설정의 기본 상태 필터**가 자동 주입될 수 있다(defaultStatusInjection).
+ *     자동 주입까지 '조건' 으로 세면 사용자가 아무것도 안 걸어도 ① 로 빠져 전체를 받는다.
+ *     그래서 자동 주입된 값과 같으면 조건으로 세지 않는다. */
+export function hasUserConditions(c: CommittedQuery, autoStatus = ""): boolean {
+  if (c.searchText.trim()) return true;
+  return Object.entries(c.filters).some(([k, v]) => {
+    const s = String(v ?? "").trim();
+    if (!s) return false;
+    if (k === "status" && s === String(autoStatus ?? "").trim()) return false;
+    return true;
+  });
+}
+
+export interface DlScopeInput {
+  committed: CommittedQuery;
+  autoStatus?: string;
+  /** 첫 이미지를 연 시각(epoch ms). 아직 안 열었으면 0 */
+  openedAt: number;
+  /** 워크리스트 행 — 서버가 준 최신순 그대로 */
+  rows: { studyDate: string; studyTime?: string }[];
+}
+
+export interface DlScopeDecision {
+  /** 받을 행의 인덱스(rows 기준). 비어 있으면 받지 않는다 */
+  take: number[];
+  reason: "filtered" | "since-open" | "idle";
+}
+
+/** 'YYYYMMDD' + 'HHMM(SS)' → epoch ms. 값이 부실하면 0(=비교에서 제외). */
+export function studyEpoch(date: string, time?: string): number {
+  const d = String(date ?? "").trim();
+  if (!/^\d{8}$/.test(d)) return 0;
+  const t = String(time ?? "").replace(/\D/g, "").padEnd(6, "0").slice(0, 6);
+  const ms = Date.parse(
+    `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T`
+    + `${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}`);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+/** 다운로드 대상 결정 — 위 규칙 ①②를 그대로 옮긴 것. */
+export function decideDlScope(i: DlScopeInput): DlScopeDecision {
+  if (hasUserConditions(i.committed, i.autoStatus)) {
+    // ① 조건이 있다 — 그 조건의 결과가 곧 대상이다(정렬은 서버가 최신순 보장).
+    return { take: i.rows.map((_, n) => n), reason: "filtered" };
+  }
+  if (!i.openedAt) return { take: [], reason: "idle" };   // 아직 아무것도 안 열었다
+  // ② 조건이 없다 — 첫 이미지를 연 시각 이후 검사만.
+  //    검사시각을 못 읽는 행은 제외한다(모르면 안 받는다 — 전체를 받는 쪽으로 기울면 안 된다).
+  const take: number[] = [];
+  i.rows.forEach((r, n) => {
+    const e = studyEpoch(r.studyDate, r.studyTime);
+    if (e && e >= i.openedAt) take.push(n);
+  });
+  return { take, reason: "since-open" };
+}

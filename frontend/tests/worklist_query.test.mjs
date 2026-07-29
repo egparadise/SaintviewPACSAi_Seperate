@@ -18,10 +18,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildWorklistQuery,
+  decideDlScope,
   defaultStatusInjection,
   freshChangedVids,
+  hasUserConditions,
   isQueryDirty,
   sameFilters,
+  studyEpoch,
   toLiveParams,
 } from "../src/lib/worklistQuery.ts";
 
@@ -147,4 +150,56 @@ test("⑥ 같은 검사가 다시 바뀌면 다시 폐기 대상이다 — '봤�
 test("⑥ 목록이 없거나 비면 대상 0건(빈 호출로 무효화를 트리거하지 않는다)", () => {
   assert.deepEqual(freshChangedVids(new Map(), undefined, VID_BASE).vids, []);
   assert.deepEqual(freshChangedVids(new Map(), [], VID_BASE).vids, []);
+});
+
+/* ── 다운로드 대상 결정 — "무조건 받지 않는다" ────────────────────────────── */
+const CQ = (filters = {}, searchText = "") => ({ filters, searchText });
+const rows = [
+  { studyDate: "20260729", studyTime: "1400" },   // 0 · 오늘 14:00
+  { studyDate: "20260729", studyTime: "0900" },   // 1 · 오늘 09:00
+  { studyDate: "20260728", studyTime: "1800" },   // 2 · 어제
+  { studyDate: "", studyTime: "" },               // 3 · 시각 불명
+];
+const AT = (d, t) => studyEpoch(d, t);
+
+test("① 조건이 있으면 그 결과 전부가 대상", () => {
+  const d = decideDlScope({ committed: CQ({ modality: "CT" }), openedAt: 0, rows });
+  assert.equal(d.reason, "filtered");
+  assert.deepEqual(d.take, [0, 1, 2, 3]);
+});
+
+test("① 검색어만 있어도 조건이다", () => {
+  assert.equal(decideDlScope({ committed: CQ({}, "홍길동"), openedAt: 0, rows }).reason, "filtered");
+});
+
+test("자동 주입된 기본 상태필터는 조건으로 세지 않는다", () => {
+  // 설정의 '기본 상태 필터'가 자동으로 들어간 것뿐인데 조건으로 세면
+  // 사용자가 아무것도 안 걸어도 ①로 빠져 **전체를 받는다**.
+  const c = CQ({ status: "unread" });
+  assert.equal(hasUserConditions(c, "unread"), false);
+  assert.equal(hasUserConditions(c, ""), true);      // 사용자가 직접 고른 경우
+});
+
+test("② 조건이 없고 아직 아무것도 안 열었으면 받지 않는다", () => {
+  const d = decideDlScope({ committed: CQ(), openedAt: 0, rows });
+  assert.equal(d.reason, "idle");
+  assert.deepEqual(d.take, []);
+});
+
+test("② 조건이 없으면 첫 이미지를 연 시각 이후만", () => {
+  const d = decideDlScope({ committed: CQ(), openedAt: AT("20260729", "1000"), rows });
+  assert.equal(d.reason, "since-open");
+  assert.deepEqual(d.take, [0], "14:00 만 대상 — 09:00·어제·시각불명은 제외");
+});
+
+test("② 시각을 못 읽는 행은 제외한다(모르면 안 받는다)", () => {
+  const d = decideDlScope({ committed: CQ(), openedAt: 1, rows: [{ studyDate: "", studyTime: "" }] });
+  assert.deepEqual(d.take, []);
+});
+
+test("studyEpoch — 부실한 값은 0(비교에서 제외)", () => {
+  assert.equal(studyEpoch("", ""), 0);
+  assert.equal(studyEpoch("2026072", "1200"), 0);
+  assert.ok(studyEpoch("20260729", "1400") > studyEpoch("20260729", "0900"));
+  assert.ok(studyEpoch("20260729") > 0, "시각이 없으면 그 날 00:00 으로");
 });

@@ -6,12 +6,16 @@
 //   여기는 이미 받아 둔 것을 꺼내 쓰기만 한다. 그래서 '다운로드 모드인데 아직 안 받은 검사'를
 //   열어도 서버 URL 로 정상 동작한다(가속기이지 필수 경로가 아니다).
 import { fixedFormatTag } from "./imageFormat";
-import { dlKey, opfsGet, dlSupportReason } from "./opfsStore";
+import { dlKey, opfsGetRec, dlSupportReason } from "./opfsStore";
 import { onDlInvalidate, postDlInvalidate } from "./sync";
 
 let dlOn = false;                                  // 설정>환경 '영상 취득 모드' = download (lib/dlPrefs.ts)
 const urlCache = new Map<string, string>();        // key → blob URL(디코드 완료본)
+// key → 소속 검사 uid. **무효화를 검사 단위로 좁히는 근거**다(아래 dlInvalidateStudies 주석).
+const keyUid = new Map<string, string>();
 const pending = new Set<string>();                 // 진행 중(중복 조회 방지)
+// 무효화가 지나간 in-flight 로드 — 이 키들은 publish 하지 않는다(지워진 파일의 blob 부활 금지).
+const discard = new Set<string>();
 // 저장본 없음 — 매 렌더마다 OPFS 를 두드리지 않게 기억한다.
 // ⚠ 영구히 기억하면 안 된다: 스케줄러는 **다른 창**에서 돌기 때문에, 아직 안 받은 검사를 먼저
 //   열어 미스로 굳으면 그 뒤에 다 받아도 이 창은 영영 서버 URL 만 쓴다. 값은 만료 시각이다.
@@ -45,7 +49,7 @@ export function onDlFrame(cb: () => void): () => void {
 export function dlResetCache(): void {
   epoch++;
   for (const u of urlCache.values()) { try { URL.revokeObjectURL(u); } catch { /* 무시 */ } }
-  urlCache.clear(); LRU.length = 0; missed.clear(); pending.clear();
+  urlCache.clear(); keyUid.clear(); LRU.length = 0; missed.clear(); pending.clear(); discard.clear();
 }
 
 /** 저장본이 폐기됐다 — 이 창의 캐시를 버리고 **재렌더까지 알린다**.
@@ -57,22 +61,57 @@ export function dlResetCache(): void {
 export function dlInvalidateCache(broadcast = true): void {
   dlResetCache();
   listeners.forEach((cb) => cb());
-  if (broadcast) postDlInvalidate();
+  if (broadcast) postDlInvalidate();   // 빈 목록 = '전부'
+}
+
+/** **검사 단위** 무효화 — 그 검사의 blob URL 만 폐기한다.
+ *
+ *  ★ 이게 없어서 실제로 판독이 느려졌다: 축출은 상한에 붙어 있는 동안 매번 일어나고, 그때마다
+ *    dlInvalidateCache() 가 열려 있는 모든 뷰어 창의 urlCache(최대 1200 프레임)를 통째로 버렸다.
+ *    다운로드가 초당 20MB 로 돌면 pump 의 256MB 임계가 ~13초마다 걸리므로 판독 내내 10~30초 주기로
+ *    화면이 서버 렌더로 되돌아갔다 OPFS 재로드로 복구되기를 반복한다 — 다운로드 모드가 존재하는
+ *    이유(판독 속도) 자체를 갉아먹는 경로였다.
+ *  ⚠ missed(저장본 없음 기억)는 통째로 버린다 — 미스에는 uid 가 없어 범위를 좁힐 수 없고, 다시
+ *    확인하는 비용은 IDB get 한 번뿐이다.
+ *  ⚠ 진행 중이던 로드(pending)는 publish 를 막는다. opfsGet 이 삭제 **직전에** 읽어 둔 바이트를
+ *    캐시에 되살리면, SSE 픽셀 교체 무효화에서 낡은 영상이 그대로 남는다(이 모듈이 막으려던 그 사고). */
+export function dlInvalidateStudies(uids: readonly string[], broadcast = true): void {
+  const set = new Set<string>();
+  for (const u of uids) if (u) set.add(u);
+  if (!set.size) return;
+  let hit = 0;
+  for (const [k, u] of [...keyUid]) {
+    if (!set.has(u)) continue;
+    const url = urlCache.get(k);
+    if (url) { try { URL.revokeObjectURL(url); } catch { /* 무시 */ } }
+    urlCache.delete(k); keyUid.delete(k);
+    const at = LRU.indexOf(k);
+    if (at >= 0) LRU.splice(at, 1);
+    hit++;
+  }
+  missed.clear();
+  for (const k of pending) discard.add(k);
+  if (hit) listeners.forEach((cb) => cb());
+  if (broadcast) postDlInvalidate([...set]);
 }
 
 // 다른 창의 무효화 신호 구독 — 모듈 로드 시 1회(구독 해제 지점이 없다 = 창 수명 전체).
-onDlInvalidate(() => dlInvalidateCache(false));   // 에코 금지(false)
+// 목록이 있으면 그 검사만, 비어 있으면 전부(에코 금지 = false).
+onDlInvalidate((uids) => {
+  if (uids.length) dlInvalidateStudies(uids, false); else dlInvalidateCache(false);
+});
 
-function publish(key: string, url: string): void {
+function publish(key: string, url: string, studyUid: string): void {
   const old = urlCache.get(key);
   if (old) { try { URL.revokeObjectURL(old); } catch { /* 무시 */ } }
   urlCache.set(key, url);
+  keyUid.set(key, studyUid);
   LRU.push(key);
   while (LRU.length > LRU_MAX) {
     const k = LRU.shift()!;
     if (k !== key && urlCache.has(k)) {
       try { URL.revokeObjectURL(urlCache.get(k)!); } catch { /* 무시 */ }
-      urlCache.delete(k);
+      urlCache.delete(k); keyUid.delete(k);
     }
   }
   listeners.forEach((cb) => cb());
@@ -102,17 +141,17 @@ function load(key: string, missTtl: number): void {
   const gen = epoch;
   void (async () => {
     try {
-      const blob = await opfsGet(key);
+      const rec = await opfsGetRec(key);
       if (gen !== epoch) return;
-      if (!blob) { missed.set(key, Date.now() + missTtl); return; }
-      const url = URL.createObjectURL(blob);
+      if (!rec) { missed.set(key, Date.now() + missTtl); return; }
+      const url = URL.createObjectURL(rec.blob);
       await new Promise<void>((res) => {
         const img = new Image();
         img.decoding = "async";
         const fin = () => {
-          // 로드/디코드 중에 무효화가 지나갔으면 되살리지 않는다
-          if (gen !== epoch) { try { URL.revokeObjectURL(url); } catch { /* 무시 */ } }
-          else publish(key, url);
+          // 로드/디코드 중에 무효화가 지나갔으면 되살리지 않는다(전체 리셋 = epoch, 검사 단위 = discard)
+          if (gen !== epoch || discard.has(key)) { try { URL.revokeObjectURL(url); } catch { /* 무시 */ } }
+          else publish(key, url, rec.studyUid);
           res();
         };
         img.onload = () => {
@@ -127,7 +166,7 @@ function load(key: string, missTtl: number): void {
         img.src = url;
       });
     } catch { if (gen === epoch) missed.set(key, Date.now() + missTtl); }
-    finally { pending.delete(key); }
+    finally { pending.delete(key); discard.delete(key); }
   })();
 }
 

@@ -36,6 +36,13 @@ export interface DlIdxRec {
   studyUid: string;
   ts: number;         // 저장 시각
   lastUsed: number;   // 마지막 사용(검사 단위 LRU 기준)
+  // ★ 검사일('YYYYMMDD' 또는 'YYYY-MM-DD'. 없으면 'nodate'/빈 값) — **자동 삭제 기준이 '과거
+  //   검사일부터'라서** 필요하다. 예전엔 경로 세그먼트 dir[1] 에만 있었고 레코드에는 없어서,
+  //   축출 순서를 검사일로 정할 방법이 구조적으로 없었다(그래서 '오래된 검사부터'라는 설정 문구와
+  //   실제 동작 = lastUsed LRU 가 어긋나 있었다).
+  //   ⚠ 옛 레코드에는 이 필드가 없다. IndexedDB 는 스키마리스라 마이그레이션 없이 붙고,
+  //     읽는 쪽(planEvictions)이 dir[1] 폴백을 갖는다. DB_VER 은 **새 인덱스를 만들 때만** 올린다.
+  studyDate?: string;
 }
 
 /* ── 지원 여부 ── */
@@ -181,8 +188,13 @@ async function writeFile(dir: FileSystemDirectoryHandle, name: string, blob: Blo
 
 /* ── 공개 표면 ── */
 
-/** 저장본 조회 — 없으면 null. 인덱스에는 있는데 파일이 사라졌으면 인덱스를 정리하고 미스로 강등한다. */
-export async function opfsGet(key: string): Promise<Blob | null> {
+/** 저장본 조회(+ 소속 검사) — 없으면 null.
+ *  인덱스에는 있는데 파일이 사라졌으면 인덱스를 정리하고 미스로 강등한다.
+ *
+ *  ★ studyUid 를 함께 돌려주는 이유: 조회 캐시(dlCache)가 key→검사 소속을 알아야 무효화를
+ *    **검사 단위로 좁힐 수 있다**. 예전에는 몰라서 축출 1건마다 열려 있는 모든 뷰어 창의 blob URL
+ *    캐시(최대 1200 프레임)를 통째로 버렸고, 판독 중 화면이 주기적으로 서버 렌더로 되돌아갔다. */
+export async function opfsGetRec(key: string): Promise<{ blob: Blob; studyUid: string } | null> {
   if (dlSupportReason()) return null;
   let rec: DlIdxRec | undefined;
   try { rec = await idxGet(key); } catch { return null; }
@@ -198,11 +210,15 @@ export async function opfsGet(key: string): Promise<Blob | null> {
     //   분 단위 해상도면 충분하다 — 5분보다 오래된 값일 때만 갱신한다.
     const now = Date.now();
     if (now - rec.lastUsed > 300_000) void idxPut({ ...rec, lastUsed: now }).catch(() => {});
-    return f;
+    return { blob: f, studyUid: rec.studyUid || "" };
   } catch {
     void idxDel(key).catch(() => {});   // 진실은 OPFS — 인덱스가 틀렸으면 인덱스를 버린다
     return null;
   }
+}
+
+export async function opfsGet(key: string): Promise<Blob | null> {
+  return (await opfsGetRec(key))?.blob ?? null;
 }
 
 /** 존재 확인 — 인덱스만 본다(바이트를 읽지 않는다).
@@ -211,6 +227,28 @@ export async function opfsGet(key: string): Promise<Blob | null> {
 export async function opfsHas(key: string): Promise<boolean> {
   if (dlSupportReason()) return false;
   try { return !!(await idxGet(key)); } catch { return false; }
+}
+
+/** 아직 받지 않은 작업만 남긴다 — 스케줄러 pump 의 '이미 있는 키는 재요청하지 않는다' 규칙 본체.
+ *
+ *  ★ 이 규칙이 **재개**를 성립시킨다. 뷰어를 닫으면 다운로드가 멈추고(dlStop) 다시 열면 되살아나는데
+ *    (dlResume), 재개는 그 검사를 처음부터 다시 훑는다. 여기서 이미 있는 키를 걸러내지 않으면
+ *    닫았다 여는 것을 반복할 때마다 같은 바이트를 원격 A 에서 다시 내려받는다.
+ *  ⚠ 존재 확인은 **묶어서 동시에** 돌린다(IDB get 뿐이다). 완전 직렬이면 큰 시리즈에서 첫 fetch 가
+ *    그만큼 늦어지고, 전부 한꺼번에 띄우면 수천 개 트랜잭션이 한 번에 몰린다.
+ *  has 를 인자로 받는 이유: OPFS·IndexedDB 가 없는 node 테스트에서도 규칙 자체를 검증할 수 있게
+ *    (planViewerOpen 과 같은 계약 — 판정은 인자만 본다). */
+export async function pendingTasks<T extends { key: string }>(
+  tasks: readonly T[], has: (key: string) => Promise<boolean>,
+): Promise<T[]> {
+  const out: T[] = [];
+  const CHUNK = 64;
+  for (let i = 0; i < tasks.length; i += CHUNK) {
+    const part = tasks.slice(i, i + CHUNK);
+    const flags = await Promise.all(part.map((t) => has(t.key).catch(() => false)));
+    part.forEach((t, n) => { if (!flags[n]) out.push(t); });
+  }
+  return out;
 }
 
 /** 자격 확인 — 토큰이 이미 지워졌으면 **아무것도 쓰지 않는다**.
@@ -238,26 +276,43 @@ export async function opfsPut(
     if (!d) return false;
     await writeFile(d, path[path.length - 1], blob);
     const now = Date.now();
-    await idxPut({ k: key, path, dir, bytes: blob.size, studyUid: m.studyUid, ts: now, lastUsed: now });
+    await idxPut({ k: key, path, dir, bytes: blob.size, studyUid: m.studyUid, ts: now, lastUsed: now,
+                   studyDate: m.studyDate || "" });
     return true;
   } catch {
     return false;
   }
 }
 
-/** 검사 하나를 통째로 폐기 — A 에서 픽셀이 바뀌었을 때(SSE changed_studies) 호출한다. */
-export async function opfsEvictStudy(studyUid: string): Promise<void> {
-  if (dlSupportReason()) return;
+/** 검사 하나를 통째로 폐기 — A 에서 픽셀이 바뀌었을 때(SSE changed_studies)·상한 초과 축출에서 호출한다.
+ *  반환값 = **인덱스에서 실제로 빠진 바이트**(회계 기준은 인덱스다. 아래 ⚠ 참조).
+ *
+ *  ⚠ 폴더는 recs[0].dir 하나가 아니라 **레코드에 나온 모든 dir** 을 지운다. 검사 폴더는
+ *    {검사일}/{환자ID__UID12} 라서, 워크리스트가 준 검사일·환자ID 가 중간에 바뀌면(재조회로
+ *    값이 교정되는 경우가 있다) 같은 검사의 파일이 두 폴더에 걸린다. 한 폴더만 지우면 나머지는
+ *    인덱스에도 없고 폴더도 남는 **고아 파일**이 되어 opfsUsage·opfsPrune 양쪽에서 안 보인다
+ *    (= 설정상 2GB 인데 실제 점유는 그보다 크다).
+ *  ⚠ freed 는 removeEntry 성공 여부가 아니라 **인덱스 삭제**를 센다. 인덱스가 이 모듈의 회계
+ *    장부이고(opfsUsage 도 인덱스 합계다) 조회 가능성도 인덱스가 결정하기 때문이다. */
+export async function opfsEvictStudy(studyUid: string): Promise<number> {
+  if (dlSupportReason()) return 0;
   let recs: DlIdxRec[] = [];
-  try { recs = await idxByStudy(studyUid); } catch { return; }
-  if (!recs.length) return;
+  try { recs = await idxByStudy(studyUid); } catch { return 0; }
+  if (!recs.length) return 0;
   // 인덱스를 먼저 지운다 — 파일 삭제가 중간에 실패해도 '낡은 영상이 계속 히트'하는 일은 없다
-  for (const r of recs) { try { await idxDel(r.k); } catch { /* 항목 단위 무시 */ } }
-  const dir = recs[0].dir;
-  try {
-    const parent = await dirOf(dir.slice(0, -1), false);
-    if (parent) await parent.removeEntry(dir[dir.length - 1], { recursive: true });
-  } catch { /* 폴더가 이미 없거나 잠김 — 인덱스가 비었으므로 조회되지 않는다 */ }
+  let freed = 0;
+  for (const r of recs) {
+    try { await idxDel(r.k); freed += r.bytes || 0; } catch { /* 항목 단위 무시 */ }
+  }
+  const dirs = new Map<string, string[]>();
+  for (const r of recs) if (r.dir?.length) dirs.set(r.dir.join("/"), r.dir);
+  for (const dir of dirs.values()) {
+    try {
+      const parent = await dirOf(dir.slice(0, -1), false);
+      if (parent) await parent.removeEntry(dir[dir.length - 1], { recursive: true });
+    } catch { /* 폴더가 이미 없거나 잠김 — 인덱스가 비었으므로 조회되지 않는다 */ }
+  }
+  return freed;
 }
 
 /** 전부 비우기 — **로그아웃·세션 만료·계정 전환 시 필수**.
@@ -301,32 +356,145 @@ export async function opfsUsage(): Promise<DlUsage> {
   return out;
 }
 
-/** 상한 초과분 정리 — **검사 단위 LRU**.
- *  이미지 단위로 지우면 반쪽짜리 검사가 남아 '빠르다'는 체감이 깨진다.
+/* ── 상한 초과 자동 삭제 ────────────────────────────────────────────────────
+ * 축출 **순서 결정**은 아래 planEvictions 하나에 모은다. 이유가 둘 있다:
+ *  ① 예전 opfsPrune 은 첫 줄이 dlSupportReason()(= import.meta.env·window·navigator)이라
+ *     node --test 가 부를 수 없었고, 그래서 축출 규칙 회귀 테스트가 **0건**이었다. 설정 문구는
+ *     '오래된 검사부터'인데 실제 동작은 lastUsed LRU 였던 것도 그래서 아무도 못 잡았다.
+ *  ② 정책이 둘(date/lru)로 늘어나도 **보호 규칙(보고 있는 검사는 안 지운다)이 갈리지 않게**
+ *     하려면 두 정책이 같은 함수를 통과해야 한다.
+ */
+
+/** 축출 기준. date = 검사일이 오래된 것부터(기본·설정 문구와 일치) / lru = 마지막 사용이 오래된 것부터.
+ *  ⚠ lastUsed 는 5분 스로틀(opfsGet)이라 '정확한 최근 사용'이 아니다 — 5분보다 짧은 차이는 안 보인다. */
+export type EvictPolicy = "date" | "lru";
+
+/** planEvictions 가 보는 최소 레코드(DlIdxRec 의 부분집합) — 테스트가 손으로 만들 수 있게. */
+export interface EvictRec {
+  studyUid: string;
+  bytes: number;
+  lastUsed: number;
+  studyDate?: string;   // 새 레코드
+  dir?: string[];       // 옛 레코드 폴백(dir[1] = 검사일 세그먼트)
+}
+
+export interface EvictPlan {
+  /** 지울 검사 uid — 지울 순서 그대로 */
+  evict: string[];
+  freedBytes: number;
+  totalBytes: number;
+  /** 보호된 검사를 건너뛰느라 상한을 못 맞췄다 — 호출부는 '더 받지 않기'로 대응해야 한다 */
+  blockedByProtection: boolean;
+}
+
+/** 'YYYYMMDD' | 'YYYY-MM-DD' → 정렬용 숫자(YYYYMMDD). 모르면 0.
+ *  워크리스트 행의 study_date 는 'YYYYMMDD' 이고(worklistQuery.studyEpoch 와 같은 입력),
+ *  폴더 세그먼트도 그것을 seg() 한 값이라 둘 다 받는다. 'nodate' 는 0 이 된다. */
+export function studyDateRank(s: string | undefined): number {
+  const d = String(s ?? "").replace(/\D/g, "");
+  if (d.length !== 8) return 0;
+  const n = Number(d);
+  return Number.isFinite(n) && n >= 10000101 ? n : 0;
+}
+
+/** 축출 계획 — **순수 함수**(브라우저 API 의존 0. tests/dl_evict_rule.test.mjs 가 직접 부른다).
+ *
+ *  규칙:
+ *   · 삭제 단위는 **검사**다. 이미지 단위로 지우면 반쪽짜리 검사가 남아 '빠르다'는 체감이 깨진다.
+ *   · policy=date  → 검사일 오름차순(과거 검사부터). 동률은 lastUsed 로 깬다.
+ *   · policy=lru   → lastUsed 오름차순. 동률은 검사일로 깬다.
+ *   · **검사일을 모르는 검사(nodate/파싱불가)는 가장 뒤로 민다.** 모르는 것을 1순위로 만들면
+ *     방금 받은 검사가 제일 먼저 날아간다(= 받자마자 지우는 되돌이).
+ *   · protectedUids 는 건너뛴다. 그것 때문에 상한을 못 맞추면 blockedByProtection 을 낸다 —
+ *     이 신호가 없으면 '상한보다 큰 검사 하나' 상황에서 받는 중인 검사를 스스로 지우고 다시 받는
+ *     무한 루프가 된다(원격 PACS 를 영원히 두들기는 부하 경로).
+ */
+export function planEvictions(i: {
+  records: readonly EvictRec[];
+  limitBytes: number;
+  policy?: EvictPolicy;
+  protectedUids?: Iterable<string>;
+}): EvictPlan {
+  const policy: EvictPolicy = i.policy === "lru" ? "lru" : "date";   // 오타·미지정은 전부 기본(date)
+  const prot = new Set<string>();
+  for (const u of i.protectedUids ?? []) if (u) prot.add(u);
+  const byStudy = new Map<string, { bytes: number; lastUsed: number; rank: number }>();
+  let total = 0;
+  for (const r of i.records ?? []) {
+    const uid = r?.studyUid;
+    if (!uid) continue;
+    const b = Number(r.bytes) || 0;
+    total += b;
+    const cur = byStudy.get(uid) ?? { bytes: 0, lastUsed: 0, rank: 0 };
+    cur.bytes += b;
+    const lu = Number(r.lastUsed) || 0;
+    if (lu > cur.lastUsed) cur.lastUsed = lu;
+    if (!cur.rank) cur.rank = studyDateRank(r.studyDate) || studyDateRank(r.dir?.[1]);
+    byStudy.set(uid, cur);
+  }
+  const plan: EvictPlan = { evict: [], freedBytes: 0, totalBytes: total, blockedByProtection: false };
+  if (!(i.limitBytes > 0) || total <= i.limitBytes) return plan;
+  const UNKNOWN = Number.MAX_SAFE_INTEGER;   // 검사일 미상 = 가장 마지막에 지운다(위 규칙)
+  const order = [...byStudy.entries()].sort(([ua, a], [ub, b]) => {
+    const ra = a.rank || UNKNOWN, rb = b.rank || UNKNOWN;
+    if (policy === "date") {
+      if (ra !== rb) return ra - rb;
+      if (a.lastUsed !== b.lastUsed) return a.lastUsed - b.lastUsed;
+    } else {
+      if (a.lastUsed !== b.lastUsed) return a.lastUsed - b.lastUsed;
+      if (ra !== rb) return ra - rb;
+    }
+    return ua < ub ? -1 : ua > ub ? 1 : 0;   // 완전 순서 — 엔진 정렬 안정성에 기대지 않는다
+  });
+  for (const [uid, v] of order) {
+    if (total - plan.freedBytes <= i.limitBytes) break;
+    if (prot.has(uid)) continue;              // 보고 있는·받는 중인 검사는 지우지 않는다
+    plan.evict.push(uid);
+    plan.freedBytes += v.bytes;
+  }
+  plan.blockedByProtection = total - plan.freedBytes > i.limitBytes;
+  return plan;
+}
+
+export interface PruneOpts {
+  policy: EvictPolicy;
+  /** 지우면 안 되는 검사 — 받는 중 + 살아 있는 뷰어 창이 물고 있는 검사(dlScheduler.protectedUids).
+   *  ⚠ **명시 인자**다. 예전 시그니처(limitBytes 하나)를 유지하면 보호가 조용히 무동작이 된다 —
+   *    이 저장소가 두 번 겪은 유형이라 호출부가 빈 배열을 넘기지 않는지 테스트로 못 박는다. */
+  protectedUids: Iterable<string>;
+  /** true = 계획만 세우고 지우지 않는다(자동 삭제 OFF 에서 '상한 도달' 판정에만 쓴다) */
+  dryRun?: boolean;
+}
+export interface PruneResult {
+  /** 축출 전 인덱스 합계 */
+  totalBytes: number;
+  freed: number;
+  /** 실제로 지운 검사 uid — 호출부가 doneUids 정리·캐시 무효화에 쓴다 */
+  evicted: string[];
+  blocked: boolean;
+}
+
+/** 상한 초과분 정리 — planEvictions 의 계획을 실행하는 껍데기.
  *  ★ 항목 하나의 실패로 루프가 끊기면 상한이 조용히 무시된다(백엔드 _prune_cache 가 정확히
  *    그렇게 죽었다 — 3e2099f). try/catch 를 **항목 단위**로 건다. */
-export async function opfsPrune(limitBytes: number): Promise<number> {
-  if (dlSupportReason() || limitBytes <= 0) return 0;
+export async function opfsPrune(limitBytes: number, opts: PruneOpts): Promise<PruneResult> {
+  const out: PruneResult = { totalBytes: 0, freed: 0, evicted: [], blocked: false };
+  if (dlSupportReason() || !(limitBytes > 0)) return out;
   let recs: DlIdxRec[];
-  try { recs = await idxAll(); } catch { return 0; }
-  const byStudy = new Map<string, { bytes: number; lastUsed: number }>();
-  let total = 0;
-  for (const r of recs) {
-    total += r.bytes || 0;
-    const cur = byStudy.get(r.studyUid) ?? { bytes: 0, lastUsed: 0 };
-    cur.bytes += r.bytes || 0;
-    if (r.lastUsed > cur.lastUsed) cur.lastUsed = r.lastUsed;
-    byStudy.set(r.studyUid, cur);
+  try { recs = await idxAll(); } catch { return out; }
+  const plan = planEvictions({
+    records: recs, limitBytes, policy: opts.policy, protectedUids: opts.protectedUids,
+  });
+  out.totalBytes = plan.totalBytes;
+  out.blocked = plan.blockedByProtection;
+  if (opts.dryRun) return out;
+  for (const uid of plan.evict) {
+    try {
+      const n = await opfsEvictStudy(uid);
+      if (n > 0) { out.freed += n; out.evicted.push(uid); }
+    } catch { /* 이 검사만 건너뛴다 — 루프는 계속(위 주석) */ }
   }
-  if (total <= limitBytes) return 0;
-  const order = [...byStudy.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
-  let freed = 0;
-  for (const [uid, info] of order) {
-    if (total - freed <= limitBytes) break;
-    try { await opfsEvictStudy(uid); freed += info.bytes; }
-    catch { /* 이 검사만 건너뛴다 — 루프는 계속(위 주석) */ }
-  }
-  return freed;
+  return out;
 }
 
 /** 영속 권한 요청 — 안 하면 브라우저가 압박 시 **조용히** 통째로 지운다. 부팅 시 1회. */

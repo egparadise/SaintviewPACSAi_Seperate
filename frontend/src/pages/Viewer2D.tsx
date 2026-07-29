@@ -6,8 +6,10 @@ import { annoLabel, contentRect, measureAnno, refLineOn, screenToImage } from ".
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
-import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab } from "../lib/sync";
-import { clearViewerSlots, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab, postViewerOpened } from "../lib/sync";
+import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerClosing, markViewerMounted } from "../lib/viewerClose";
+import { clearViewerSlots, isViewerSlotName, otherLiveViewerCount, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
+import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
 import { Splitter, clampSz } from "../lib/Splitter";
 import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d, type HpRule } from "../lib/viewerConfig";
 import {
@@ -342,6 +344,13 @@ const DEFAULT_PREFS: ViewerPrefs = {
 };
 
 // Exam 탭 영속 — 새 창 뷰어가 재사용/재오픈돼도 ✕/전체닫기 전까지 우측에 계속 쌓인다 (UBPACS)
+//  '✕'  = 개별 Exam 탭 ✕(removePersistedTab 으로 그 항목만 제거)
+//  '전체닫기' = 벽 전체가 닫히는 All Close ✕ 뿐이다(decideCloseScope.dropsTabStack — 이 장부는
+//  모니터가 공유하므로 close_scope='current' 의 All Close 는 남은 창들을 위해 지우지 않는다).
+//  WORKLIST 버튼·Esc·주 검사 탭 ✕ 는 창만 닫고 이 장부는 남긴다 — 다음에 그 검사를 다시 열면
+//  loadPersistedTabs 가 +Add 로 쌓아 둔
+//  나머지 검사까지 복원한다. (한때 이 삭제가 '전 모니터 전파' 플래그에 묶여 세 출구 모두에서 장부가
+//  날아갔다 — doClose 참조.)
 const TABS_KEY = "sv_viewer_tabs";
 function loadPersistedTabs(): { id: number; uid: string; label: string }[] {
   try { return JSON.parse(localStorage.getItem(TABS_KEY) ?? "[]"); } catch { return []; }
@@ -889,7 +898,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // 창 이름이 슬롯 규약(sv_viewer / sv_viewer_slot{n})이 아니면 아무것도 하지 않는다.
   const slotStudyRef = useRef(activeExamId);
   slotStudyRef.current = activeExamId;
-  useEffect(() => startViewerSlotHeartbeat(() => slotStudyRef.current), []);
+  useEffect(() => {
+    const off = startViewerSlotHeartbeat(() => slotStudyRef.current);
+    // ★ 다운로드 모드 기준선의 **상승 에지** 저지연 트리거(lib/sync.postViewerOpened 주석).
+    //   판독창 ◀▶·Compare 처럼 워크리스트를 거치지 않고 열리는 경로에서도 워크리스트가 즉시
+    //   재개하게 한다. 판정 자체는 워크리스트의 슬롯 장부 폴링이 하므로 유실돼도 무해하다.
+    if (isViewerSlotName(window.name)) postViewerOpened(window.name, slotStudyRef.current);
+    return off;
+  }, []);
+  // 다운로드 모드 축출 보호 장부 — "이 창이 지금 물고 있는 **모든** Exam 탭의 StudyUID".
+  // ⚠ 슬롯 하트비트(위)와 별개인 이유: 슬롯은 창당 **활성 검사 1건의 studyId** 만 싣고, 그 id 를
+  //   uid 로 바꾸는 유일한 통로가 다운로드 큐다. 검색 조건을 바꾸면 큐가 통째로 갈리므로
+  //   '띄워 둔 2019년 prior' 는 uid 로 변환조차 안 돼 보호 밖으로 떨어졌다(=1순위 희생자).
+  //   여기서는 uid 를 직접 남기고 비활성 탭까지 포함한다. TTL 이 있어 창을 어떻게 닫든 만료된다.
+  const heldUidsRef = useRef<string[]>([]);
+  heldUidsRef.current = [...new Set([
+    detail.study_uid, addDetail?.study_uid, stackDetail?.study_uid, ...openTabs.map((t) => t.uid),
+  ].filter((u): u is string => !!u))];
+  useEffect(() => startHeldStudiesHeartbeat(() => heldUidsRef.current), []);
   // 뷰어 열림 하트비트(read_state) — 열린 검사 전체를 45s 주기로 서버에 알림(서버 TTL 120s).
   // 최신 id 목록은 ref 로 읽어 인터벌 재생성 없이 openTabs/detail 변경을 반영. 실패는 조용히 무시.
   const hbIdsRef = useRef<number[]>([]);
@@ -1744,7 +1770,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           else if (tool) setTool(null);
           else if (selPanes.size) setSelPanes(new Set());  // 멀티 선택 해제 (In 동일)
           else if (maximized) setMaximized(null);   // 최대화 복원
-          else requestCloseRef.current();
+          // 계층의 마지막 = 뷰어 닫기. 이것도 창이 통째로 닫히는 출구이므로 close_scope 규약을 탄다
+          // (전 모니터). 단 Esc 는 오발이 잦아, **실제로 다른 뷰어 창이 함께 닫히는 경우에만**
+          // 확인 다이얼로그를 강제한다 — decideCloseScope 의 forceAsk(allMonitors && esc &&
+          // otherLiveViewers>0). 단일 모니터이거나 close_scope='current' 면 예전 그대로,
+          // close_mode 설정(save_current/discard 등)대로 즉시 닫힌다.
+          else exitViewerRef.current("esc");
           break;
         case "Backspace":   // 삭제 보조키(고정) — Delete 는 재바인딩 가능(del_anno)
           e.preventDefault();
@@ -2877,6 +2908,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // All Close(모든 모니터) 의도는 요청 시점이 아니라 '확정 시점'(doClose)에 브로드캐스트한다.
   // (ask 모드에서 다이얼로그를 취소하면 다른 모니터가 이미 닫혀버리는 비원자적 상태 방지)
   const closeAllMonitorsRef = useRef(false);
+  // Exam 탭 장부(TABS_KEY)를 버릴 것인가 — 출구가 All Close 일 때만(decideCloseScope.dropsTabStack).
+  const dropTabsRef = useRef(false);
   const doClose = async (mode: "save_current" | "save_all" | "discard", remember: boolean) => {
     setCloseDlg(false);
     if (remember) {
@@ -2884,18 +2917,25 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       api.getSetting("viewer.prefs").then((r) =>
         api.putSetting("viewer.prefs", { ...r.value, close_mode: mode }, "user")).catch(() => {});
     }
-    // 확정된 순간에만 다른 모니터 뷰어에 닫기 전파 + 공유 탭 목록 정리
-    if (closeAllMonitorsRef.current) {
+    // 확정된 순간에만 다른 모니터 뷰어에 닫기 전파
+    const bcast = closeAllMonitorsRef.current;
+    if (bcast) {
       closeAllMonitorsRef.current = false;
       postViewerCloseAll();
-      try { localStorage.removeItem(TABS_KEY); } catch { /* 무시 */ }
       // 모니터 벽이 통째로 비므로 슬롯 장부·라운드로빈도 초기화 — 다음 오픈이 다시 '첫 오픈'
       // (선택 전 모니터에 같은 검사)으로 시작해야 한다.
       clearViewerSlots();
     }
+    // Exam 탭 장부는 **출구가 All Close 일 때만** 버린다(decideCloseScope.dropsTabStack).
+    // 예전엔 이 삭제가 위 bcast **하나에만** 묶여 있어, WORKLIST·Esc·주 검사 탭 ✕ 로 나가도
+    // Related +Add 로 쌓아 둔 B·C 탭이 함께 날아갔다(모니터 1대여도 손실만 남음) → 345행 계약 위반.
+    if (dropTabsRef.current) {
+      dropTabsRef.current = false;
+      try { localStorage.removeItem(TABS_KEY); } catch { /* 무시 */ }
+    }
     // 이 창은 진짜로 닫힌다(리로드 아님) → 슬롯을 즉시 반납. TTL 만료를 기다리면 그 사이의 오픈이
     // "아직 창이 살아 있다"고 보고 부트스트랩을 건너뛴다.
-    releaseViewerSlot();
+    releaseViewerSlot(); releaseHeldStudies();
     try {
       if (mode === "save_current") {
         await api.saveAnnotations(detail.id, annos);
@@ -2904,26 +2944,49 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         await doGsps();  // 전체 변경사항 = 주석 + 표시상태(GSPS) 저장
       }
     } catch { /* 저장 실패해도 닫기는 진행 */ }
+    // 발신 창의 두 번째 정리 — 위 clearViewerSlots() 는 방송 **직후**라, 그 시점엔 아직 살아 있는
+    // 수신 창들의 2초 하트비트(startViewerSlotHeartbeat)가 자기 sv_vslot_* 를 되살릴 수 있다.
+    // 수신 창은 핸들러 진입 즉시 releaseViewerSlot() 하므로, 저장 왕복이 끝난 지금 한 번 더 지우면
+    // 장부가 확실히 빈다 → All Close 직후 다음 오픈이 ①부트스트랩으로 시작한다.
+    if (bcast) clearViewerSlots();
     onClose();
   };
-  const requestClose = (allMonitors = false) => {
-    closeAllMonitorsRef.current = allMonitors;
-    if (prefs.close_mode === "ask") setCloseDlg(true);   // 확정은 다이얼로그 → doClose 에서 전파
+  /** 판정(lib/viewerClose.decideCloseScope) 그대로 접수한다 — 인자 순서를 헷갈릴 여지를 없앤다.
+   *  allMonitors: 전 모니터 전파 / forceAsk: close_mode 와 무관하게 확인 다이얼로그(Esc 오발 방지)
+   *  / dropsTabStack: Exam 탭 장부 폐기(All Close 만) */
+  const requestClose = (d: CloseScopeDecision) => {
+    closeAllMonitorsRef.current = d.allMonitors;
+    dropTabsRef.current = d.dropsTabStack;
+    if (d.forceAsk || prefs.close_mode === "ask") setCloseDlg(true);  // 확정은 다이얼로그 → doClose 에서 전파
     else void doClose(prefs.close_mode, false);
   };
-  const requestCloseRef = useRef(requestClose);
-  requestCloseRef.current = requestClose;
-  const closeAllTabs = () => {
-    // All Close — close_scope="all"(기본)이면 확정 시 모든 모니터 닫기, "current"면 이 창만.
-    requestClose(prefs.monitor?.close_scope !== "current");
+  /** 창이 통째로 닫히는 **모든 출구**는 여기를 지난다 — close_scope 규약(lib/viewerClose)을 태워야
+   *  'All Close ✕' 이외의 경로(WORKLIST 버튼·Esc·마지막 Exam 탭 ✕)에서도 전 모니터가 함께 닫힌다.
+   *  예전엔 closeAllTabs 하나만 전파해, 나머지 출구는 누른 창만 닫히고 다른 모니터가 남았다.
+   *  otherLiveViewerCount(): 지금 살아 있는 **다른** 뷰어 창 수 — Esc 확인 강제를 '실제로 다른 창이
+   *  닫힐 때'로 좁히는 근거(단일 모니터 사용자에게 없던 다이얼로그를 새로 띄우지 않기 위해). */
+  const exitViewer = (exit: CloseExit) => {
+    const d = decideCloseScope(exit, 0, prefsRef.current.monitor?.close_scope, otherLiveViewerCount());
+    requestClose(d);
   };
+  const exitViewerRef = useRef(exitViewer);
+  exitViewerRef.current = exitViewer;
+  const closeAllTabs = () => exitViewer("all_close");
   // 다른 모니터에서 All Close(전체 범위) → 이 창도 대화상자 없이 닫는다(저장은 설정 모드대로, ask면 현재화면 저장)
   const doCloseRef = useRef(doClose);
   doCloseRef.current = doClose;
   useEffect(() => onViewerCloseAll(() => {
+    // 저장(await) **전에** 슬롯부터 반납한다 — 남겨 두면 2초 하트비트가 발신 창이 방금 지운
+    // sv_vslot_* 를 되살려, All Close 직후의 다음 오픈이 라운드로빈으로 떨어진다.
+    releaseViewerSlot(); releaseHeldStudies();
+    // ViewerWindow(같은 문서)의 안전망에 "내가 접수했다, 저장 끝날 때까지 닫지 마라"를 알린다.
+    markViewerClosing();
     const m = prefsRef.current.close_mode;
     void doCloseRef.current(m === "ask" ? "save_current" : m, false);
   }), []);
+  // ViewerWindow(뷰어 껍데기)의 All Close 안전망이 '뷰어가 마운트돼 있으니 저장을 기다린다'를
+  // 판단하는 근거. 마운트 중이 아니면 껍데기가 즉시 닫는다(부팅·리로드·에러 화면의 귀머거리 구간).
+  useEffect(() => markViewerMounted(), []);
 
   /* 툴바 표시 여부 (Setting>뷰어>Tools bar — 계정 로밍, 기본 모두 표시) */
   const tbOn = (id: string) => prefs.toolbar?.[id] !== false;
@@ -4303,7 +4366,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       {/* 상단 검사탭 바 */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px",
                     background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
-        <button onClick={() => requestClose()} style={{ fontWeight: 700 }}>WORKLIST</button>
+        {/* WORKLIST — 이것도 '창이 통째로 닫히는' 출구다(예전엔 전파가 없어 누른 창만 닫혔다) */}
+        <button onClick={() => exitViewer("worklist")} style={{ fontWeight: 700 }}>WORKLIST</button>
         {/* 좌상단: Series Layout(뷰포트 분할) · Image Layout(페인 내 이미지 타일) — UBPACS p.14 */}
         <GridPicker label="Srs" max={10}
                     value={{ r: LAYOUTS[layout].rows, c: LAYOUTS[layout].cols }}
@@ -4332,7 +4396,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 <span title={t.id === detail.id ? "주 검사 닫기 = 뷰어 닫기" : "이 Exam 닫기"}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (t.id === detail.id) requestClose();
+                        // 주 검사 탭 ✕ = 창이 통째로 닫힌다 → 전 모니터 규약(exitViewer)
+                        if (t.id === detail.id) exitViewer("last_tab");
                         else closeTab(t.id);
                       }}
                       style={{ fontSize: 10, opacity: 0.75 }}>✕</span>
@@ -4429,7 +4494,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                      sub: tabSub(t.id),
                      active: t.uid === panes[activePane].studyUid,
                      onClick: () => void loadIntoActive(t.id),
-                     onClose: () => { if (t.id === detail.id) requestClose(); else closeTab(t.id); },
+                     // Opened 목록의 ✕ 도 주 검사면 창이 닫힌다 → 같은 규약
+                     onClose: () => { if (t.id === detail.id) exitViewer("last_tab"); else closeTab(t.id); },
                    }))} />
         <TitleMenu id="related" icon="🗂" title="Related Study List — Open=활성 페인 비교 · +Add=현재 유지+중첩 로드"
                    menu={menu} setMenu={setMenu}
@@ -4776,8 +4842,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           </div>
         </div>
       )}
+      {/* 취소하면 전파 의도도 탭 장부 폐기 의도도 함께 버린다 — 남겨 두면 나중에 다른 모니터의
+          방송을 받아 닫힐 때 이 창이 다시 방송하거나(수신 → 재전파) 취소해 놓고도 탭이 날아간다. */}
       {closeDlg && (
-        <CloseDialog onPick={(m, r) => void doClose(m, r)} onCancel={() => setCloseDlg(false)} />
+        <CloseDialog onPick={(m, r) => void doClose(m, r)}
+                     onCancel={() => { closeAllMonitorsRef.current = false; dropTabsRef.current = false; setCloseDlg(false); }} />
       )}
       {settingsOpen && (
         <Suspense fallback={null}>

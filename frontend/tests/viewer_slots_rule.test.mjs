@@ -32,12 +32,17 @@ globalThis.localStorage = new MemStore();
 globalThis.window = { name: "", localStorage: globalThis.localStorage, setInterval: () => 0, clearInterval: () => {} };
 
 const {
-  clearViewerSlots, forgetViewerSlot, isViewerSlotName, liveViewerSlots, markViewerSlotUnloading,
-  noteViewerSlot, openByPlan, planViewerOpen, readViewerRoundRobin, viewerSlotName,
-  writeViewerRoundRobin, SLOT_HEARTBEAT_MS, SLOT_TTL_MS, SLOT_UNLOAD_GRACE_MS,
+  clearViewerSlots, decideBaselineArm, decideBaselineRelease, forgetViewerSlot, isViewerSlotName, liveViewerSlots,
+  markViewerSlotUnloading, noteViewerSlot, openByPlan, otherLiveViewerCount, planViewerOpen,
+  readViewerRoundRobin, viewerSlotName, writeViewerRoundRobin,
+  SLOT_HEARTBEAT_MS, SLOT_TTL_MS, SLOT_UNLOAD_GRACE_MS,
 } = await import("../src/lib/viewerSlots.ts");
 
-beforeEach(() => { globalThis.localStorage = new MemStore(); globalThis.window.localStorage = globalThis.localStorage; });
+beforeEach(() => {
+  globalThis.localStorage = new MemStore();
+  globalThis.window.localStorage = globalThis.localStorage;
+  globalThis.window.name = "";
+});
 
 /** Worklist.openV2 가 하는 일 그대로 — 살아 있는 창 목록을 만들어 원본에 넘기고, 계획대로 "연다".
  *  여기서 '연다'는 window.open 대신 성공(true)을 반환하는 스텁. 규칙 판정·장부 기록·순번 갱신은
@@ -209,6 +214,90 @@ test("순번이 슬롯 수를 넘어가도(설정 축소 직후) 범위 안으�
   assert.equal(plan.nextRr, 2);
 });
 
+/* ── 다운로드 모드 기준선 해제 판정 (decideBaselineRelease) ────────────────────────────
+ * 요구: "뷰어가 닫히면 다운로드를 멈추고 기준선을 푼다. 다시 열면 그때 연 영상이 새 기준."
+ * 워크리스트는 2초 폴로 '살아 있는 창 목록'(슬롯 장부 ∪ !w.closed 창 핸들)을 만들어 이 함수에
+ * 물어보고, release=true 일 때만 clearDlOpened()→dlStop() 한다.
+ *
+ * 되돌리면 실패한다:
+ *   · 레벨 트리거(live===0 이면 해제)로 바꾸면 ①⑤ 가 실패한다.
+ *   · '마지막 창' 조건을 지우고 창 하나가 줄어든 것으로 판정하면 ③ 이 실패한다.
+ *   · isViewerSlotName 필터를 빼면 ⑥ 이 실패한다.
+ */
+test("① 한 번도 살아 있는 창을 못 봤고 지금도 0 → 해제하지 않는다 (F5·미오픈에서 기준선 유지)", () => {
+  // 워크리스트를 F5 하면 창 핸들 맵이 사라지고, 교차 출처(VIEWER_BASE) 배치면 장부도 안 보인다.
+  // 여기서 풀어 버리면 판독 중인데 기준선이 날아가고 다운로드가 멈춘다.
+  assert.deepEqual(decideBaselineRelease(false, []), { seenLive: false, release: false });
+});
+
+test("② 0 → 1 : 래치만 세운다(해제 없음)", () => {
+  assert.deepEqual(decideBaselineRelease(false, ["sv_viewer"]), { seenLive: true, release: false });
+});
+
+test("③ 2 → 1 : 한 창만 닫혀도 절대 풀리지 않는다 (판독 중 기준선 소실 금지)", () => {
+  // 다중 모니터 ①부트스트랩은 창을 2~3개 띄우고, 사용자가 그중 하나만 닫는 일이 흔하다.
+  const d = decideBaselineRelease(true, ["sv_viewer_slot1"]);
+  assert.deepEqual(d, { seenLive: true, release: false });
+});
+
+test("④ 2 → 0 : 마지막 창이 닫힌 하강 에지에서만 해제", () => {
+  assert.deepEqual(decideBaselineRelease(true, []), { seenLive: false, release: true });
+});
+
+test("⑤ 해제 직후 0 → 0 : 다시 해제하지 않는다 (dlStop 반복 → stop/start 진동 금지)", () => {
+  const first = decideBaselineRelease(true, []);
+  assert.equal(first.release, true);
+  const second = decideBaselineRelease(first.seenLive, []);
+  assert.deepEqual(second, { seenLive: false, release: false });
+});
+
+test("⑥ 뷰어 슬롯이 아닌 창 이름(sv_report 등)은 '살아 있는 뷰어'로 세지 않는다", () => {
+  // 판독창이 떠 있다고 뷰어가 살아 있는 것은 아니다 — 세면 기준선이 영영 안 풀린다.
+  assert.deepEqual(decideBaselineRelease(true, ["sv_report", "sv_worklist"]),
+    { seenLive: false, release: true });
+  // 반대로 진짜 슬롯 이름이 섞여 있으면 살아 있는 것이다
+  assert.deepEqual(decideBaselineRelease(true, ["sv_report", "sv_viewer_slot2"]),
+    { seenLive: true, release: false });
+  // 중복 이름이 들어와도 '개수'가 부풀지 않는다(장부 ∪ 핸들 합집합이므로 같은 이름이 두 번 올 수 있다)
+  assert.deepEqual(decideBaselineRelease(true, ["sv_viewer", "sv_viewer"]),
+    { seenLive: true, release: false });
+});
+
+test("장부 레벨 — pagehide 유예 안에서는 여전히 살아 있다(해제 없음), 둘 다 만료돼야 해제", () => {
+  // 창 2개가 살아 있다 → 래치 on
+  noteViewerSlot("sv_viewer", 101);
+  noteViewerSlot("sv_viewer_slot1", 101);
+  let seen = false;
+  let d = decideBaselineRelease(seen, liveViewerSlots().keys());
+  seen = d.seenLive;
+  assert.deepEqual([d.seenLive, d.release], [true, false]);
+
+  // 한 창이 내려간다(리로드일 수도 있다) — 유예 안이면 아직 살아 있는 것으로 센다
+  markViewerSlotUnloading("sv_viewer_slot1");
+  assert.equal(liveViewerSlots().size, 2, "유예 안의 창을 죽이면 리로드 중에 기준선이 날아간다");
+  d = decideBaselineRelease(seen, liveViewerSlots().keys());
+  seen = d.seenLive;
+  assert.deepEqual([d.seenLive, d.release], [true, false]);
+
+  // 유예 초과 = 진짜 닫힘. 그래도 남은 창이 1개이므로 해제하지 않는다(위 규칙 ③)
+  const r1 = JSON.parse(localStorage.getItem("sv_vslot_sv_viewer_slot1"));
+  localStorage.setItem("sv_vslot_sv_viewer_slot1",
+    JSON.stringify({ ...r1, u: r1.u - SLOT_UNLOAD_GRACE_MS - 1 }));
+  assert.equal(liveViewerSlots().size, 1);
+  d = decideBaselineRelease(seen, liveViewerSlots().keys());
+  seen = d.seenLive;
+  assert.deepEqual([d.seenLive, d.release], [true, false], "한 창이 남았는데 풀면 판독 중 기준선 소실");
+
+  // 마지막 창까지 닫히면 그제서야 해제
+  markViewerSlotUnloading("sv_viewer");
+  const r0 = JSON.parse(localStorage.getItem("sv_vslot_sv_viewer"));
+  localStorage.setItem("sv_vslot_sv_viewer",
+    JSON.stringify({ ...r0, u: r0.u - SLOT_UNLOAD_GRACE_MS - 1 }));
+  assert.equal(liveViewerSlots().size, 0);
+  d = decideBaselineRelease(seen, liveViewerSlots().keys());
+  assert.deepEqual([d.seenLive, d.release], [false, true]);
+});
+
 test("localStorage 가 막혀도 던지지 않는다 (사생활 모드·quota) — 사이클 시작으로 폴백", () => {
   const boom = { get length() { throw new Error("blocked"); }, key() { throw new Error("blocked"); },
                  getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); },
@@ -221,4 +310,84 @@ test("localStorage 가 막혀도 던지지 않는다 (사생활 모드·quota) �
     writeViewerRoundRobin(2); clearViewerSlots();
     openByPlan(planViewerOpen(SLOTS3, [], 0), 1, () => true);
   });
+});
+
+// ── otherLiveViewerCount — '지금 닫기를 전파해서 실제로 닫을 창이 있는가' ──────
+//  Esc 확인 강제(viewerClose.decideCloseScope.forceAsk)의 유일한 근거다. 자기 자신을 세면
+//  단일 모니터 사용자도 항상 1 이 되어, 닫힐 다른 창이 없는데 확인 다이얼로그가 뜬다.
+test("otherLiveViewerCount 는 자기 창(window.name)을 빼고 센다", () => {
+  globalThis.window.name = "sv_viewer";
+  noteViewerSlot("sv_viewer", 1);
+  assert.equal(otherLiveViewerCount(), 0, "단일 모니터 = 전파해도 닫을 다른 창이 없다");
+
+  noteViewerSlot("sv_viewer_slot1", 1);
+  noteViewerSlot("sv_viewer_slot2", 1);
+  assert.equal(otherLiveViewerCount(), 2);
+
+  // 만료된 창은 세지 않는다(liveViewerSlots 의 TTL 판정을 그대로 탄다)
+  const r = JSON.parse(localStorage.getItem("sv_vslot_sv_viewer_slot2"));
+  localStorage.setItem("sv_vslot_sv_viewer_slot2", JSON.stringify({ ...r, t: r.t - SLOT_TTL_MS - 1 }));
+  assert.equal(otherLiveViewerCount(), 1);
+
+  // 슬롯 규약이 아닌 일반 탭(name="") — 자기 것이 장부에 없으므로 전부가 '다른 창'
+  globalThis.window.name = "";
+  assert.equal(otherLiveViewerCount(), 2);
+});
+
+/* ── 다운로드 모드 기준선 **상승** 에지 판정 (decideBaselineArm) ────────────────────────
+ * 요구의 뒷면이다: "뷰어가 닫히면 멈춘다" 를 배선하면 **재개**도 같은 자리에 있어야 한다.
+ *
+ * 회귀 이력(이 블록이 생긴 이유): 해제(하강 에지)는 뷰어가 전부 닫히면 무조건 걸리는데 재개는
+ * Worklist.openV2 **하나뿐**이었다. 그런데 sv_viewer 창을 여는 곳은 openV2 만이 아니다 —
+ * 판독창(ReportWindow)의 ◀▶ 넘기기(:351)와 과거검사 Compare(:114)는 `window.open(..., "sv_viewer")`
+ * 로 **다른 창의 다른 문서**에서 연다(markDlOpened 를 부를 수 없다). 그래서
+ *     뷰어 ✕(→dlStop) → 판독창 ◀▶ 로 다음 검사 → 뷰어는 멀쩡히 떠 있는데 다운로드는 죽은 채
+ * 가 그 세션 내내 이어졌다(워크리스트에서 다시 더블클릭해야 복구).
+ *
+ * 그래서 **금지 상태**를 여기서 못 박는다: '뷰어가 살아 있는데 기준선이 0' 은 존재할 수 없다.
+ * 되돌리면(폴링 훅의 게이트를 `if (!dlOpenedAt) return` 으로 되돌리거나 arm 호출을 지우면)
+ * 아래 ①③④ 가 실패한다.
+ */
+test("① 뷰어가 살아 있는데 기준선이 없다 → 반드시 재개한다 (금지 상태)", () => {
+  assert.deepEqual(decideBaselineArm(false, ["sv_viewer"]), { arm: true });
+  assert.deepEqual(decideBaselineArm(false, ["sv_viewer_slot2"]), { arm: true });
+});
+
+test("② 기준선이 이미 있으면 다시 세우지 않는다 (매 폴마다 markDlOpened 폭주 금지)", () => {
+  assert.deepEqual(decideBaselineArm(true, ["sv_viewer"]), { arm: false });
+});
+
+test("③ 뷰어가 하나도 없으면 세우지 않는다 (열지도 않았는데 전체 아카이브를 받기 시작 금지)", () => {
+  assert.deepEqual(decideBaselineArm(false, []), { arm: false });
+  // 판독창만 떠 있는 것은 '뷰어가 살아 있다'가 아니다 — 세면 영상을 안 열었는데 받기 시작한다
+  assert.deepEqual(decideBaselineArm(false, ["sv_report", "sv_worklist"]), { arm: false });
+});
+
+test("④ 해제 → 재오픈 왕복: 하강/상승이 서로를 되돌린다 (한 번 닫으면 세션 내내 죽는 상태 금지)", () => {
+  let seen = false;
+  let baseline = 0;
+  const poll = (names) => {
+    const r = decideBaselineRelease(seen, names);
+    seen = r.seenLive;
+    if (r.release) { baseline = 0; return; }          // clearDlOpened → dlStop
+    if (decideBaselineArm(!!baseline, names).arm) baseline = 1;   // markDlOpened → dlResume
+  };
+  poll(["sv_viewer"]);                 // 워크리스트에서 오픈
+  assert.equal(baseline, 1);
+  poll([]);                            // 뷰어 ✕ → 정지
+  assert.equal(baseline, 0);
+  poll([]);                            // 아무 일 없음(진동 금지)
+  assert.equal(baseline, 0);
+  poll(["sv_viewer"]);                 // 판독창 ◀▶ 로 다시 열림 — 워크리스트는 이 사실을 상태로만 안다
+  assert.equal(baseline, 1, "재개 경로가 openV2 하나뿐이면 여기가 0 으로 남는다(도입된 회귀)");
+});
+
+test("⑤ 장부 레벨 — 다른 창/다른 탭이 연 뷰어도 관측된다(localStorage 공유)", () => {
+  // 워크리스트 탭이 2개인 배치: 기준선(sessionStorage)과 dlStop(모듈 변수)은 탭별이지만
+  // 슬롯 장부는 오리진 공유라, 탭 B 가 연 뷰어를 탭 A 도 본다.
+  assert.deepEqual(decideBaselineArm(false, liveViewerSlots().keys()), { arm: false });
+  noteViewerSlot("sv_viewer", 777);
+  assert.deepEqual(decideBaselineArm(false, liveViewerSlots().keys()), { arm: true });
+  forgetViewerSlot("sv_viewer");
+  assert.deepEqual(decideBaselineArm(false, liveViewerSlots().keys()), { arm: false });
 });

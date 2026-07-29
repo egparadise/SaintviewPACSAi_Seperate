@@ -31,8 +31,10 @@ import { ReportDock } from "../components/ReportDock";
 import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
-import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll } from "../lib/sync";
-import { clearViewerSlots, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
+import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerOpened } from "../lib/sync";
+import { decideCloseScope, markViewerClosing, markViewerMounted, shouldCloseAllMonitors } from "../lib/viewerClose";
+import { clearViewerSlots, isViewerSlotName, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
+import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
 import { activeHang2dMap, mammoAssign, mammoView, pickHang2d, type HpRule } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgReadable, mgRatioBox,
@@ -791,6 +793,15 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     const remain = exams.filter((_, k) => k !== i).map((e) => e.d.id);
     localStorage.setItem(EXAMS_KEY, JSON.stringify(remain));
     if (!remain.length) {
+      // 마지막 검사 탭을 닫으면 이 창은 **진짜로** 닫힌다(리로드 아님) → 슬롯 즉시 반납.
+      // ⚠ 여기만 releaseViewerSlot 이 빠져 있어 proceedCloseAll(810)·Viewer2D.doClose 와 비대칭이었다.
+      //   반납이 없으면 워크리스트가 '창이 살아 있다'로 보는 시간이 pagehide 유예(8초)만큼 길어져,
+      //   다운로드 정지·기준선 해제가 그만큼 늦고 다음 오픈의 ①부트스트랩 판정도 흔들린다.
+      // 창이 통째로 닫히므로 'All Close' 와 같은 뒷정리를 한다 — 전파 자체는 doCloseAction 이 확정
+      // 시점에 이미 방송했다(requestClose 의 decideCloseScope). 벽이 비면 장부·순번도 초기화해야
+      // 다음 오픈이 ①부트스트랩으로 시작한다.
+      if (shouldCloseAllMonitors(closeScopeRef.current)) clearViewerSlots();
+      releaseViewerSlot(); releaseHeldStudies();
       gotoWorklist();
       window.close();
       onClose();
@@ -800,14 +811,16 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   };
   const proceedCloseAll = () => {
     // close_scope="current"면 이 창만 닫으므로 공유 EXAMS_KEY(다른 창의 탭 복원용)를 지우지 않는다.
-    if (closeScopeRef.current !== "current") {
+    // ⚠ 판정은 lib/viewerClose.shouldCloseAllMonitors 한 곳 — Viewer2D 와 갈리지 않게(예전엔
+    //    두 파일에 서로 다른 저장소(state/ref)로 두 번 하드코딩돼 있었다).
+    if (shouldCloseAllMonitors(closeScopeRef.current)) {
       localStorage.removeItem(EXAMS_KEY);
       // 모니터 벽이 통째로 비므로 슬롯 장부·라운드로빈도 초기화 — 다음 오픈은 다시 '첫 오픈'
       // (선택 전 모니터에 같은 검사)으로 시작해야 한다.
       clearViewerSlots();
     }
     // 이 창은 진짜로 닫힌다(리로드 아님) → 슬롯 즉시 반납(TTL 만료를 기다리면 그 사이 오픈이 부트스트랩을 건너뛴다)
-    releaseViewerSlot();
+    releaseViewerSlot(); releaseHeldStudies();
     gotoWorklist();
     window.close();
     onClose();
@@ -831,8 +844,15 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     else proceedCloseAll();
   };
   const requestClose = (req: CloseReq) => {
-    // 모든 검사 닫기 + close_scope="all"(기본) → 확정 시 다른 모니터 뷰어도 닫기(요청 시점 아님)
-    if (req.kind === "all" && closeScopeRef.current !== "current") closeAllBroadcastRef.current = true;
+    // 전파 판정은 lib/viewerClose.decideCloseScope 한 곳. **'모든 검사 닫기' 버튼만이 아니다** —
+    // Exam 탭 ✕ / ⊠Close▸'현재 검사 닫기' 로 **마지막** 검사를 닫아도 이 창은 통째로 사라지므로
+    // 같은 규약을 태워야 한다(예전엔 그 경로에 전파가 없어 다른 모니터가 그대로 남았다).
+    // 전파 자체는 요청 시점이 아니라 확정 시점(doCloseAction)에 — ask 다이얼로그를 취소하면
+    // 다른 모니터만 닫혀 있는 비원자 상태가 되기 때문.
+    const d = decideCloseScope(req.kind === "all" ? "all_close" : "one_exam",
+                               req.kind === "one" ? exams.length - 1 : 0,
+                               closeScopeRef.current);
+    if (d.allMonitors) closeAllBroadcastRef.current = true;
     if (closeMode === "ask") { setCloseRemember(false); setCloseDlg(req); }
     else void doCloseAction(closeMode, false, req);
   };
@@ -841,9 +861,16 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const doCloseActionRef = useRef(doCloseAction);
   doCloseActionRef.current = doCloseAction;
   useEffect(() => onViewerCloseAll(() => {
+    // 저장(await) **전에** 슬롯부터 반납 — 남겨 두면 2초 하트비트가 발신 창이 지운 sv_vslot_* 를
+    // 되살려, All Close 직후의 다음 오픈이 ①부트스트랩 대신 라운드로빈으로 떨어진다.
+    releaseViewerSlot(); releaseHeldStudies();
+    // ViewerWindow(같은 문서)의 안전망에 "내가 접수했다, 저장 끝날 때까지 닫지 마라"를 알린다.
+    markViewerClosing();
     const m = closeMode === "ask" ? "save_current" : closeMode;
     void doCloseActionRef.current(m, false, { kind: "all" });
   }), [closeMode]);
+  // ViewerWindow(뷰어 껍데기)의 All Close 안전망이 '뷰어가 떠 있으니 저장을 기다린다'를 판단하는 근거.
+  useEffect(() => markViewerMounted(), []);
   const curD = exams[activeExam]?.d ?? detail;
   // 비교(Compare) M/S 라벨 — 창 역할(cmpRole: 다중 모니터) 우선, 없으면 페인별 파생.
   //  기준(master)=비교 시작 시점의 활성 검사(cmpMaster, 미설정=창 배정 detail). ⇄/History 명시 진입 시에만.
@@ -1052,8 +1079,24 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // 판정한다. 창 이름이 슬롯 규약(sv_viewer / sv_viewer_slot{n})이 아니면 아무것도 하지 않는다.
   const activeExamRef = useRef(activeExam);
   activeExamRef.current = activeExam;
-  useEffect(() => startViewerSlotHeartbeat(
-    () => examsRef.current[activeExamRef.current]?.d.id ?? detail.id), [detail.id]);
+  useEffect(() => {
+    const cur = () => examsRef.current[activeExamRef.current]?.d.id ?? detail.id;
+    const off = startViewerSlotHeartbeat(cur);
+    // ★ 다운로드 모드 기준선의 **상승 에지** 저지연 트리거(lib/sync.postViewerOpened 주석).
+    //   판정은 워크리스트의 슬롯 장부 폴링이 하므로 이 방송이 유실돼도 무해하다.
+    if (isViewerSlotName(window.name)) postViewerOpened(window.name, cur());
+    return off;
+  }, [detail.id]);
+  // 다운로드 모드 축출 보호 장부 — "이 창이 지금 물고 있는 **모든** Exam 탭의 StudyUID".
+  // ★ In-View 는 예전에 이 보호에서 통째로 빠져 있었다: 보호 출처가 Viewer2D 전용 장부
+  //   (sv_viewer_tabs)였고, In-View 자기 장부(sv_infi_exams)는 uid 없는 id 배열이라 읽을 수도
+  //   없었다. 그래서 단일 모니터 + In-View 조합에서는 '보고 있는 검사는 삭제하지 않습니다' 라는
+  //   설정 화면의 약속이 성립하지 않았다. 두 뷰어가 같은 TTL 장부(lib/dlHeld)에 uid 를 직접 남긴다.
+  const heldUidsRef = useRef<string[]>([]);
+  heldUidsRef.current = [...new Set([
+    detail.study_uid, ...exams.map((e) => e.d.study_uid),
+  ].filter((u): u is string => !!u))];
+  useEffect(() => startHeldStudiesHeartbeat(() => heldUidsRef.current), []);
   useEffect(() => onStudySync("viewer", (id) => {
     // 다중 모니터 관리 배치(mm) — 탭이 전 창 공유이므로 외부(워크리스트/판독창) 선택 동기로 전환하면
     // 모든 모니터가 같은 검사로 일제 전환되어 "모니터별 열린 순서 배치"가 깨진다 → mm 창은 전환 안 함(탭 클릭으로만).
@@ -3763,7 +3806,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       {closeDlg && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 260,
                       display: "grid", placeItems: "center" }}
-             onMouseDown={(e) => { if (e.target === e.currentTarget) setCloseDlg(null); }}>
+             /* 취소(배경 클릭)하면 전파 의도도 버린다 — 남기면 나중에 다른 모니터의 방송을 받아
+                닫힐 때 이 창이 다시 방송해(수신 → 재전파) 창들이 서로 되받는다. */
+             onMouseDown={(e) => {
+               if (e.target !== e.currentTarget) return;
+               closeAllBroadcastRef.current = false;
+               setCloseDlg(null);
+             }}>
           <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
                         padding: 16, width: "min(420px, 92vw)" }}>
             <b style={{ fontSize: 13 }}>
@@ -3792,7 +3841,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
               이 선택을 기본 닫기 동작으로 저장(다음부터 묻지 않음)
             </label>
             <div style={{ textAlign: "right", marginTop: 8 }}>
-              <button onClick={() => setCloseDlg(null)}>취소</button>
+              <button onClick={() => { closeAllBroadcastRef.current = false; setCloseDlg(null); }}>취소</button>
             </div>
           </div>
         </div>

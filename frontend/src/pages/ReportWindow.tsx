@@ -2,7 +2,8 @@
 // 레이아웃: [판독|판독 기록|단축키|템플릿] 탭 · Font · CVR · ◀▶ · 초기화/저장/승인 · Reading/Conclusion
 import { useEffect, useRef, useState } from "react";
 import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail } from "../api";
-import { onStudySync, postStudySync } from "../lib/sync";
+import { onStudySync, onViewerCloseAll, postStudySync } from "../lib/sync";
+import { shouldCloseReportWindow } from "../lib/viewerClose";
 import { liveViewerSlots, noteViewerSlot } from "../lib/viewerSlots";
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { MicIcon } from "../components/MicIcon";
@@ -192,6 +193,25 @@ export function ReportWindow() {
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
+  // 뷰어의 All Close(전 모니터) 를 판독창도 받는다 — '모든 모니터가 한꺼번에' 라는 기대에 맞추기 위해.
+  // ⚠ 기본값은 **닫지 않음**이다(Setting>모니터 'All Close 시 판독창도 함께 닫기'). 판독 원고는
+  //   뷰어 주석과 달리 자동 저장이 없어, 임의로 닫으면 작성 중인 원고가 통째로 날아간다.
+  //   켜 두었더라도 미저장 입력(touched)이 있으면 닫지 않고 안내만 남긴다 — 판정은
+  //   lib/viewerClose.shouldCloseReportWindow 한 곳.
+  // ⚠ 한계: VITE_VIEWER_BASE 로 뷰어를 다른 오리진에 띄운 배치에서는 BroadcastChannel 이 오리진
+  //   경계를 넘지 못해 이 신호가 판독창(워크리스트 오리진)에 닿지 않는다.
+  const closeReportRef = useRef(false);
+  const touchedRef = useRef(false);
+  useEffect(() => { touchedRef.current = touched; }, [touched]);
+  useEffect(() => {
+    api.getSetting("viewer.prefs").then((r) => {
+      closeReportRef.current = (r.value as { monitor?: { close_report?: boolean } }).monitor?.close_report === true;
+    }).catch(() => {});
+    return onViewerCloseAll(() => {
+      if (shouldCloseReportWindow(closeReportRef.current, touchedRef.current)) window.close();
+      else if (closeReportRef.current) setMsg("저장하지 않은 판독 내용이 있어 판독창은 닫지 않았습니다");
+    });
+  }, []);
   const finalized = report?.status === "finalized";
   const sig = (report?.diff_metrics as { signature?: { name: string; license_no: string; signed_at: string } })?.signature;
   // 전역 keydown(잡고 V) 핸들러에서 최신값을 읽도록 ref 동기 — pasteReading 가드용
@@ -330,6 +350,11 @@ export function ReportWindow() {
     // 이미지도 함께 — 뷰어 창(sv_viewer)을 그 검사로 열기/전환 (닫혀 있으면 새로 연다)
     const w = window.open(viewerUrlFor(`viewer=2d&study=${id}`), "sv_viewer");
     if (w) noteViewerSlot("sv_viewer", id);   // 라운드로빈 장부 갱신 — 이 모니터의 현재 검사가 바뀌었다
+    // ⚠ 다운로드 모드 기준선(markDlOpened/dlResume)은 여기서 부를 수 없다 — 그것들은 워크리스트
+    //   **문서**의 상태다(이 창은 별도 문서). 대신 워크리스트가 '뷰어가 살아 있는가' 를 폴로 보고
+    //   상승 에지에서 스스로 재개한다(viewerSlots.decideBaselineArm). 위 noteViewerSlot 이 그
+    //   판정의 입력이므로 **지우면 안 된다**. 한때 이 경로에 재개가 없어, 뷰어 ✕ 뒤 ◀▶ 로 판독을
+    //   이어 가면 백그라운드 다운로드가 그 세션 내내 죽어 있었다.
 
     setTimeout(() => window.focus(), 120);   // 판독창 포커스 유지(계속 넘기며 판독)
   };

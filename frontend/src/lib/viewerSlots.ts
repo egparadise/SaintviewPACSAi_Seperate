@@ -114,6 +114,18 @@ export function liveViewerSlots(): Map<string, number> {
   return out;
 }
 
+/** **이 창을 뺀** 살아 있는 뷰어 창 수 — "지금 닫기를 전파해서 실제로 닫을 창이 있는가".
+ *  자기 슬롯은 window.name(슬롯 규약 이름)으로 걸러낸다. 일반 탭(슬롯 이름 아님)이면 자기 것이
+ *  애초에 장부에 없으므로 전부가 '다른 창'이다.
+ *  용도: Esc 확인 강제 판정(viewerClose.decideCloseScope) — 닫힐 다른 창이 없는 단일 모니터
+ *  사용자에게까지 확인 다이얼로그를 띄우지 않기 위해. */
+export function otherLiveViewerCount(): number {
+  const self = typeof window !== "undefined" ? window.name : "";
+  let n = 0;
+  for (const name of liveViewerSlots().keys()) if (name !== self) n += 1;
+  return n;
+}
+
 /** All Close(전체 모니터) — 벽 전체가 비었으므로 다음 오픈은 다시 ①부트스트랩이어야 한다. */
 export function clearViewerSlots(): void {
   try {
@@ -193,6 +205,58 @@ export function openByPlan(
   }
   writeViewerRoundRobin(plan.nextRr);
   return opened;
+}
+
+// ── '뷰어가 전부 닫혔다' 판정 ────────────────────────────────────────────────
+//  다운로드 모드 기준선(sv_dl_opened_at)은 **판독 세션 단위**다: 뷰어가 하나라도 살아 있는 동안은
+//  처음 연 시각을 유지하고, 벽이 통째로 비면 풀린다. 그런데 워크리스트에는 '창이 닫혔다'는 신호가
+//  도달하는 경로가 없었다 —
+//    · openedViewerWindows 의 w.closed 검사는 openV2 안에서만 돌아, **다음 검사를 열기 전까지**
+//      아무도 닫힘을 관측하지 않는다.
+//    · postViewerCloseAll 은 대용이 못 된다. 'All Close 버튼 + close_scope≠current' 에서만 나가므로
+//      브라우저 X·Ctrl+W·창 하나 닫기·마지막 Exam 탭 닫기에서는 아예 발신되지 않는다.
+//  그래서 워크리스트가 주기적으로 '살아 있는 창 목록'을 만들어 이 함수에 물어본다.
+//
+//  ⚠ 왜 에지 트리거(래치)인가 — 레벨 트리거(살아 있는 창 0개면 해제)로 짜면 (a) 아무것도 안 연 상태,
+//    (b) 워크리스트 F5 직후, (c) 방금 해제한 직후 의 0 에서도 매 폴마다 해제가 불린다. 해제는
+//    dlStop 을 동반하고 재개 훅과 맞물려 stop/start 진동을 만든다. '한 번이라도 살아 있는 걸 봤고
+//    지금은 0' 일 때만 = 하강 에지에서만 푼다.
+//  ⚠ 왜 '개수 0' 인가 — 다중 모니터 부트스트랩에서는 창이 2~3개 뜨고 사용자가 그중 하나만 닫는 일이
+//    흔하다. 개별 창 닫힘으로 판정하면 판독 중에 기준선이 사라진다.
+export interface BaselineRelease {
+  /** 다음 판정에 넘길 래치 — 지금 살아 있는 창이 있으면 true, 해제했으면 다시 false */
+  seenLive: boolean;
+  /** 이번에 기준선을 풀어야 하는가(하강 에지) */
+  release: boolean;
+}
+
+/** 기준선 해제 판정. 부작용 0 — 장부를 읽지도 쓰지도 않는다(planViewerOpen 과 같은 계약).
+ *  liveNames: 슬롯 장부 ∪ 워크리스트가 든 !w.closed 창 핸들. 뷰어 슬롯이 아닌 이름(sv_report 등)은
+ *             여기서 걸러진다 — 판독창이 떠 있다고 뷰어가 살아 있는 것은 아니다. */
+export function decideBaselineRelease(seenLive: boolean, liveNames: Iterable<string>): BaselineRelease {
+  const live = new Set<string>();
+  for (const n of liveNames) if (isViewerSlotName(n)) live.add(n);
+  if (live.size > 0) return { seenLive: true, release: false };
+  return { seenLive: false, release: seenLive };
+}
+
+/** 상승 에지 — **뷰어가 살아 있는데 기준선이 없다**면 기준선을 다시 세운다(= 다운로드 재개).
+ *
+ *  왜 필요한가(회귀 이력): 해제(하강 에지)는 뷰어가 전부 닫히면 무조건 걸리는데, 재개는 한때
+ *  Worklist.openV2 **하나뿐**이었다. 그런데 sv_viewer 창을 여는 곳은 openV2 만이 아니다 —
+ *  판독창(ReportWindow)의 ◀▶ 넘기기와 과거검사 Compare 는 `window.open(..., "sv_viewer")` 로
+ *  **다른 창의 다른 문서**에서 뷰어를 연다(markDlOpened 를 부를 수 없다). 그래서
+ *    뷰어 ✕ → dlStop → 판독창 ◀▶ 로 다음 검사 오픈 → 뷰어는 멀쩡히 떠 있는데 다운로드는 죽은 채
+ *  가 그 세션 내내 이어졌다. 오픈 **경로**를 하나씩 배선하는 대신, 해제와 같은 자리에서
+ *  '뷰어가 살아 있는가' 라는 **상태**로 판정한다 — 오픈 경로가 늘어도 다시 새지 않는다.
+ *
+ *  왜 래치가 없는가: 해제와 달리 이 판정은 멱등하다(기준선이 서면 hasBaseline=true 라 다음
+ *  폴부터 arm=false). markDlOpened 자체가 '세션 첫 1회만 기록' + dlResume 은 멱등이므로
+ *  중복 호출이 무해하다. 그래서 진동이 생기지 않는다. */
+export function decideBaselineArm(hasBaseline: boolean, liveNames: Iterable<string>): { arm: boolean } {
+  if (hasBaseline) return { arm: false };
+  for (const n of liveNames) if (isViewerSlotName(n)) return { arm: true };
+  return { arm: false };
 }
 
 // ── 뷰어 창 쪽 하트비트 ──────────────────────────────────────────────────────

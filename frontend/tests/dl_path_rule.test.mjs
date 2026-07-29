@@ -15,7 +15,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dlKey, dlPathFor } from "../src/lib/opfsStore.ts";
+import { dlKey, dlPathFor, pendingTasks } from "../src/lib/opfsStore.ts";
 import { DL_DEFAULTS, readDlPrefs } from "../src/lib/dlPrefs.ts";
 
 /** 같은 날·같은 환자·같은 모달리티 — StudyUID 만 다른 검사 2건 */
@@ -105,4 +105,42 @@ test("⑤ 설정값이 범위를 벗어나면 잘린다 — 동시 받기가 폭
   assert.equal(readDlPrefs({ dl_limit_gb: 100000 }).limitGb, 200);
   assert.equal(readDlPrefs({ dl_recent_n: -5 }).recentN, 1);
   assert.equal(readDlPrefs({ dl_scope: "weird" }).scope, "list");
+});
+
+/* ── ⑥ 재개 규칙: 이미 있는 키는 다시 받지 않는다 (opfsStore.pendingTasks) ──────────────
+ * 뷰어를 닫으면 다운로드가 멈추고(dlStop) 다시 열면 되살아난다(dlResume). 재개는 그 검사를
+ * 처음부터 다시 훑으므로, 이미 받아 둔 키를 걸러내지 않으면 닫았다 여는 것을 반복할 때마다
+ * 같은 바이트를 원격 A 에서 다시 내려받는다.
+ * 스케줄러(dlScheduler.pump)가 api.ts 를 import 해 node 에서 직접 못 도는 대신, 규칙 본체만
+ * 순수 함수로 빼서 여기서 검증한다 — pump 는 이 함수를 호출한다(다른 구현을 두지 않는다).
+ * 되돌리면(스킵을 지우면) 첫 케이스가 실패한다. */
+test("⑥ 이미 저장된 키는 재요청 목록에서 빠진다 — 재개가 '처음부터 다시 받기'가 되지 않는다", async () => {
+  const tasks = [{ key: "a" }, { key: "b" }, { key: "c" }];
+  const stored = new Set(["a", "c"]);
+  const asked = [];
+  const rest = await pendingTasks(tasks, async (k) => { asked.push(k); return stored.has(k); });
+  assert.deepEqual(rest.map((t) => t.key), ["b"], "이미 있는 a·c 를 다시 받으면 회선·A 부하가 두 배가 된다");
+  assert.deepEqual(asked.sort(), ["a", "b", "c"], "모든 키를 확인해야 한다(일부만 보면 중복 다운로드가 샌다)");
+});
+
+test("⑥ 전부 있으면 남는 작업이 0 — 재개가 A 에 요청을 한 건도 내지 않는다", async () => {
+  const rest = await pendingTasks([{ key: "a" }, { key: "b" }], async () => true);
+  assert.equal(rest.length, 0);
+});
+
+test("⑥ 존재 확인이 실패하면 '없음'으로 본다 — 인덱스가 깨져도 다운로드가 멈추지 않는다", async () => {
+  const rest = await pendingTasks([{ key: "a" }, { key: "b" }], async (k) => {
+    if (k === "a") throw new Error("idb broken");
+    return true;
+  });
+  assert.deepEqual(rest.map((t) => t.key), ["a"], "확인 실패를 '있음'으로 처리하면 파일이 영영 안 채워진다");
+});
+
+test("⑥ 순서가 보존된다 — 시리즈 순서대로 받는다는 규칙이 필터에서 뒤집히면 안 된다", async () => {
+  const tasks = Array.from({ length: 200 }, (_, i) => ({ key: `k${i}` }));   // 청크(64) 경계를 넘긴다
+  const rest = await pendingTasks(tasks, async (k) => k === "k0" || k === "k100");
+  assert.deepEqual(rest.map((t) => t.key).slice(0, 3), ["k1", "k2", "k3"]);
+  assert.equal(rest.length, 198);
+  assert.equal(rest[98].key, "k99");
+  assert.equal(rest[99].key, "k101", "청크 경계에서 순서가 섞이면 시리즈가 뒤죽박죽 채워진다");
 });

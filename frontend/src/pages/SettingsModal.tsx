@@ -7,7 +7,7 @@ import {
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
-import { dlSupportReason, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
+import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
 import { dlForgetDone, dlProgress, type DlProgress } from "../lib/dlScheduler";
 import { dlInvalidateCache } from "../lib/dlCache";
 import {
@@ -299,6 +299,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [rptAutoApply, setRptAutoApply] = useState(true);
   // 판독(Reading) 페이지 — 기본/단축키/템플릿 3탭 + 레포트 옵션(report.prefs)
   const [rdTab, setRdTab] = useState<"basic" | "shortcut" | "template">("basic");
+  // 저장이 끝났는가 — 하단 버튼 라벨(Cancel ↔ 닫기)이 이 값을 따른다.
+  const [dirtySaved, setDirtySaved] = useState(false);
+  const [saving, setSaving] = useState(false);      // 저장 중 이중 클릭 방지
   // Compare 기준 — report.prefs.compare. 뷰어 3종이 이 값을 기본값으로 쓴다.
   // (이름이 cmpCfg 가 아닌 이유: 그 이름은 이미 Compare **표시 방식**(다중모니터·라벨) 설정이 쓴다)
   const [cmpBasis, setCmpBasis] = useState<CompareCfg>(DEFAULT_COMPARE);
@@ -315,6 +318,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [monitorSel, setMonitorSel] = useState<number[]>([]);   // 뷰어 모니터(다중=라운드로빈)
   const [maxOpen, setMaxOpen] = useState(0);                     // 최대 열 영상 수(라운드로빈 슬롯, 0=선택 전부)
   const [closeScope, setCloseScope] = useState<"all" | "current">("all");  // All Close 범위(전체/현재 모니터)
+  // All Close 시 판독창(ReportWindow)도 함께 닫을지 — **기본 끔**. 판독 원고는 자동 저장이 없어
+  // 임의로 닫으면 작성 중인 글이 날아간다(켜도 미저장 입력이 있으면 닫지 않는다 — lib/viewerClose).
+  const [closeReport, setCloseReport] = useState(false);
   // 모니터별 ◀▶ 탐색 목록 = 배정된 워크리스트 탭의 필터 (monitorIndex → tabId, ""=전체)
   const [tabBinding, setTabBinding] = useState<Record<number, string>>({});
   // 워크리스트 탭 → 모니터 배치 예외(라운드로빈 대신 지정 모니터로 오픈). {tab: tabId, monitor}
@@ -336,6 +342,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   //   '모드'를 점유하고 있다. 이 항목은 **영상 취득 모드**이고 저장은 viewer.prefs.dl_* 이다.
   const [dl, setDl] = useState<DlPrefs>({ ...DL_DEFAULTS });
   const [dlUse, setDlUse] = useState<DlUsage | null>(null);
+  // 실효 상한 — 설정값과 브라우저 할당량의 절반 중 작은 쪽(opfsLimitBytes). 사용량을 '몇 GB' 로만
+  // 보여 주면 사용자는 자기가 적은 값(예: 20GB)을 기준으로 읽는데, 실제 축출은 실효 상한에서
+  // 일어난다(할당량 4GB 면 실효 2GB). 비율을 함께 보여 줘야 '왜 벌써 지워지나'가 설명된다.
+  const [dlLimit, setDlLimit] = useState(0);
   const [dlBusy, setDlBusy] = useState(false);
   const [dlProg, setDlProg] = useState<DlProgress | null>(null);
   const dlWhy = dlSupportReason();
@@ -508,12 +518,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (wp?.length) setWlPresets(wp);
       const cm = (v as { close_mode?: "ask" | "save_current" | "save_all" | "discard" }).close_mode;
       if (cm) setCloseMode(cm);
-      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current"; tab_binding?: Record<number, string>; tab_monitor_map?: { tab: string; monitor: number }[] } }).monitor;
+      const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current"; close_report?: boolean; tab_binding?: Record<number, string>; tab_monitor_map?: { tab: string; monitor: number }[] } }).monitor;
       if (mon?.screens) setMonitorSel(mon.screens);
       if (mon?.worklist !== undefined) setWlMon(mon.worklist);
       if (mon?.report !== undefined) setRptMon(mon.report);
       if (mon?.max_open != null) setMaxOpen(Number(mon.max_open) || 0);
       if (mon?.close_scope === "all" || mon?.close_scope === "current") setCloseScope(mon.close_scope);
+      setCloseReport(mon?.close_report === true);   // 미저장 = 끔(판독 원고 유실 방지가 기본)
       if (mon?.tab_binding) setTabBinding(mon.tab_binding);
       if (Array.isArray(mon?.tab_monitor_map)) setTabMonMap(mon.tab_monitor_map);
       const tc = v as { ty_tool_cols?: number };
@@ -589,11 +600,16 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   // 워크리스트와 같은 창에 있다). 탭을 보고 있을 때만 1초 폴링 — 다른 탭에서는 돌지 않는다.
   useEffect(() => {
     if (page !== "env") return;
-    const tick = () => { setDlProg(dlProgress()); void opfsUsage().then(setDlUse).catch(() => {}); };
+    const tick = () => {
+      setDlProg(dlProgress());
+      void opfsUsage().then(setDlUse).catch(() => {});
+      void opfsLimitBytes(dl.limitGb).then(setDlLimit).catch(() => {});
+    };
     tick();
     const t = window.setInterval(tick, 1000);
     return () => window.clearInterval(t);
-  }, [page]);
+    // dl.limitGb — 상한 입력을 바꾸면 실효 상한(할당량 절반과의 min)도 그 자리에서 다시 보여 준다
+  }, [page, dl.limitGb]);
 
   // 공유 디렉토리 존재 여부 뱃지 — 입력 디바운스(400ms) 후 서버측 확인(/api/share/fs, 관리자 전용)
   useEffect(() => {
@@ -670,6 +686,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       // 영상 취득 모드 — 뷰어 2종이 소비하므로 viewer.prefs 에 둔다(worklist.prefs 아님)
       dl_mode: dl.mode, dl_limit_gb: dl.limitGb, dl_conc: dl.concurrency,
       dl_scope: dl.scope, dl_recent_n: dl.recentN,
+      // 용량 초과 자동 삭제 — 이 4개를 저장 목록에서 빠뜨리면 UI 는 바뀌는데 저장이 안 돼
+      // 모달을 다시 열면 기본값으로 돌아온다(= 설정이 없는 것과 같다)
+      dl_auto_evict: dl.autoEvict, dl_evict_by: dl.evictBy,
+      dl_warn_near: dl.warnNearLimit, dl_warn_pct: dl.warnAtPct,
       // 구 I-View 'Modality 기본 레이아웃' — 편집 UI 는 ee88de4 에서 삭제됐다. 로드 시 모달리티 키는
       // 2D 행잉(뷰어별 infi)으로 접었으므로 여기 남는 건 표에 자리 없는 키('*' 기타 전체)뿐이다.
       infi_default_layout: Object.fromEntries(Object.entries(defLay)
@@ -684,7 +704,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       paletteSide, thumbSide, thumbSize, thumbMode, reportDock,
       toolbar: tbConfig, wl_presets: wlPresets, close_mode: closeMode,
       monitor: { screens: monitorSel, worklist: wlMon, report: rptMon, max_open: maxOpen, close_scope: closeScope,
-                 tab_binding: tabBinding, tab_monitor_map: tabMonMap },
+                 close_report: closeReport, tab_binding: tabBinding, tab_monitor_map: tabMonMap },
       shortcuts: { rdrag: scRdrag, shift_rclick: scShiftR, keys: scKeys },
       drop_menu: dropMenu,
     }, "user");
@@ -717,7 +737,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 100 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+      {/* ⚠ 이 줄에는 왼쪽 Refresh 버튼과 설정 패널이 **나란히** 있다. 패널만 98vw 로 잡으면
+          버튼 폭(+gap)이 더해져 합계가 화면을 넘고, 오른쪽 끝의 OK/닫기 버튼이 잘려 나간다
+          (최대화에서 실제로 잘렸다). 줄 자체를 뷰포트에 가두고 패널은 남는 폭을 쓰게 한다. */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8,
+                    width: "100vw", maxWidth: "100vw", padding: "0 8px",
+                    boxSizing: "border-box", justifyContent: "center" }}>
       {/* 설정 창 왼쪽 Refresh — 저장 후 전체 새로고침으로 적용값을 즉시 확인 */}
       <button title="모든 설정을 저장하고 화면을 새로고침 — 적용된 값을 바로 확인합니다"
               onClick={async () => { await save(); window.location.reload(); }}
@@ -734,7 +759,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
         display: "flex", flexDirection: "column", overflow: "hidden",
         ...(maxed
-          ? { width: "98vw", height: "95vh" }
+          // flex 로 남는 폭을 쓴다 — 형제(Refresh)와 padding 을 자동으로 비켜 간다
+          ? { flex: 1, minWidth: 0, height: "95vh" }
           : { width: "min(860px, 96vw)", height: "min(580px, 92vh)",
               // 우하단 핸들 드래그로 좌우·상하 크기 자유 조절(네이티브 resize)
               resize: "both" as const, minWidth: 640, minHeight: 420, maxWidth: "98vw", maxHeight: "95vh" }),
@@ -752,7 +778,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
           </span>
           <button style={{ marginRight: 6 }} title={maxed ? "기본 크기로 복원" : "전체 화면으로 크게 보기"}
                   onClick={() => setMaxed((m) => !m)}>{maxed ? "❐ 복원" : "⬜ 최대화"}</button>
-          <button onClick={onClose}>닫기</button>
+          {/* 우측 상단 닫기는 없앴다 — 하단 버튼과 중복이고, 저장 전/후 라벨이 달라야 하는데
+              같은 자리에 두 개가 있으면 어느 것을 눌러야 저장이 되는지 알 수 없다. */}
         </div>
         {/* 2D 행잉 저장본 정리 안내 — **탭과 무관하게** 모달 상단에 띄운다.
             '뷰어 공통 > 2D 행잉' 탭 안에만 두면 다른 탭에서 OK 를 누른 사용자는 안내를 못 본 채
@@ -1061,7 +1088,74 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                                  onChange={(e) => setDl({ ...dl,
                                    limitGb: Math.min(200, Math.max(1, Math.round(Number(e.target.value) || 2))) })} />
                           <span style={{ color: "var(--text-secondary)" }}>
-                            GB (브라우저 할당량의 절반을 넘지 않습니다 · 초과 시 <b>오래 안 본 검사부터</b> 통째로 삭제)
+                            GB (브라우저 할당량의 절반을 넘지 않습니다 ·{" "}
+                            {/* ★ 문구를 하드코딩하지 않는다 — 예전에는 '오래 안 본 검사부터' 라고 박혀
+                                있었고 실제 동작도 그랬는데, 사용자가 원한 정책은 '과거 검사부터' 였다.
+                                문구가 곧 정책인 상태에서는 되돌림이 조용히 일어난다. */}
+                            {dl.autoEvict
+                              ? <>초과 시 <b>{dl.evictBy === "lru" ? "오래 안 본 검사부터" : "과거 검사일부터"}</b> 통째로 삭제</>
+                              : <><b>자동 삭제 꺼짐</b> — 상한에 도달하면 더 받지 않습니다</>})
+                          </span>
+                        </span>
+                      </Row>
+                      {/* 용량 초과 시 자동 삭제 — 기준/알림. '보고 있는 검사는 삭제하지 않는다'는
+                          보호 규칙(dlScheduler.protectedUids)을 여기서 명시한다. */}
+                      <Row label="자동 삭제">
+                        <span style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <input type="checkbox" checked={dl.autoEvict}
+                                   onChange={(e) => setDl({ ...dl, autoEvict: e.target.checked })} />
+                            상한을 넘으면 자동으로 삭제
+                          </label>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, opacity: dl.autoEvict ? 1 : 0.45 }}>
+                            <input type="radio" name="dlevict" disabled={!dl.autoEvict}
+                                   checked={dl.evictBy === "date"}
+                                   onChange={() => setDl({ ...dl, evictBy: "date" })} />
+                            과거 검사일부터 (기본)
+                          </label>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, opacity: dl.autoEvict ? 1 : 0.45 }}>
+                            <input type="radio" name="dlevict" disabled={!dl.autoEvict}
+                                   checked={dl.evictBy === "lru"}
+                                   onChange={() => setDl({ ...dl, evictBy: "lru" })} />
+                            오래 안 본 검사부터
+                          </label>
+                        </span>
+                      </Row>
+                      <Row label="">
+                        <span style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                          삭제 단위는 <b>검사 하나 통째로</b>입니다(반쪽 검사가 남으면 빠르다는 체감이 깨집니다).
+                          <b> 지금 보고 있는 검사와 받는 중인 검사는 삭제하지 않습니다.</b>
+                          {" "}검사일을 알 수 없는 검사는 <b>가장 나중에</b> 삭제합니다.
+                          <br />⚠ 자동 삭제를 끄면 상한에 도달한 순간부터 <b>더 받지 않습니다</b>. 계속 받다가
+                          브라우저 할당량이 차면 브라우저가 받아 둔 영상을 <b>통째로 조용히</b> 지우기 때문입니다.
+                          {/* 용량 때문에 지운 검사를 자동으로 다시 받지 않는다는 것은 사용자가 알아야 할
+                              동작이다(진행률이 N/N 에 못 미치는 이유이기도 하다). 예전에는 10분 뒤 자동
+                              재다운로드가 돌아 같은 검사를 받고 지우기를 세션 내내 반복했다. */}
+                          <br />한 번 삭제한 검사는 <b>자동으로 다시 받지 않습니다</b> — 그 검사를 워크리스트에서
+                          열면 그때 다시 받습니다(상한·삭제 기준을 바꾸거나 [지금 비우기] 를 눌러도 초기화됩니다).
+                        </span>
+                      </Row>
+                      <Row label="상한 근접 알림">
+                        <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            <input type="checkbox" checked={dl.warnNearLimit}
+                                   onChange={(e) => setDl({ ...dl, warnNearLimit: e.target.checked })} />
+                            사용량이
+                          </label>
+                          <input type="number" min={50} max={99} value={dl.warnAtPct}
+                                 disabled={!dl.warnNearLimit}
+                                 style={{ width: 64, opacity: dl.warnNearLimit ? 1 : 0.45 }}
+                                 onChange={(e) => setDl({ ...dl,
+                                   warnAtPct: Math.min(99, Math.max(50, Math.round(Number(e.target.value) || 90))) })} />
+                          {/* ★ 문구가 곧 정책이다 — '넘으면 무조건 알림' 이라고 써 두면 자동 삭제가
+                              정상 작동해서 상한에 딱 맞춰진 상태(=착지값이 늘 100%)가 영구 경보가 된다.
+                              실제 규칙은 lib/dlQueueRule.shouldWarnNearLimit 이고, 알림의 의미는
+                              '곧 중지됩니다' 라는 **예고** 뿐이다. */}
+                          <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
+                            % 를 넘으면 알립니다 — <b>다운로드가 곧 중지될 때만</b> 뜹니다(자동 삭제가 꺼져 있거나,
+                            열려 있는 검사만으로 상한을 넘어 지울 것이 없을 때). 자동 삭제가 정상 작동 중이면
+                            사용량이 상한에 붙어 있는 것이 정상이라 알리지 않습니다.
+                            워크리스트 창에서 1회 — 판독 중인 뷰어 창에는 띄우지 않습니다.
                           </span>
                         </span>
                       </Row>
@@ -1102,6 +1196,15 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                             {dlUse
                               ? `${(dlUse.bytes / 1073741824).toFixed(2)} GB · 검사 ${dlUse.studies}건 · 파일 ${dlUse.files}개`
                               : "확인 전"}
+                            {/* 실효 상한 대비 비율 — 축출은 이 값에서 일어난다(설정값이 아니라). */}
+                            {dlUse && dlLimit > 0 && (
+                              <b style={{ marginLeft: 8,
+                                          color: dlUse.bytes / dlLimit >= dl.warnAtPct / 100
+                                            ? "var(--warn, #f59e0b)" : "inherit" }}>
+                                실효 상한 {(dlLimit / 1073741824).toFixed(2)} GB 의{" "}
+                                {Math.round((dlUse.bytes / dlLimit) * 100)}%
+                              </b>
+                            )}
                           </span>
                           <button type="button" disabled={dlBusy}
                                   onClick={() => { setDlBusy(true); void opfsUsage().then(setDlUse).finally(() => setDlBusy(false)); }}>
@@ -1134,6 +1237,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                                   (dlProg.current ? ` · 현재: ${dlProg.current}` : "")
                                 : (dlProg.note || "대기 중 — 저장 후 워크리스트에서 시작됩니다."))
                             : "—"}
+                          {/* ★ running=true 라도 사유(note)가 있으면 반드시 보여 준다 — 상한 게이트로
+                              멈춘 동안에도 Web Lock 은 이 창이 쥐고 있어 running 은 참이다. 사유를
+                              숨기면 '받는 중인데 아무 일도 안 일어난다'는 진단 불가 화면이 된다. */}
+                          {dlProg?.running && dlProg.note && (
+                            <><br /><b style={{ color: "var(--warn, #f59e0b)" }}>{dlProg.note}</b></>
+                          )}
                           <br />창을 여러 개 열어도 <b>다운로드는 한 창에서만</b> 돕니다(같은 영상을 두 번 받지 않도록).
                         </span>
                       </Row>
@@ -2600,7 +2709,17 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       <option value="current">현재 모니터 뷰어만 닫기</option>
                     </select>
                     <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                      뷰어의 <b>All Close ✕</b> 클릭 시
+                      뷰어의 <b>All Close ✕</b>·<b>WORKLIST</b>·<b>Esc</b>·마지막 Exam 탭 <b>✕</b> 등 창이 닫히는 모든 경우
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5 }}>
+                      <input type="checkbox" checked={closeReport}
+                             onChange={(e) => setCloseReport(e.target.checked)} />
+                      All Close 시 <b>판독창</b>도 함께 닫기
+                    </label>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      기본 <b>끔</b> — 판독 원고는 자동 저장이 없습니다. 켜더라도 <b>저장하지 않은 입력이 있으면 닫지 않습니다</b>.
                     </span>
                   </div>
                   {(() => {
@@ -2858,8 +2977,21 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         <div style={{ padding: "9px 14px", borderTop: "1px solid var(--border)", display: "flex", gap: 8, alignItems: "center", background: "var(--bg-elevated)" }}>
           {saved && <span style={{ color: "var(--stat-final)", fontSize: 12 }}>{saved}</span>}
           <div style={{ flex: 1 }} />
-          <button className="primary" onClick={save}>OK (저장)</button>
-          <button onClick={onClose}>Cancel</button>
+          <button className="primary" disabled={saving}
+                  onClick={() => {
+                    setDirtySaved(false); setSaving(true);
+                    // 성공했을 때만 라벨을 '닫기' 로 바꾼다 — 실패하면 Cancel 로 남아
+                    // "아직 저장 안 됐다" 가 버튼만 봐도 보인다.
+                    save()
+                      .then(() => setDirtySaved(true))
+                      .catch((e) => setSaved(`⚠ 저장 실패 — ${e instanceof Error ? e.message : String(e)}`))
+                      .finally(() => setSaving(false));
+                  }}>
+            {saving ? "저장 중…" : "OK (저장)"}
+          </button>
+          {/* 저장 전에는 Cancel(=버리고 나감), 저장이 **끝난 뒤에만** 닫기.
+              라벨이 곧 상태 표시다 — 아직 Cancel 이면 저장이 안 끝난 것이다. */}
+          <button onClick={onClose}>{dirtySaved ? "닫기" : "Cancel"}</button>
         </div>
       </div>
       </div>
