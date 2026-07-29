@@ -211,7 +211,16 @@ if security_api is not None:
 
 
 @app.get("/api/health")
-def health():
+async def health():
+    """생존 확인 — **async 여야 한다.**
+
+    sync 로 두면 FastAPI 가 anyio 스레드풀에서 돌린다. 그런데 이 백엔드는 단일 워커이고
+    픽셀 경로(rendered/thumb)가 원격 A 를 최대 60초씩 기다리므로, A 가 느려지면 스레드풀이
+    차서 **이 사소한 응답까지 줄에서 굶는다**. 실제로 그 일이 났다: 정적 페이지는 200 인데
+    /api/health 와 로그인만 무응답이라 "서버는 떠 있는데 로그인이 안 되는" 상태로 보였다.
+    이벤트 루프에서 바로 답하면 감시·로드밸런서가 적어도 **거짓말은 하지 않는다**.
+    (근본 해결은 A 호출을 세마포어로 묶어 스레드풀을 다 먹지 못하게 하는 것 — webpacs_live.)
+    """
     return {"status": "ok", "ai_mode": get_settings().ai_mode}
 
 

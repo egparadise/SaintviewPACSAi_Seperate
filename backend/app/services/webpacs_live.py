@@ -587,6 +587,33 @@ def _sop_lock(sop_uid: str):
     return _named_lock(_INFLIGHT, sop_uid)
 
 
+# ── 원격 A 동시 호출 상한 ──────────────────────────────────────────────────
+# 왜 필요한가: 이 백엔드는 **단일 워커**고 픽셀 핸들러는 sync 라 anyio 스레드풀(기본 40)에서
+# 돈다. A 가 느려지면 프레임 요청 하나가 최대 60초씩 스레드를 쥐는데, 뷰어는 타일마다
+# 요청을 날리므로 스레드풀이 통째로 찬다. 그러면 **DB 도 안 쓰는 /api/health 와 로그인까지**
+# 줄에서 굶어 "정적 페이지는 뜨는데 로그인이 안 되는" 상태가 된다 — 실제로 sv70 에서 났다.
+# 게다가 브라우저를 닫아도 서버 쪽 요청은 각자 타임아웃을 다 채우므로 먹통이 그 뒤까지 간다.
+#
+# 그래서 A 픽셀 취득의 동시 실행 수를 **스레드풀보다 확실히 작게** 묶는다. 남는 스레드가
+# 로그인·health·워크리스트 몫으로 항상 남는다. 상한을 넘으면 여기서 잠깐 기다릴 뿐
+# (프리페치는 어차피 백그라운드고, 화면 요청은 캐시 적중이 대부분이다).
+_A_SLOTS = int(os.getenv("SAINTVIEW_A_PIXEL_SLOTS", "12"))
+_a_gate = threading.BoundedSemaphore(max(1, _A_SLOTS))
+# 대기까지 무한정 하면 스레드를 잡고 있는 것은 마찬가지다 — 못 얻으면 포기하고 위로 알린다.
+_A_GATE_WAIT = float(os.getenv("SAINTVIEW_A_PIXEL_WAIT", "20"))
+
+
+@contextlib.contextmanager
+def a_pixel_slot():
+    """A 픽셀 취득 슬롯. 못 얻으면 WebPacsError 로 빠르게 실패한다(스레드를 놓아 준다)."""
+    if not _a_gate.acquire(timeout=_A_GATE_WAIT):
+        raise WebPacsError("원격 PACS 응답이 지연되어 동시 요청 상한에 걸렸습니다 — 잠시 후 다시 시도하세요")
+    try:
+        yield
+    finally:
+        _a_gate.release()
+
+
 def get_instance_bytes(client: WebPacsClient, study_uid: str, series_uid: str,
                        sop_uid: str, *, force: bool = False) -> bytes:
     p = _cache_path(sop_uid)
@@ -601,7 +628,10 @@ def get_instance_bytes(client: WebPacsClient, study_uid: str, series_uid: str,
                 return p.read_bytes()
             except OSError:
                 pass
-        data = client.instance_dicom(study_uid, series_uid, sop_uid)
+        # ★ 원격 취득만 슬롯으로 묶는다 — 캐시 적중 경로(위 두 곳)는 네트워크를 안 타므로
+        #   상한에 걸릴 이유가 없다. 여기서만 묶어야 '캐시에 있는데도 대기'가 생기지 않는다.
+        with a_pixel_slot():
+            data = client.instance_dicom(study_uid, series_uid, sop_uid)
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             # 원자적 쓰기 — 중단/디스크풀로 잘린 파일이 남아 영구 렌더 실패로 고착되는 것 방지.
