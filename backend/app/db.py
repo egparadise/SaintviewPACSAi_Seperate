@@ -19,7 +19,16 @@ def _make_engine():
     if settings.database_url.startswith("sqlite"):
         # check_same_thread=False: 워커/백업 스레드 공유. timeout: 동시 쓰기(백업 스레드)
         # 시 즉시 OperationalError 대신 락 대기(운영 Postgres는 무관).
+        # ⚠ SQLite 는 QueuePool 을 쓰지 않으므로 pool_size 를 주면 TypeError 다.
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    else:
+        # ⚠ 커넥션 풀이 스레드풀보다 작으면 **풀이 먼저 마른다.**
+        #   기본 QueuePool 은 5+10=15 인데 anyio 스레드풀은 40 이다. 핸들러 대부분이 sync 라
+        #   Depends(get_db) 로 잡은 커넥션을 원격(A) 왕복이 끝날 때까지 쥐고 있으므로,
+        #   A 가 느려지면 16번째 요청부터 **DB 와 무관한 관리자 로그인까지** 커넥션을 기다리다
+        #   30초 뒤 500 이 났다. 풀을 스레드풀보다 크게 잡아 그 대기를 원천 제거한다.
+        #   (단일 워커 계약이라 Postgres 기본 max_connections=100 안에서 안전하다.)
+        kwargs.update(pool_size=40, max_overflow=20, pool_timeout=5, pool_pre_ping=True)
     return create_engine(settings.database_url, **kwargs)
 
 

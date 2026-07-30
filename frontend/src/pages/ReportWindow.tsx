@@ -6,6 +6,7 @@ import { onStudySync, onViewerCloseAll, postStudySync } from "../lib/sync";
 import { shouldCloseReportWindow } from "../lib/viewerClose";
 import { liveViewerSlots, noteViewerSlot } from "../lib/viewerSlots";
 import { dictationLabel, useDictation } from "../lib/useDictation";
+import { histThumbLimiter, limitedMap } from "../lib/netLimit";
 import { MicIcon } from "../components/MicIcon";
 
 type Tab = "read" | "hist" | "std" | "tpl";
@@ -30,7 +31,10 @@ function HistThumb({ examId }: { examId: number }) {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    api.seriesTree(examId).then((r) => {
+    // ⚠ 이 컴포넌트는 과거검사 **항목마다** 마운트된다. 예전에는 각자 즉시 seriesTree 를
+    //   쏘아 판독창을 여는 순간 전건이 한꺼번에 나갔다(검사 하나가 A 왕복 1+N회다).
+    //   공유 큐에 세워 동시 2건으로 묶는다 — 화면 위에서부터 차례로 채워진다.
+    void histThumbLimiter.run(() => api.seriesTree(examId)).then((r) => {
       const s = r.series.find((x) => x.instances.length);
       const inst = s?.instances[Math.floor((s.instances.length - 1) / 2)];
       if (alive) setUrl(inst?.preview_url ?? null);
@@ -83,12 +87,18 @@ export function ReportWindow() {
   useEffect(() => {
     if (!detail) return;
     let alive = true;
-    detail.related_exams.slice(0, 12).forEach((e) => {
-      if (pastTexts[e.id] !== undefined) return;
-      api.reports(e.id).then((rr) => {
+    // ⚠ 예전에는 12건을 **동시에** 쏘았다. 검사마다 A 왕복이라 판독창을 여는 순간
+    //   수십 건이 한꺼번에 나가 서버 스레드풀을 통째로 먹었다. 2건씩 순차로 받는다 —
+    //   화면은 어차피 위에서부터 읽으므로 체감 차이가 없다.
+    const todo = detail.related_exams.slice(0, 12).filter((e) => pastTexts[e.id] === undefined);
+    void limitedMap(todo, 2, async (e) => {
+      try {
+        const rr = await api.reports(e.id);
         const fin = rr.items.find((x) => x.status === "finalized") ?? rr.items[0];
         if (alive) setPastTexts((m) => ({ ...m, [e.id]: fin?.narrative_text ?? "" }));
-      }).catch(() => { if (alive) setPastTexts((m) => ({ ...m, [e.id]: "" })); });
+      } catch {
+        if (alive) setPastTexts((m) => ({ ...m, [e.id]: "" }));
+      }
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps

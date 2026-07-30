@@ -665,6 +665,54 @@ def a_preview_slot():
         _a_preview_gate.release()
 
 
+# ── A 메타데이터 조회 상한 ─────────────────────────────────────────────────
+# 픽셀도 썸네일도 아닌 **조회**(검사 상세·판독문·시리즈 트리)가 상한 밖에 남아 있었다.
+# 그런데 판독 도크가 5초마다 live_state 를 폴링하고 그것이 A 를 2회 부른다 — 창이 여럿이면
+# 이 조회만으로 스레드풀이 찬다. 실제 증상: "영상도 못 열고 로그인도 안 되다가 한참 뒤 복구".
+#
+# 세 게이트를 **따로** 둔다(합치면 우선순위가 뒤집힌다):
+#   픽셀 12(판독의가 기다리는 본 영상) · 프리뷰 8(썸네일) · 메타 8(조회)
+# 합계 28 < 스레드풀 40 — 남는 12 는 로그인·health 몫으로 항상 비워 둔다.
+_A_META_SLOTS = int(os.getenv("SAINTVIEW_A_META_SLOTS", "8"))
+_a_meta_gate = threading.BoundedSemaphore(max(1, _A_META_SLOTS))
+_A_META_WAIT = float(os.getenv("SAINTVIEW_A_META_WAIT", "3"))
+
+
+@contextlib.contextmanager
+def a_meta_slot(wait: float | None = None):
+    """A 조회 슬롯. 폴링은 짧게(기본 3초) 포기하고, 뷰어 오픈처럼 사람이 기다리는 것은 길게 준다."""
+    if not _a_meta_gate.acquire(timeout=_A_META_WAIT if wait is None else wait):
+        raise WebPacsError("원격 PACS 조회 동시 요청 상한 — 잠시 후 다시 시도하세요")
+    try:
+        yield
+    finally:
+        _a_meta_gate.release()
+
+
+# ── live_state 단기 캐시 ───────────────────────────────────────────────────
+# 판독 도크가 창마다 5초 간격으로 이 상태를 묻는다. A 왕복 2회짜리 조회를 창 수만큼 되풀이할
+# 이유가 없다 — 3초만 접어도 N창이 A 호출 1회로 합쳐진다.
+# ⚠ **캐시해도 되는 것과 안 되는 것을 가른다.** A 에서 온 검사상태·판독문 메타는 3초 묵어도
+#   무해하지만, '지금 누가 입력 중인가'(_report_typers_of)는 우리 메모리에 있는 실시간 값이라
+#   절대 캐시하지 않는다 — 판독 충돌 경고가 늦으면 두 사람이 같은 검사를 덮어쓴다.
+# ⚠ 키에 base_url 을 반드시 넣는다. vid 만 쓰면 A 서버가 바뀌었을 때 남의 서버 값이 나온다.
+_STATE_CACHE: OrderedDict[tuple[str, int], tuple[float, dict, dict]] = OrderedDict()
+_STATE_TTL = float(os.getenv("SAINTVIEW_LIVE_STATE_TTL", "3"))
+_STATE_MAX = 512
+_STATE_LOCK = threading.Lock()
+_STATE_INFLIGHT: dict[str, list] = {}
+
+
+def invalidate_live_state(vid: int | None = None) -> None:
+    """내 행위 직후(판독 저장·선점·해제)에는 즉시 최신을 보게 한다 — 3초를 기다리게 하지 않는다."""
+    with _STATE_LOCK:
+        if vid is None:
+            _STATE_CACHE.clear()
+        else:
+            for k in [k for k in _STATE_CACHE if k[1] == vid]:
+                _STATE_CACHE.pop(k, None)
+
+
 def get_instance_bytes(client: WebPacsClient, study_uid: str, series_uid: str,
                        sop_uid: str, *, force: bool = False) -> bytes:
     p = _cache_path(sop_uid)
@@ -1171,6 +1219,7 @@ def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = Fa
             except Exception:  # noqa: BLE001 — 해제 실패는 원 예외를 가리지 않는다
                 pass
         raise
+    invalidate_live_state(vid)   # 내가 저장한 결과는 폴링이 3초 기다리지 않게 즉시 반영
     return _report_out(vid, client.report_get(idx))
 
 
@@ -1192,13 +1241,43 @@ def _bridge_user_idx(db: Session) -> int | None:
 
 
 # ── 상태/presence (실시간 변경 감지 폴링용) ───────────────────────────────
-def live_state(db: Session, vid: int, me: str = "", user: dict | None = None) -> dict:
+def _state_source(db: Session, vid: int, user: dict | None) -> tuple[dict, dict, object]:
+    """A 에서 온 부분(검사 상세·판독문) — 3초 캐시 + 단일비행.
+
+    같은 검사를 여러 창이 동시에 물어도 A 왕복은 한 번만 나간다. 캐시가 없던 때는
+    창 하나가 5초마다 A 를 2회 불렀고, 그것이 스레드풀을 마르게 한 주범이었다.
+    """
     client = live_client(db, user)
-    idx = to_remote_idx(vid)
-    r = client.study_detail(idx)
+    key = (getattr(client, "base_url", ""), vid)
+    now = time.time()
+    with _STATE_LOCK:
+        hit = _STATE_CACHE.get(key)
+        if hit and now - hit[0] < _STATE_TTL:
+            return hit[1], hit[2], client
+    # 미스 — 같은 키는 한 스레드만 A 를 친다(나머지는 그 결과를 받는다)
+    with _named_lock(_STATE_INFLIGHT, f"{key[0]}|{vid}"):
+        with _STATE_LOCK:
+            hit = _STATE_CACHE.get(key)
+            if hit and time.time() - hit[0] < _STATE_TTL:
+                return hit[1], hit[2], client
+        idx = to_remote_idx(vid)
+        with a_meta_slot():                       # 조회 상한 안에서만 원격을 친다
+            r = client.study_detail(idx)
+            report = client.report_get(idx) or {}
+        with _STATE_LOCK:
+            _STATE_CACHE[key] = (time.time(), r, report)
+            _STATE_CACHE.move_to_end(key)
+            while len(_STATE_CACHE) > _STATE_MAX:
+                _STATE_CACHE.popitem(last=False)
+    return r, report, client
+
+
+def live_state(db: Session, vid: int, me: str = "", user: dict | None = None) -> dict:
+    r, report, _client = _state_source(db, vid, user)
     ss = str(r.get("study_status") or "").upper()
     status, read_state, locked = _map_status(ss)
-    report = client.report_get(idx)
+    # ★ 여기부터는 **캐시하지 않는다** — '지금 누가 입력 중인가' 는 실시간이어야 한다.
+    #   판독 충돌 경고가 늦으면 두 사람이 같은 검사를 덮어쓴다.
     # "다른 사람이 작성 중" 서버 판정(프론트 이름 매칭 불필요):
     #  A 판독의가 RI 선점 + 나(내 A user_idx)가 아님, 또는 다른 B 사용자가 판독창 입력 중.
     my_idx = a_user_idx_of(user) if has_user_a_session(user) else _bridge_user_idx(db)

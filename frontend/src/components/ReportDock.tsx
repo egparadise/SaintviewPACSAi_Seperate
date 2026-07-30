@@ -4,6 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { PERM_DENIED_TIP, api, hasPerm, isLiveId, loadPermMe, type PermMe, type PhraseRow, type Report, type StudyDetail } from "../api";
 import { dictationLabel, useDictation } from "../lib/useDictation";
+import { pollWithGuard } from "../lib/netLimit";
 import { MicIcon } from "./MicIcon";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
@@ -55,14 +56,16 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     liveBaselineRef.current = null;
     if (!live) { setLiveState(null); return; }
     let stop = false;
-    const poll = () => api.liveState(detail.id).then((s) => {
+    // ⚠ setInterval 로 그냥 5초마다 쏘면 **직전 요청이 안 끝나도 또 나간다.**
+    //   A 가 5초보다 느려지면 요청이 겹쳐 쌓이고, 백엔드는 요청당 스레드 하나라
+    //   느려질수록 더 쌓이는 양의 되먹임이 된다 — 서버가 통째로 굶은 실제 원인이다.
+    const h = pollWithGuard(async () => {
+      const s = await api.liveState(detail.id);
       if (stop) return;
       setLiveState(s);
       if (liveBaselineRef.current === null) liveBaselineRef.current = s.report_updated;   // 최초 관측=baseline
-    }).catch(() => {});
-    poll();
-    const t = window.setInterval(poll, 5000);
-    return () => { stop = true; window.clearInterval(t); };
+    }, 5000);
+    return () => { stop = true; h.stop(); };
   }, [detail.id, live]);
   const liveOtherWriting = !!(live && liveState?.other_writing);
   const liveExternalUpdate = !!(live && liveState && liveBaselineRef.current !== null

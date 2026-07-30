@@ -201,14 +201,18 @@ def state(vid: int, db: Session = Depends(get_db), user: dict = Depends(current_
 def claim(vid: int, db: Session = Depends(get_db),
           user: dict = Depends(require_effective("report.write"))):
     """판독 작성중 선점(A change_status/report — RI). 타 판독의 작성중=409."""
-    return _wrap(lambda: live.live_client(db, user).change_status(live.to_remote_idx(vid), "report"))
+    out = _wrap(lambda: live.live_client(db, user).change_status(live.to_remote_idx(vid), "report"))
+    live.invalidate_live_state(vid)      # 내가 방금 바꾼 상태는 즉시 보여야 한다
+    return out
 
 
 @router.post("/studies/{vid}/release")
 def release(vid: int, db: Session = Depends(get_db),
             user: dict = Depends(require_effective("report.write"))):
     """선점 해제(A change_status/end → 대기 E). 저장 없이 닫을 때."""
-    return _wrap(lambda: live.live_client(db, user).change_status(live.to_remote_idx(vid), "end"))
+    out = _wrap(lambda: live.live_client(db, user).change_status(live.to_remote_idx(vid), "end"))
+    live.invalidate_live_state(vid)
+    return out
 
 
 class HeartbeatBody(BaseModel):
@@ -423,21 +427,17 @@ def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(g
     if hit is not None:
         return Response(content=hit[0], media_type=hit[1],
                         headers={"Cache-Control": "private, max-age=86400"})
-    client = _wrap(lambda: live.service_client(db))
-    data = None
+    # ★ 미리보기 상한 **안**에서 가져온다(preview_bytes 가 rendered→thumbnail 폴백까지 한다).
+    #   예전에는 여기서 A 를 직접 불러 게이트 밖이었고, 썸네일이 시리즈마다 나가므로
+    #   스레드풀을 채우는 가장 쉬운 경로였다.
     try:
-        data = client.thumbnail(study_uid, series_uid, sop_uid)
+        data = live.preview_bytes(db, study_uid, series_uid, sop_uid)
     except WebPacsError:
         data = None
     if data:
         live.encoded_put(key, (data, "image/jpeg"))
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "private, max-age=86400"})
-    try:
-        img, media = _render_with_retry(db, study_uid, series_uid, sop_uid, None, None, "jpeg", 70)
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"썸네일 실패: {str(e)[:120]}")
-    return Response(content=img, media_type=media,
-                    headers={"Cache-Control": "private, max-age=3600"})
+    # ⚠ 원본을 받아 렌더하는 폴백을 두지 않는다 — 썸네일 한 장 때문에 판독의가 기다리는
+    #   진단 슬롯(12개)을 쓰게 되고, 그것이 본 영상 취득을 밀어낸다. 호출부는 404 를 처리한다.
+    raise HTTPException(status_code=404, detail="썸네일 없음")

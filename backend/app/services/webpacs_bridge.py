@@ -90,8 +90,15 @@ def get_bridge_config(db: Session) -> dict[str, Any]:
 class WebPacsClient:
     """webpacs_api REST + DICOMweb v2 클라이언트 (Bearer 자동 갱신)."""
 
+    # ⚠ 스칼라 timeout=60.0 은 '총 60초' 가 아니다 — connect/read/write/pool **각각** 60초라
+    #   최악의 경우 한 요청이 스레드를 3분 가까이 쥔다. 조회는 짧게 끊고, 대용량 픽셀 취득만
+    #   요청 단위로 read 를 늘린다(instance_dicom). 스칼라도 계속 받는다(기존 호출 호환).
+    DEFAULT_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=5.0)
+    PIXEL_TIMEOUT = httpx.Timeout(connect=3.0, read=60.0, write=10.0, pool=5.0)
+    LOGIN_TIMEOUT = httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=2.0)
+
     def __init__(self, base_url: str, user_id: str, password: str = "", *,
-                 verify_ssl: bool = True, timeout: float = 60.0,
+                 verify_ssl: bool = True, timeout: "float | httpx.Timeout | None" = None,
                  transport: httpx.BaseTransport | None = None,
                  token: str | None = None, refresh_token: str | None = None,
                  on_token: "callable | None" = None):
@@ -111,7 +118,8 @@ class WebPacsClient:
         # 병렬 이미지 로드가 각자 재로그인하면 서로의 토큰을 무효화하는 401 폭풍이 난다.
         # → 재인증을 락으로 직렬화 + "내가 쓴 토큰이 아직 유효할 때만" 재인증(중복 재인증 방지).
         self._auth_lock = threading.Lock()
-        kw: dict[str, Any] = {"base_url": self.base_url, "timeout": timeout}
+        kw: dict[str, Any] = {"base_url": self.base_url,
+                              "timeout": self.DEFAULT_TIMEOUT if timeout is None else timeout}
         if transport is not None:
             kw["transport"] = transport   # 테스트(ASGITransport) 주입
         else:
@@ -248,9 +256,16 @@ class WebPacsClient:
         return r
 
     def _request(self, method: str, path: str, *, params: dict | None = None,
-                 headers: dict[str, str] | None = None) -> httpx.Response:
-        """Bearer 부착 요청 — 401(토큰 만료/무효)이면 stale 판정 후 재로그인 1회 재시도."""
-        return self._authed(self._client.request, method, path, params=params, headers=headers)
+                 headers: dict[str, str] | None = None,
+                 timeout: "httpx.Timeout | float | None" = None) -> httpx.Response:
+        """Bearer 부착 요청 — 401(토큰 만료/무효)이면 stale 판정 후 재로그인 1회 재시도.
+
+        timeout 을 주면 그 요청에만 적용한다(대용량 픽셀 취득은 read 를 길게 잡아야 한다).
+        """
+        kw: dict[str, Any] = {"params": params, "headers": headers}
+        if timeout is not None:
+            kw["timeout"] = timeout
+        return self._authed(self._client.request, method, path, **kw)
 
     def _json(self, path: str, params: dict | None = None) -> dict:
         r = self._request("GET", path, params=params)
@@ -293,6 +308,7 @@ class WebPacsClient:
             "GET",
             f"/api/dicomweb/v2/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}",
             headers={"Accept": "application/dicom"},
+            timeout=self.PIXEL_TIMEOUT,     # 수 MB 전송 — 조회용 read=10s 로는 모자란다
         )
         if r.status_code != 200:
             raise WebPacsError(f"인스턴스 다운로드 실패 {sop_uid}: HTTP {r.status_code}")

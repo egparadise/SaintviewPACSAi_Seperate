@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import jwt as pyjwt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -247,14 +248,24 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
         raise HTTPException(status_code=400, detail="원격 PACS 주소가 설정되지 않았습니다 (설정>WebPACS)")
 
     # A 자격 검증 — 실패는 B 로그인 실패와 동일 처리(계정·IP 잠금 카운터)
+    # ⚠ 로그인 전용 짧은 타임아웃 — 기본(read 10s)보다 더 짧게. 여기서 오래 기다리면
+    #   사용자가 버튼을 다시 누르고, 클릭마다 스레드가 하나씩 더 묶여 상황이 악화된다.
     client = WebPacsClient(base_url, body.user_id, body.user_passwd,
-                           verify_ssl=bool(cfg.get("verify_ssl", True)))
+                           verify_ssl=bool(cfg.get("verify_ssl", True)),
+                           timeout=WebPacsClient.LOGIN_TIMEOUT)
     try:
         try:
             a = client.login()
         except WebPacsError as e:
             security_service.record_login_failure(db, body.user_id, ip)
             raise HTTPException(status_code=401, detail=f"원격 PACS 로그인 실패: {str(e)[:160]}")
+        except httpx.HTTPError as e:
+            # ⚠ 예전에는 이걸 안 잡아 **500** 이 났다(60초 뒤에). 게다가 잠금 카운터도 안 올라
+            #   재시도 폭주를 막을 브레이크가 없었다.
+            #   A 장애는 **자격 실패가 아니다** — 카운터를 올리면 A 복구 후 전원이 잠긴다.
+            #   그래서 카운터는 건드리지 않고 503 으로 '서버 문제' 임을 분명히 알린다.
+            raise HTTPException(status_code=503,
+                                detail=f"원격 PACS 응답 없음 — 잠시 후 다시 시도하세요 ({type(e).__name__})")
         udata = a.get("user_data") or {}
         a_user_idx = udata.get("user_idx")
         a_name = str(udata.get("user_name") or udata.get("user_id") or body.user_id)
