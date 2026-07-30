@@ -640,6 +640,31 @@ def a_pixel_slot():
         _a_gate.release()
 
 
+# ── 미리보기·썸네일 전용 상한 ──────────────────────────────────────────────
+# 위 상한을 만들 때 **이 경로를 빼먹었다.** 그런데 스레드풀을 채우는 것은 오히려 이쪽이 쉽다:
+# 원본 취득은 SOP 하나당 한 번이지만 썸네일은 **시리즈마다·타일마다** 나가고 캐시 적중률도 낮다.
+# A 가 느려지면 여기서 스레드풀이 차 로그인·health 가 다시 굶는다(sv70 에서 났던 그 증상).
+#
+# 진단 경로와 **다른 세마포어**를 쓴다. 하나로 합치면 썸네일 폭주가 판독의가 기다리는
+# 본 영상 취득을 밀어낸다 — 우선순위가 뒤집힌다. 미리보기는 못 받으면 그냥 안 보이면 되고
+# (호출부가 404 로 처리한다), 본 영상은 반드시 받아야 한다.
+_A_PREVIEW_SLOTS = int(os.getenv("SAINTVIEW_A_PREVIEW_SLOTS", "8"))
+_a_preview_gate = threading.BoundedSemaphore(max(1, _A_PREVIEW_SLOTS))
+# 미리보기는 '빨리 보여 주는 것' 이 목적이라 오래 기다릴 이유가 없다 — 진단 경로보다 짧게 끊는다.
+_A_PREVIEW_WAIT = float(os.getenv("SAINTVIEW_A_PREVIEW_WAIT", "5"))
+
+
+@contextlib.contextmanager
+def a_preview_slot():
+    """A 미리보기/썸네일 취득 슬롯. 못 얻으면 WebPacsError(호출부가 404 로 접는다)."""
+    if not _a_preview_gate.acquire(timeout=_A_PREVIEW_WAIT):
+        raise WebPacsError("원격 PACS 미리보기 동시 요청 상한 — 잠시 후 다시 시도하세요")
+    try:
+        yield
+    finally:
+        _a_preview_gate.release()
+
+
 def get_instance_bytes(client: WebPacsClient, study_uid: str, series_uid: str,
                        sop_uid: str, *, force: bool = False) -> bytes:
     p = _cache_path(sop_uid)
@@ -683,14 +708,19 @@ def preview_bytes(db: Session, study_uid: str, series_uid: str, sop_uid: str) ->
     있는 그림이 이미 있다. 512 실패 시 128 썸네일이라도 준다(빈 화면보다 낫다).
     """
     client = service_client(db)
+    # ★ 원격 호출을 상한 안에서 한다 — 예전에는 이 두 호출이 세마포어 **밖**이라,
+    #   A 가 느려지면 썸네일 요청들이 스레드풀을 채워 로그인·health 가 굶었다.
+    #   (진단 경로와 다른 게이트다 — a_preview_slot 주석 참조)
     try:
-        data = client.rendered_preview(study_uid, series_uid, sop_uid)
+        with a_preview_slot():
+            data = client.rendered_preview(study_uid, series_uid, sop_uid)
         if data:
             return data
     except WebPacsError:
         pass
     try:
-        return client.thumbnail(study_uid, series_uid, sop_uid)
+        with a_preview_slot():
+            return client.thumbnail(study_uid, series_uid, sop_uid)
     except WebPacsError:
         return None
 

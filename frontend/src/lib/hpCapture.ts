@@ -265,8 +265,11 @@ export interface HpRuleFromScreenInput {
   screen: HpScreen;                   // 이 창에서 읽은 화면
   modality?: string;                  // 사양 2 — 지금 검사의 장비(대문자). 빈값이면 모든 장비
   wl?: string;                        // 구 필드(규칙 전체 W/L). 활성 페인 값을 그대로 쓴다
-  useOnExamOpen?: boolean;            // 사양 5 ①  ⚠ 뷰어 저장은 **기본 false**(아래 주석)
-  priority?: boolean;                 // 사양 6 '가장 우선 적용' — 기본 false
+  // ⚠ 아래 6개는 **undefined 를 '지정 안 함' 으로 구분한다** — base(덮어쓸 기존 규칙)가 있으면 그 값을
+  //   그대로 둔다. 예전엔 !!input.x 로 눌러 버려서, 설정에서 'Exam 열 때 HP 사용'·'전체 링크'를 켜 둔
+  //   규칙을 뷰어에서 같은 이름으로 다시 저장하면 **자동 적용되던 프로토콜이 조용히 수동 전용이 됐다**.
+  useOnExamOpen?: boolean;            // 사양 5 ①  ⚠ 새 규칙(base 없음)은 **기본 false**(아래 주석)
+  priority?: boolean;                 // 사양 6 '가장 우선 적용' — 새 규칙은 기본 false
   options?: { full_link?: boolean; full_scroll_sync?: boolean; cross_link?: boolean; scout_image?: boolean };
   base?: HpRule | null;               // 같은 이름의 기존 규칙(덮어쓰기) — 부위·출처 등 사용자가 설정에서 넣은 값 보존
 }
@@ -283,6 +286,8 @@ export function hpRuleFromScreen(input: HpRuleFromScreenInput): HpRule {
   const name = String(input.name ?? "").trim() || "내 프로토콜";
   const screens = mergeHpScreen(base?.screens, input.screen);
   const opt = input.options ?? {};
+  /** 지정 안 하면(undefined) base 값을 유지하고, base 도 없으면 새 규칙 기본값(false). */
+  const keep = (v: boolean | undefined, prev: boolean | undefined): boolean => (v === undefined ? !!prev : !!v);
   const patch: Partial<HpRule> = {
     name,
     modality: String(input.modality ?? "").trim().toUpperCase(),
@@ -290,15 +295,21 @@ export function hpRuleFromScreen(input: HpRuleFromScreenInput): HpRule {
     i: clampRC(input.screen.i),
     wl: input.wl ?? "",
     screens,
-    use_on_exam_open: !!input.useOnExamOpen,
-    priority: !!input.priority,
-    full_link: !!opt.full_link,
-    full_scroll_sync: !!opt.full_scroll_sync,
-    cross_link: !!opt.cross_link,
-    scout_image: !!opt.scout_image,
+    // 체크박스 6종 — 호출자가 **명시한 것만** 바뀐다(위 인터페이스 주석의 사고 참조).
+    // ⚠ use_on_exam_open 만 `!== false` 로 읽히는 3-값 필드다(readHpRule ④). base 가 undefined 면
+    //   undefined 그대로 둬야 '미지정=자동 적용'이라는 뜻이 안 바뀐다.
+    use_on_exam_open: input.useOnExamOpen === undefined
+      ? (base ? base.use_on_exam_open : false)
+      : !!input.useOnExamOpen,
+    priority: keep(input.priority, base?.priority),
+    full_link: keep(opt.full_link, base?.full_link),
+    full_scroll_sync: keep(opt.full_scroll_sync, base?.full_scroll_sync),
+    cross_link: keep(opt.cross_link, base?.cross_link),
+    scout_image: keep(opt.scout_image, base?.scout_image),
     source: "viewer",
   };
   // 덮어쓰기면 사용자가 Setting 에서 넣은 값(부위·출처·Projection·설명·id)을 **그대로 둔다**.
-  // 뷰어는 '화면 배치'만 갱신한다 — 여기서 base 를 버리면 설정에서 채운 매칭 조건이 사라진다.
+  // 뷰어가 갱신하는 것: 화면 배치(screens·s·i) · 장비 · W/L · **호출자가 명시한 체크박스**.
+  // 여기서 base 를 버리면 설정에서 채운 매칭 조건이 사라진다.
   return base ? { ...base, ...patch } : newHpRule(patch);
 }

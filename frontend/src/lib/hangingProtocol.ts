@@ -58,20 +58,37 @@ export function hpModalityOptions(extra?: readonly string[], rules?: readonly Hp
    사양이 예로 든 Protocol Code / Procedure Code / Procedure Step Description 은
    **우리 데이터 어디에도 없다**(백엔드가 그 태그를 읽지도, 저장하지도, 내려주지도 않는다).
    넣으려면 백엔드에서 태그 추출·컬럼 추가가 먼저다 — 그 전에는 UI 에 올리지 않는다. */
-export type HpPartField = "body_part" | "study_desc" | "order_name" | "series_desc";
+export type HpPartField = "body_part" | "study_desc" | "order_name" | "series_desc"
+                        | "protocol_name" | "procedure_code" | "step_desc";
 
 export const HP_PART_FIELDS: {
   key: HpPartField; label: string; tag: string; local: boolean; live: boolean; note: string;
 }[] = [
-  { key: "body_part",  label: "Body Part Examined", tag: "(0018,0015)", local: false, live: true,
-    note: "Live 전용 — 로컬(Orthanc) 검사는 이 값이 비어 있어 절대 걸리지 않는다" },
+  { key: "body_part",  label: "Body Part Examined", tag: "(0018,0015)", local: true, live: true,
+    note: "로컬·Live 양쪽 다 값이 있다. (2026-07-30 이전에 등록된 로컬 검사는 비어 있을 수 있다 —"
+        + " 그때는 register_study 호출부가 이 값을 넘기지 않았다. 재동기화하면 채워진다.)" },
   { key: "study_desc", label: "Study Description",  tag: "(0008,1030)", local: true,  live: true,
     note: "로컬·Live 양쪽 다 값이 있다 (권장)" },
   { key: "order_name", label: "Procedure Description (RIS 오더명)", tag: "(0032,1060)", local: true, live: false,
     note: "로컬에서 accession 이 오더와 매칭될 때만 — Live 검사는 비어 있다" },
   { key: "series_desc", label: "Series Description", tag: "(0008,103E)", local: true, live: true,
-    note: "검사의 모든 시리즈 설명을 합쳐서 본다" },
+    note: "검사의 모든 시리즈 설명을 합쳐서 본다 (뷰어가 시리즈를 받은 뒤 매칭한다)" },
+  // ↓ 사양 ③ 이 이름 댄 3개. 예전에는 백엔드가 이 태그를 읽지 않아 목록에서 빼 뒀다.
+  //   이제 OrthancClient.hanging_tags 가 시리즈 레벨에서 수집해 studies 컬럼에 저장하고
+  //   study detail 응답에 실어 준다(로컬 전용 — A(Live) 는 이 필드를 주지 않는다).
+  { key: "protocol_name", label: "Protocol Code (Protocol Name)", tag: "(0018,1030)", local: true, live: false,
+    note: "장비가 넣는 촬영 프로토콜명 — 로컬(Orthanc) 검사만. Live 검사는 비어 있다" },
+  { key: "procedure_code", label: "Procedure Code", tag: "(0040,1001)", local: true, live: false,
+    note: "Requested Procedure ID — 로컬(Orthanc) 검사만. Live 검사는 비어 있다" },
+  { key: "step_desc", label: "Procedure Step Description", tag: "(0040,0254)", local: true, live: false,
+    note: "Performed Procedure Step Description — 로컬(Orthanc) 검사만" },
 ];
+
+/** 사양 ③ 이 이름 댄 출처는 **전부 올라갔다**(2026-07-30). 예전에는 백엔드가 태그를 읽지 않아
+ *  Protocol Code · Procedure Code · Procedure Step Description 을 목록에서 빼고 이 상수로
+ *  '없는 이유' 를 화면에 띄웠다. 지금은 수집·저장·응답 경로가 다 붙었으므로 빈 문구다.
+ *  (남겨 두는 이유: 화면이 이 상수를 참조한다 — 비어 있으면 안내를 그리지 않는다.) */
+export const HP_PART_FIELDS_UNAVAILABLE = "";
 
 /** 새로 만드는 규칙의 기본 출처 — 로컬·Live 어느 쪽에서도 최소 하나는 값이 있게 둘을 켠다. */
 export const DEFAULT_HP_PART_FIELDS: HpPartField[] = ["body_part", "study_desc"];
@@ -110,7 +127,10 @@ export const HP_SLOT_LABEL: Record<HpSlotKind, string> = {
   "1m": "1개월 내",
   "1y": "1년 내",
   custom: "기간 직접 설정",
-  "3d": "3D 영상",
+  // ⚠ 라벨에 '(아직 미지원)' 을 박아 둔다 — 뷰어의 3D 는 페인이 아니라 뷰포트 전체를 바꾸므로 칸에
+  //   대응시킬 수 없고(lib/hpCapture.ts 머리말), hpPlanCells 가 skip:"3d" 로 건너뛴다. 라벨이
+  //   그냥 '3D 영상' 이면 고르고 저장한 뒤 뷰어를 열어야 '빈 칸'이라는 것을 알게 된다.
+  "3d": "3D 영상 (아직 미지원)",
 };
 export const HP_SLOT_UNIT_LABEL: Record<HpSlotUnit, string> = { d: "일", w: "주", m: "개월", y: "년" };
 
@@ -191,13 +211,11 @@ export function hpSlotStudies<T extends HpCandidate>(
   return s.kind === "prev" ? out.slice(0, 1) : out;
 }
 
-/** 한 칸이 쓸 검사 1건 (nth = 같은 슬롯을 쓰는 칸들 중 몇 번째 칸인가, 0-base). 없으면 null. */
-export function hpSlotPick<T extends HpCandidate>(
-  slot: HpSlot | undefined, anchorDate: string, candidates: readonly T[], nth = 0, currentId?: number,
-): T | null {
-  const list = hpSlotStudies(slot, anchorDate, candidates, currentId);
-  return list[Math.max(0, Math.floor(nth))] ?? null;
-}
+/* ⚠ 여기 있던 hpSlotPick(slot, anchor, cands, nth) 은 **지웠다**(제품 호출자 0건 · 테스트만 부르는 죽은 API).
+   '같은 슬롯을 쓰는 칸들 중 몇 번째'로 고르는 규칙은 실제 복원 경로와 뜻이 다르다 —
+   hpCapture.hpPlanCells 는 슬롯 종류를 **가리지 않고** used Set 으로 소진해야 prev 칸과 '1년 내' 칸에
+   같은 검사가 겹쳐 뜨지 않는다(hpCapture.ts:122-124). nth 기반으로 되돌리면 그 겹침이 되살아난다.
+   같은 함수가 다시 필요해 보이면 hpSlotStudies + 호출부의 소진 규칙을 쓰라. */
 
 /** 슬롯 한 줄 표기 — 편집기·툴팁 공용(기간 직접 설정은 값까지 보여야 무엇인지 안다). */
 export function hpSlotLabel(slot?: HpSlot): string {
@@ -319,6 +337,62 @@ export interface HpRule {
 
 /** viewer.hp 설정 문서 */
 export interface HpDoc { rules: HpRule[]; modalities: string[] }
+
+/* ══════════ 사양 5 — 체크박스 5개 (항목·라벨·'가로 1열' 최소 폭) ══════════
+   ⚠ 라벨을 설정 화면에 직접 적어 두지 않는다: 사양은 이 5개가 **가로 1열**이어야 한다고 못 박았는데,
+     그러려면 라벨 길이로 필요한 폭을 계산해 설정 창 폭을 그만큼 잡아야 한다. 라벨이 SettingsModal 에만
+     있으면 라벨을 늘려도 폭이 안 따라와 조용히 2~3줄로 접힌다(실제로 그 상태였다 — 기본 크기 860px
+     에서 편집 영역이 약 363px 뿐이라 다섯 라벨(≈416px)이 들어갈 자리가 애초에 없었다). */
+export const HP_OPTION_FIELDS: { key: keyof HpRule; label: string; desc: string }[] = [
+  { key: "use_on_exam_open", label: "Exam 열 때 HP 사용", desc: "검사 열 때 이 프로토콜을 자동 적용" },
+  { key: "full_link", label: "전체 링크", desc: "모든 페인을 함께 조작(동기)" },
+  { key: "full_scroll_sync", label: "전체 스크롤 동기화", desc: "페인 스크롤을 함께 이동" },
+  { key: "cross_link", label: "Cross Link", desc: "교차 해부학 위치 동기(다른 시리즈)" },
+  { key: "scout_image", label: "Scout 이미지", desc: "교차선(Scout) 표시" },
+];
+
+/** 체크박스 한 줄의 CSS 상수 — **SettingsModal 의 실제 style 과 같은 값이어야 한다**(주석이 아니라 계약).
+ *  itemChrome = 테두리 2 + 좌우 padding 8+8 + 체크박스 14 + 라벨 gap 6 */
+export const HP_OPTION_ROW = { fontPx: 12, itemChrome: 38, itemGap: 5 } as const;
+
+/** 설정 창에서 체크박스 행 **바깥**이 먹는 폭 — 모달 테두리·좌측 트리·스플리터·페이지 padding·
+ *  프로토콜 카드 목록·컬럼 gap·스크롤 여백. (SettingsModal 의 실제 값) */
+export const HP_EDITOR_CHROME = { border: 2, tree: 190, splitter: 5, pagePad: 32, cardList: 250, colGap: 14, scrollPad: 4 } as const;
+
+/** 라벨 한 줄의 픽셀 폭(보수적 추정). 한글=1em, 라틴=0.62em, 그 외(공백·기호)=0.4em.
+ *  ⚠ 실측(GDI+, Malgun Gothic Bold 12.5px)보다 **크게** 나오도록 잡았다 — 최소 폭 보장은
+ *    과대추정이 안전하다(과소추정하면 다시 접힌다). */
+export function hpTextWidth(s: string, fontPx = HP_OPTION_ROW.fontPx): number {
+  let w = 0;
+  for (const ch of String(s ?? "")) {
+    const c = ch.codePointAt(0) ?? 0;
+    // 한글(완성형·자모)·CJK·전각은 1em
+    const wide = (c >= 0x1100 && c <= 0x11ff) || (c >= 0x2e80 && c <= 0xa4cf)
+              || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff)
+              || (c >= 0xff00 && c <= 0xff60);
+    const latin = (c >= 0x21 && c <= 0x7e);
+    w += fontPx * (wide ? 1 : latin ? 0.62 : 0.4);
+  }
+  return w;
+}
+
+/** 체크박스 5개가 **한 줄**에 들어가려면 편집 영역이 최소 몇 px 이어야 하는가. */
+export function hpOptionRowMinWidth(fields: readonly { label: string }[] = HP_OPTION_FIELDS): number {
+  const text = fields.reduce((a, f) => a + hpTextWidth(f.label), 0);
+  return Math.ceil(text + fields.length * HP_OPTION_ROW.itemChrome
+                        + Math.max(0, fields.length - 1) * HP_OPTION_ROW.itemGap);
+}
+
+/** 그래서 설정 창(행잉 페이지)은 최소 몇 px 이어야 하는가 — SettingsModal 이 이 값으로 창 폭을 잡는다.
+ *  ⚠ 기본 폭 860px 으로는 **불가능**하다(편집 영역이 363px 밖에 안 남는다). 그래서 행잉 페이지에서만
+ *    창을 넓힌다. 좁은 화면(96vw 제한)에서는 여전히 접히지만 flexWrap 덕에 잘리지는 않는다. */
+export function hpSettingsMinWidth(
+  chrome?: Partial<Record<keyof typeof HP_EDITOR_CHROME, number>>,   // as const 라 리터럴 타입이 된다 → number 로 받는다
+): number {
+  const c = { ...HP_EDITOR_CHROME, ...(chrome ?? {}) };
+  const outside = c.border + c.tree + c.splitter + c.pagePad + c.cardList + c.colGap + c.scrollPad;
+  return Math.ceil((hpOptionRowMinWidth() + outside) / 10) * 10;
+}
 
 /** 새 규칙 한 건 — 기본값을 여기 한 곳에만 둔다(설정 화면·뷰어 '직접설정' 저장이 같은 것을 쓴다).
  *  ⚠ priority(가장 우선 적용)는 **반드시 false** 로 시작한다 — 사양이 "기본은 언체크".
@@ -470,8 +544,41 @@ export interface HpExam {
   body_part?: string;
   study_desc?: string;
   order_name?: string;
+  protocol_name?: string;
+  procedure_code?: string;
+  step_desc?: string;
   series_descs?: readonly string[];
   study_date?: string;
+}
+
+/** 뷰어가 matchHpRule 에 넘길 HpExam 을 만드는 **유일한 빌더**.
+ *
+ *  ⚠ 이 함수가 있어야 하는 이유(실제로 났던 사고): 두 뷰어가 각자 객체 리터럴로 exam 을 만들면서
+ *    **series_descs 를 아무도 넣지 않았다**. 그래서 설정 화면에서 'Series Description' 을 고를 수는
+ *    있는데(HP_PART_FIELDS 가 local·live 둘 다 true 로 올려 준다) 그 출처만 고른 규칙은 hpHaystack 이
+ *    "" 를 돌려주고 hpRuleMatches 의 `if (!hay) return false` 에 걸려 **어떤 검사에도 걸리지 않았다**.
+ *    순수 함수 테스트는 series_descs 를 손으로 먹여 초록이었다 — 제품 경로는 한 줄도 안 돌았다.
+ *    그래서 exam 을 만드는 곳을 여기 하나로 모으고, 뷰어 두 곳이 이것만 부른다(테스트가 이 함수와
+ *    '뷰어가 이 함수를 부르는가'를 함께 고정한다).
+ *
+ *  ⚠ series 는 **검사의 시리즈가 도착한 뒤** 넘겨야 한다. 비었으면 series_descs 는 undefined 로 둔다
+ *    (빈 배열을 넣어도 hpHaystack 결과는 같지만, '아직 모른다'와 '없다'를 호출부가 구분해야 한다). */
+export function hpExamOf(
+  detail: HpExam,
+  series?: readonly { series_desc?: string }[] | null,
+): HpExam {
+  const descs = (series ?? []).map((s) => String(s?.series_desc ?? "").trim()).filter(Boolean);
+  return {
+    modality: detail.modality,
+    body_part: detail.body_part,
+    study_desc: detail.study_desc,
+    order_name: detail.order_name,
+    protocol_name: detail.protocol_name,
+    procedure_code: detail.procedure_code,
+    step_desc: detail.step_desc,
+    study_date: detail.study_date,
+    ...(descs.length ? { series_descs: [...new Set(descs)] } : {}),
+  };
 }
 
 const up = (s: unknown) => String(s ?? "").toUpperCase();
@@ -486,6 +593,9 @@ export function hpHaystack(exam: HpExam, fields?: readonly HpPartField[]): strin
     else if (f === "study_desc") parts.push(up(exam.study_desc));
     else if (f === "order_name") parts.push(up(exam.order_name));
     else if (f === "series_desc") parts.push(up((exam.series_descs ?? []).join("\n")));
+    else if (f === "protocol_name") parts.push(up(exam.protocol_name));
+    else if (f === "procedure_code") parts.push(up(exam.procedure_code));
+    else if (f === "step_desc") parts.push(up(exam.step_desc));
   }
   return parts.filter(Boolean).join("\n");
 }

@@ -67,6 +67,21 @@ class FakeOrthanc:
         FakeOrthanc.uploaded.append(ds)
         return {"ParentStudy": f"fake-{str(ds.StudyInstanceUID)[-8:]}", "Status": "Success"}
 
+    def hanging_tags(self, sid: str) -> dict:
+        """HP 부위 출처(시리즈 레벨 태그) — 실제 클라이언트와 같은 모양으로 돌려준다.
+
+        업로드된 데이터셋에 값이 있으면 그것을, 없으면 빈 문자열. 실제 Orthanc 는
+        시리즈들을 훑어 처음 비어 있지 않은 값을 쓴다.
+        """
+        ds = FakeOrthanc.uploaded[-1] if FakeOrthanc.uploaded else None
+        g = lambda k: str(getattr(ds, k, "") or "") if ds is not None else ""  # noqa: E731
+        return {
+            "BodyPartExamined": g("BodyPartExamined"),
+            "ProtocolName": g("ProtocolName"),
+            "PerformedProcedureStepDescription": g("PerformedProcedureStepDescription"),
+            "RequestedProcedureID": g("RequestedProcedureID"),
+        }
+
     def study_metadata(self, sid: str) -> dict:
         ds = FakeOrthanc.uploaded[-1]
         return {

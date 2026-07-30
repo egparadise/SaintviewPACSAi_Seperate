@@ -34,6 +34,35 @@ _inflight_series: set[str] = set()
 #  webpacs_live 의 _prefetch_lock/_prefetching 이 이미 이 형태다. 같은 규칙을 지킨다.)
 _INFLIGHT_LOCK = threading.Lock()
 
+# ── 인코딩 동시 상한 ──────────────────────────────────────────────────────
+# get_frame 은 sync def 라 anyio 스레드풀(기본 40)에서 돈다. 온디맨드 인코딩 한 건은
+# Node 서브프로세스를 띄우므로 CPU 도 먹고 시간도 든다. 상한이 없으면 CT 시리즈를 한 번
+# 훑는 동작이 스레드풀을 통째로 채워 **로그인·health 까지 굶는다** —
+# webpacs_live 의 a_pixel_slot 을 만들게 한 그 증상과 같은 것이고, 이쪽만 빠져 있었다.
+_ENC_SLOTS = int(os.getenv("SAINTVIEW_HTJ2K_ENCODE_SLOTS", "4"))
+_enc_gate = threading.BoundedSemaphore(max(1, _ENC_SLOTS))
+_ENC_WAIT = float(os.getenv("SAINTVIEW_HTJ2K_ENCODE_WAIT", "15"))
+
+# ── 전송구문 판정 캐시 (sop → 비압축인가) ────────────────────────────────
+# ⚠ 왜 필요한가: 기압축 인스턴스는 프레임을 볼 때마다 **인스턴스 전체(수 MB)를 다시 받아**
+#   전송구문만 확인하고 버렸다. 판정 결과는 그 SOP 에 대해 불변이므로 한 번만 확인하면 된다.
+#   이 캐시가 기압축 검사(대부분의 외부 반입 데이터)의 스크롤 비용을 없앤다.
+_TS_UNCOMPRESSED: dict[str, bool] = {}
+_TS_LOCK = threading.Lock()
+_TS_MAX = 20000        # SOP 하나당 bool — 2만 개도 수 MB 미만. 넘으면 통째로 비운다(재학습은 저렴).
+
+
+def _ts_verdict(sop: str) -> bool | None:
+    with _TS_LOCK:
+        return _TS_UNCOMPRESSED.get(sop)
+
+
+def _ts_remember(sop: str, uncompressed: bool) -> None:
+    with _TS_LOCK:
+        if len(_TS_UNCOMPRESSED) >= _TS_MAX:
+            _TS_UNCOMPRESSED.clear()
+        _TS_UNCOMPRESSED[sop] = uncompressed
+
 
 def _atomic_write(dest: Path, data: bytes) -> None:
     """캐시 파일 원자 기록 — 같은 이름으로 직접 쓰면 **읽는 쪽이 빈 파일을 본다**.
@@ -181,6 +210,16 @@ def _pre_encode_series(series_uid: str) -> None:
             _inflight_series.discard(series_uid)
 
 
+def _proxy_frame(client, stu: str, ser: str, sop: str, frame: int) -> Response:
+    """기압축 인스턴스의 프레임을 Orthanc 에서 원본 전송구문 그대로 프록시."""
+    r = client._client.get(  # noqa: SLF001
+        f"/dicom-web/studies/{stu}/series/{ser}/instances/{sop}/frames/{frame}",
+        headers={"Accept": 'multipart/related; type="application/octet-stream"; transfer-syntax=*'})
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail="Orthanc 프레임 조회 실패")
+    return Response(content=r.content, media_type=r.headers.get("content-type", ""))
+
+
 @router.get("/studies/{stu}/series/{ser}/instances/{sop}/frames/{frame}")
 def get_frame(stu: str, ser: str, sop: str, frame: int,
               user: dict = Depends(current_user)):
@@ -193,19 +232,26 @@ def get_frame(stu: str, ser: str, sop: str, frame: int,
         return _multipart(cached.read_bytes())
     client = OrthancClient()
     try:
+        # ★ 기압축으로 이미 판정된 SOP 은 인스턴스 전체를 받지 않는다 — 프레임만 프록시한다.
+        #   예전에는 판정을 위해 매번 수 MB 를 내려받고 버렸다(프레임 볼 때마다).
+        if _ts_verdict(sop) is False:
+            return _proxy_frame(client, stu, ser, sop, frame)
         oid = _lookup(client, sop, "instance")
         raw = client.instance_file(oid)
         ds = pydicom.dcmread(io.BytesIO(raw))
         ts = str(ds.file_meta.TransferSyntaxUID)
-        if ts not in UNCOMPRESSED_TS:
+        uncompressed = ts in UNCOMPRESSED_TS
+        _ts_remember(sop, uncompressed)
+        if not uncompressed:
             # 이미 압축된 원본 — Orthanc 프레임을 원본 전송구문 그대로 프록시(클라이언트 코덱이 디코딩)
-            r = client._client.get(  # noqa: SLF001
-                f"/dicom-web/studies/{stu}/series/{ser}/instances/{sop}/frames/{frame}",
-                headers={"Accept": 'multipart/related; type="application/octet-stream"; transfer-syntax=*'})
-            if r.status_code != 200:
-                raise HTTPException(status_code=502, detail="Orthanc 프레임 조회 실패")
-            return Response(content=r.content, media_type=r.headers.get("content-type", ""))
-        cs = encode_frame(ds, frame - 1)
+            return _proxy_frame(client, stu, ser, sop, frame)
+        # 인코딩은 동시 상한 안에서 — 상한이 없으면 스크롤 한 번이 스레드풀을 다 먹는다
+        if not _enc_gate.acquire(timeout=_ENC_WAIT):
+            raise HTTPException(status_code=503, detail="HTJ2K 인코딩 대기 상한 — 잠시 후 다시 시도하세요")
+        try:
+            cs = encode_frame(ds, frame - 1)
+        finally:
+            _enc_gate.release()
         if cs is None:
             raise HTTPException(status_code=500, detail="HTJ2K 인코딩 실패")
         CACHE.mkdir(parents=True, exist_ok=True)

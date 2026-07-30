@@ -12,14 +12,18 @@
  * 실행: node --test frontend/tests/hp_rule.test.mjs
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  DEFAULT_HP_PART_FIELDS, DEFAULT_HP_SLOT, HP_MODALITY_PRESETS, HP_PART_FIELDS, HP_SLOTS,
+  DEFAULT_HP_PART_FIELDS, DEFAULT_HP_SLOT, HP_EDITOR_CHROME, HP_MODALITY_PRESETS, HP_OPTION_FIELDS, HP_PART_FIELDS, HP_PART_FIELDS_UNAVAILABLE, HP_SLOTS,
   HP_SLOT_LABEL, LEGACY_HP_PART_FIELDS, fitHpCells,
-  hpHaystack, hpModalityOptions, hpPartFieldGaps, hpPartTerms, hpRuleMatches, hpRuleOrder, hpScreensFromMonitors,
-  hpSlotCutoff, hpSlotDays, hpSlotIsPrior, hpSlotLabel, hpSlotPick, hpSlotStudies,
+  hpExamOf, hpHaystack, hpModalityOptions, hpOptionRowMinWidth, hpPartFieldGaps, hpPartTerms,
+  hpRuleMatches, hpRuleOrder, hpScreensFromMonitors, hpSettingsMinWidth,
+  hpSlotCutoff, hpSlotDays, hpSlotIsPrior, hpSlotLabel, hpSlotStudies,
   matchHpRule, newHpRule, readHpDoc, readHpRule, readHpSlot, syncHpLegacy, writeHpDoc,
 } from "../src/lib/hangingProtocol.ts";
+
+const src = (p) => readFileSync(new URL(p, import.meta.url), "utf8");
 
 /* ══════════ ① 기존 저장값 보존 ══════════ */
 
@@ -124,6 +128,40 @@ test("② 고른 출처에서만 찾는다 — order_name/series_desc 포함", (
   assert.equal(hpRuleMatches({ ...base, body_part_fields: ["body_part", "order_name"] }, local), true);
 });
 
+/* ⚠ 위 테스트는 series_descs 를 **손으로** 먹인다 — 순수 함수만 맞으면 통과한다.
+   실제로 제품은 그 값을 아무도 안 넣어서 'Series Description' 을 고른 규칙이 어떤 검사에도
+   걸리지 않았다(공허한 초록). 아래 두 테스트가 그 구멍을 막는다:
+   ① 뷰어가 쓰는 빌더(hpExamOf)가 series_descs 를 실제로 채우는가
+   ② 뷰어 두 곳이 그 빌더를 부르는가(객체 리터럴로 되돌리면 깨진다) */
+
+test("② hpExamOf — 뷰어가 넘기는 HpExam 을 만드는 유일한 빌더가 series_descs 를 채운다", () => {
+  const detail = { modality: "CR", body_part: "", study_desc: "흉부 단순촬영",
+                   order_name: "", study_date: "20260729" };
+  const series = [{ series_desc: "SCOUT" }, { series_desc: " CHEST " }, { series_desc: "" },
+                  { series_desc: "CHEST" }];
+  const exam = hpExamOf(detail, series);
+  assert.deepEqual(exam.series_descs, ["SCOUT", "CHEST"], "공백 정리 + 빈값 제거 + 중복 제거");
+  assert.equal(exam.study_desc, "흉부 단순촬영");
+  assert.equal(exam.study_date, "20260729");
+  // 이 exam 이면 'Series Description' 단독 규칙이 **실제로 걸린다**
+  const r = readHpRule({ id: "x", name: "x", body_part: "CHEST", body_part_fields: ["series_desc"] });
+  assert.equal(hpRuleMatches(r, exam), true);
+  assert.equal(hpRuleMatches(r, hpExamOf(detail)), false, "시리즈를 안 넘기면(구 동작) 안 걸린다");
+  // '아직 모른다'(시리즈 도착 전)와 '없다'를 호출부가 구분할 수 있어야 한다
+  assert.equal(hpExamOf(detail).series_descs, undefined);
+  assert.equal(hpExamOf(detail, []).series_descs, undefined);
+  assert.equal(hpExamOf(detail, null).series_descs, undefined);
+});
+
+test("② 뷰어 두 곳이 hpExamOf 를 부른다 — 객체 리터럴로 되돌리면 여기서 깨진다", () => {
+  for (const f of ["../src/pages/Viewer2D.tsx", "../src/pages/ViewerInfi.tsx"]) {
+    const code = src(f);
+    assert.match(code, /matchHpRule\(\s*hpExamOf\(/, `${f}: matchHpRule 에 hpExamOf 결과를 넘겨야 한다`);
+    // 예전 모양(객체 리터럴로 modality/body_part/... 를 직접 나열)이 남아 있으면 series_descs 가 빠진다
+    assert.equal(/matchHpRule\(\s*\{/.test(code), false, `${f}: exam 을 리터럴로 만들지 않는다`);
+  }
+});
+
 test("② 출처 값이 서로 이어붙어 없던 부위가 생기면 안 된다", () => {
   // "CHEST" + "PA" 가 그냥 붙으면 "CHESTPA" 안에 "STPA" 같은 것이 생긴다 — 개행으로 끊는다
   const hay = hpHaystack({ study_desc: "CHEST", order_name: "PA" }, ["study_desc", "order_name"]);
@@ -140,23 +178,55 @@ test("② 부위 자유 입력은 쉼표/| 로 여러 값 = OR, 공백은 구분
   assert.equal(hpRuleMatches(r, { study_desc: "ABDOMEN" }), false);
 });
 
-test("② UI 에 올릴 출처는 우리 데이터에 실제로 값이 있는 4개뿐", () => {
-  assert.deepEqual(HP_PART_FIELDS.map((f) => f.key),
-    ["body_part", "study_desc", "order_name", "series_desc"]);
-  // body_part 는 로컬(Orthanc)에서 항상 비어 있다 — register_study 호출부가 아무도 안 채운다.
-  assert.equal(HP_PART_FIELDS.find((f) => f.key === "body_part").local, false);
-  // order_name 은 Live 에서 항상 "" 다 (webpacs_live._row_of).
-  assert.equal(HP_PART_FIELDS.find((f) => f.key === "order_name").live, false);
-  // study_desc 만 양쪽 다 값이 있다.
+test("② 사양 ③ 이 이름 댄 출처가 **전부** 목록에 있다", () => {
+  // 요구 원문: "Body Part : (들어오는 영상 정보의 DICOM Header 값 기준) …
+  //             Protocol Code / Procedure Code / Procedure Description / Procedure Step Description"
+  // 한동안 뒤 3개가 빠져 있었다 — 백엔드가 그 시리즈 레벨 태그를 읽지 않았기 때문이다.
+  // 이제 OrthancClient.hanging_tags → studies 컬럼 → study detail 로 붙었다.
+  const keys = HP_PART_FIELDS.map((f) => f.key);
+  for (const k of ["protocol_name", "procedure_code", "step_desc", "order_name"]) {
+    assert.ok(keys.includes(k), `사양이 이름 댄 출처가 없다: ${k}`);
+  }
+  // 이제 '없어서 못 올린 항목' 안내는 비어 있어야 한다
+  assert.equal(HP_PART_FIELDS_UNAVAILABLE, "", "빠진 출처가 없으면 안내 문구도 없다");
+  // 모든 항목은 local/live 중 최소 한쪽에 값이 있다고 선언해야 한다(둘 다 false 면 죽은 항목)
+  for (const f of HP_PART_FIELDS) {
+    assert.ok(f.local || f.live, `어디서도 값이 없는 출처를 올렸다: ${f.key}`);
+    assert.ok(f.tag && f.label && f.note, `설명이 빈 출처: ${f.key}`);
+  }
+  // body_part 는 이제 로컬에서도 채워진다(hanging_tags 가 BodyPartExamined 를 넘긴다)
+  assert.equal(HP_PART_FIELDS.find((f) => f.key === "body_part").local, true);
+  // order_name·신규 3개는 Live(A)에서 값이 없다 — A 응답에 그 필드가 없다
+  for (const k of ["order_name", "protocol_name", "procedure_code", "step_desc"]) {
+    assert.equal(HP_PART_FIELDS.find((f) => f.key === k).live, false, `${k} 는 Live 에서 값이 없다`);
+  }
   const sd = HP_PART_FIELDS.find((f) => f.key === "study_desc");
-  assert.ok(sd.local && sd.live);
+  assert.ok(sd.local && sd.live, "study_desc 는 양쪽 다 값이 있다");
+});
+
+test("② 새 출처들이 실제로 매칭에 쓰인다 — 목록에만 올리고 안 쓰면 죽은 항목이다", () => {
+  const exam = { modality: "CT", protocol_name: "CHEST HELICAL",
+                 procedure_code: "CT-CHEST-01", step_desc: "CHEST WITH CONTRAST" };
+  for (const [field, part] of [["protocol_name", "HELICAL"],
+                               ["procedure_code", "CT-CHEST"],
+                               ["step_desc", "CONTRAST"]]) {
+    const r = newHpRule({ body_part: part, body_part_fields: [field] });
+    assert.equal(hpRuleMatches(r, exam), true, `${field} 로 매칭되지 않는다`);
+    // 그 출처를 끄면 안 걸려야 한다(값이 다른 필드에서 새어 들어오면 안 된다)
+    const other = newHpRule({ body_part: part, body_part_fields: ["study_desc"] });
+    assert.equal(hpRuleMatches(other, exam), false, `${field} 값이 study_desc 로 새어 들어왔다`);
+  }
 });
 
 test("② 설정 화면 경고 판정 — '골라도 그쪽에서는 절대 안 걸리는' 조합을 집어낸다", () => {
-  // 구 저장본(=빈 배열)과 body_part 단독은 같은 상태다: 로컬(Orthanc)에서 절대 안 걸린다.
-  assert.deepEqual(hpPartFieldGaps(["body_part"]), { local: true, live: false });
-  assert.deepEqual(hpPartFieldGaps([]), { local: true, live: false }, "빈 배열은 구 저장본과 같은 취급");
-  assert.deepEqual(hpPartFieldGaps(undefined), { local: true, live: false });
+  // body_part 는 이제 로컬·Live 양쪽에서 채워진다(hanging_tags 가 시리즈에서 읽는다) → 구멍 없음.
+  // 구 저장본(=빈 배열)도 body_part 만 보므로 같은 판정이다.
+  assert.deepEqual(hpPartFieldGaps(["body_part"]), { local: false, live: false });
+  assert.deepEqual(hpPartFieldGaps([]), { local: false, live: false }, "빈 배열은 구 저장본과 같은 취급");
+  assert.deepEqual(hpPartFieldGaps(undefined), { local: false, live: false });
+  // 신규 3개는 Live 에서 값이 없다 — 그쪽 구멍을 집어내야 한다
+  assert.deepEqual(hpPartFieldGaps(["protocol_name"]), { local: false, live: true });
+  assert.deepEqual(hpPartFieldGaps(["procedure_code", "step_desc"]), { local: false, live: true });
   // order_name 은 Live 에서 항상 "" — 반대쪽 구멍
   assert.deepEqual(hpPartFieldGaps(["order_name"]), { local: false, live: true });
   // study_desc 를 넣으면 양쪽 다 값이 있다 = 경고 없음 (편집기가 이것을 권한다)
@@ -290,11 +360,16 @@ test("⑤ prev = 가장 최근 1건 (백엔드 period='prev' 와 같다)", () =>
   assert.equal(got[0].id, 101);
 });
 
-test("⑤ 같은 슬롯을 쓰는 칸들이 서로 다른 검사를 받는다(nth)", () => {
-  assert.equal(hpSlotPick({ kind: "1y" }, "20260729", CANDS, 0, 100).id, 101);
-  assert.equal(hpSlotPick({ kind: "1y" }, "20260729", CANDS, 1, 100).id, 102);
-  assert.equal(hpSlotPick({ kind: "1y" }, "20260729", CANDS, 9, 100), null, "모자라면 null(빈 칸)");
-  assert.equal(hpSlotPick({ kind: "prev" }, "20260729", CANDS, 1, 100), null, "prev 는 1건뿐");
+test("⑤ 칸 배정은 hpSlotStudies 목록을 소진해 쓴다 — nth 기반 hpSlotPick 은 없다(죽은 API 금지)", () => {
+  // 예전엔 hpSlotPick(slot, anchor, cands, nth) 이 있었지만 **제품 호출자가 0건**이었다.
+  // 실제 복원 경로(hpCapture.hpPlanCells)는 슬롯 종류를 가리지 않고 used Set 으로 소진한다 —
+  // nth 로 고르면 prev 칸과 '1년 내' 칸에 같은 검사가 뜬다. 뜻이 다른 API 를 남겨 두면 다음 사람이 쓴다.
+  const list = hpSlotStudies({ kind: "1y" }, "20260729", CANDS, 100);
+  assert.deepEqual(list.map((c) => c.id), [101, 102, 103, 104], "칸은 이 목록을 순서대로 소진한다");
+  assert.equal(list[9], undefined, "모자라면 빈 칸");
+  assert.equal(hpSlotStudies({ kind: "prev" }, "20260729", CANDS, 100)[1], undefined, "prev 는 1건뿐");
+  assert.equal(/export function hpSlotPick/.test(src("../src/lib/hangingProtocol.ts")), false,
+    "hpSlotPick 을 되살리려면 hpPlanCells 가 실제로 부르게 하고 소진 규칙을 맞춰라");
 });
 
 /* ══════════ ⑥ 장비 목록(고정 금지) ══════════ */
@@ -344,8 +419,32 @@ test("Series layout 을 바꾸면 칸 수가 따라온다 — 남는 칸은 잘�
 test("슬롯 콤보에 뜰 항목 = 사양 4-2 의 6개 + '현재 검사' — 편집기가 이 목록/라벨을 그대로 쓴다", () => {
   assert.deepEqual(HP_SLOTS, ["current", "prev", "1w", "1m", "1y", "custom", "3d"]);
   assert.deepEqual(HP_SLOTS.map((k) => HP_SLOT_LABEL[k]),
-    ["현재 검사", "바로 이전 영상", "1주 내", "1개월 내", "1년 내", "기간 직접 설정", "3D 영상"]);
+    ["현재 검사", "바로 이전 영상", "1주 내", "1개월 내", "1년 내", "기간 직접 설정", "3D 영상 (아직 미지원)"]);
+  // ⚠ 3D 칸은 hpPlanCells 가 skip:"3d" 로 건너뛴다(뷰어가 복원하지 못한다). 라벨이 그 사실을
+  //   말해 주지 않으면 사용자는 고르고 저장한 뒤 뷰어를 열어야 '빈 칸'이라는 것을 알게 된다.
+  //   3D 를 실제로 붙이는 날 이 라벨과 skip 을 함께 지워라.
+  assert.match(HP_SLOT_LABEL["3d"], /미지원/);
   assert.deepEqual(DEFAULT_HP_SLOT, { kind: "current" }, "칸의 기본은 현재 검사(열자마자 남의 날짜가 뜨면 안 된다)");
+});
+
+/* ══════════ 사양 5 — 체크박스 5개가 '가로 1열' 이 되는 최소 폭 ══════════ */
+
+test("사양 5 — 체크박스 5개 항목·라벨이 lib 에 있고, 설정 창이 한 줄에 담을 폭을 잡는다", () => {
+  assert.deepEqual(HP_OPTION_FIELDS.map((o) => o.key),
+    ["use_on_exam_open", "full_link", "full_scroll_sync", "cross_link", "scout_image"]);
+  const row = hpOptionRowMinWidth();
+  // 창 폭에서 체크박스 행이 못 쓰는 부분(트리·스플리터·패딩·카드 목록…)
+  const outside = Object.values(HP_EDITOR_CHROME).reduce((a, b) => a + b, 0);
+  // 기본 창 폭 860px 으로는 원리적으로 불가능하다 — 편집 영역이 약 363px 뿐이었다(=2~3줄로 접힘).
+  const editable860 = 860 - outside;
+  assert.ok(row > editable860, `860px 에서는 한 줄이 될 수 없다 (필요 ${row} > 가능 ${editable860})`);
+  // 그래서 행잉 페이지는 hpSettingsMinWidth() 로 연다 — 그 폭이면 실제로 담긴다.
+  const editable = hpSettingsMinWidth() - outside;
+  assert.ok(editable >= row, `hpSettingsMinWidth 가 한 줄을 담아야 한다 (${editable} < ${row})`);
+  // 좌측 트리를 넓히면 창도 그만큼 넓어져야 한다(트리 폭은 사용자가 드래그로 바꾼다)
+  assert.ok(hpSettingsMinWidth({ tree: 340 }) > hpSettingsMinWidth({ tree: 190 }));
+  // 설정 화면이 그 값을 실제로 쓰는가 — 안 쓰면 계산만 하고 창은 그대로다(죽은 함수 금지)
+  assert.match(src("../src/pages/SettingsModal.tsx"), /hpSettingsMinWidth\(\{ tree: treeW \}\)/);
 });
 
 test("fitHpCells — 편집기가 Series layout 을 바꿀 때 칸 배열을 맞춘다", () => {

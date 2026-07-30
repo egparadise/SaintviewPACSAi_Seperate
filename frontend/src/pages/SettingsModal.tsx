@@ -15,8 +15,10 @@ import {
   type CompareBasisKind, type CompareCfg, type ComparePeriod,
 } from "../lib/compareBasis";
 import {
-  HP_PART_FIELDS, HP_SLOTS, HP_SLOT_LABEL, HP_SLOT_UNIT_LABEL, fitHpCells, hpModalityOptions,
-  hpPartFieldGaps, hpRuleOrder, hpScreensFromMonitors, hpSlotLabel, newHpRule, readHpDoc, readHpSlot,
+  HP_OPTION_FIELDS, HP_OPTION_ROW, HP_PART_FIELDS, HP_PART_FIELDS_UNAVAILABLE, HP_SLOTS, HP_SLOT_LABEL,
+  HP_SLOT_UNIT_LABEL, fitHpCells, hpModalityOptions,
+  hpPartFieldGaps, hpRuleOrder, hpScreensFromMonitors, hpSettingsMinWidth, hpSlotLabel, newHpRule,
+  readHpDoc, readHpSlot,
   writeHpDoc, type HpCell, type HpPartField, type HpRule, type HpScreen, type HpSlotUnit,
 } from "../lib/hangingProtocol";
 import { CLIENT_VIEWERS, DEFAULT_CLIENT_VIEWER, DEFAULT_WL_PRESETS, HANG2D_MODS, TOOLBAR_DEFS, hang2dModLabel, hang2dViewerLabel, migrateHang2d, type Hang2dCell, type Hang2dPending, type WlPreset } from "../lib/viewerConfig";
@@ -772,7 +774,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         ...(maxed
           // flex 로 남는 폭을 쓴다 — 형제(Refresh)와 padding 을 자동으로 비켜 간다
           ? { flex: 1, minWidth: 0, height: "95vh" }
-          : { width: "min(860px, 96vw)", height: "min(580px, 92vh)",
+          // 행잉(HP) 페이지만 넓게 연다 — 사양 5 '체크박스 5개 가로 1열' 이 성립하는 최소 폭을
+          // lib/hangingProtocol.hpSettingsMinWidth() 가 라벨 길이 + 실제 크롬(좌측 트리 폭 포함)으로
+          // 계산한다(현재 값 1130px). 860px 로는 편집 영역이 363px 뿐이라 원리적으로 불가능했다.
+          // 화면이 좁으면 96vw 에서 멈추고 flexWrap 이 접는다(잘리지 않는다).
+          : { width: `min(${page === "hp" ? hpSettingsMinWidth({ tree: treeW }) : 860}px, 96vw)`,
+              height: "min(580px, 92vh)",
               // 우하단 핸들 드래그로 좌우·상하 크기 자유 조절(네이티브 resize)
               resize: "both" as const, minWidth: 640, minHeight: 420, maxWidth: "98vw", maxHeight: "95vh" }),
       }}>
@@ -3161,13 +3168,11 @@ function ReadingItemEditor({ kind, items, reload }: {
  *       · 4 모니터 배치(Series/Image 레이아웃 + 칸별 시간대 슬롯) · 5 체크박스 5개(가로 1열)
  *       · 6 '가장 우선 적용'(기본 언체크)
  *  규칙·판정은 전부 lib/hangingProtocol.ts 의 순수 함수다 — 여기는 화면만 그린다. */
-const HP_OPTIONS: { key: keyof HpRule; label: string; desc: string }[] = [
-  { key: "use_on_exam_open", label: "Exam 열 때 HP 사용", desc: "검사 열 때 이 프로토콜을 자동 적용" },
-  { key: "full_link", label: "전체 링크", desc: "모든 페인을 함께 조작(동기)" },
-  { key: "full_scroll_sync", label: "전체 스크롤 동기화", desc: "페인 스크롤을 함께 이동" },
-  { key: "cross_link", label: "Cross Link", desc: "교차 해부학 위치 동기(다른 시리즈)" },
-  { key: "scout_image", label: "Scout 이미지", desc: "교차선(Scout) 표시" },
-];
+/* 사양 5 의 5개 항목·라벨은 lib/hangingProtocol.HP_OPTION_FIELDS 에 있다.
+   ⚠ 여기 다시 적지 않는 이유: 사양이 '가로 1열' 을 요구하므로 **라벨 길이가 설정 창의 최소 폭을
+     정한다**(hpSettingsMinWidth). 라벨이 이 파일에만 있으면 라벨을 늘려도 창 폭이 안 따라와
+     조용히 2~3줄로 접힌다 — 실제로 그 상태였다. */
+const HP_OPTIONS = HP_OPTION_FIELDS;
 
 function HpProtocolEditor({ rules, modalities, monitors, monitorSel, onChange }: {
   rules: HpRule[];
@@ -3343,21 +3348,26 @@ function HpProtocolEditor({ rules, modalities, monitors, monitorSel, onChange }:
               </div>
 
               {/* 사양 5 — 체크박스 5개를 **가로 1열**로.
-                  ⚠ nowrap 로 박으면 설정 창을 좁히거나 최대화를 풀었을 때 오른쪽 항목이 잘려 나간다
-                    (설정 창이 잘리던 문제를 최근에 고쳤다). flexWrap 으로 넓을 때 1열, 좁으면 접힌다. */}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, margin: "16px 0 8px" }}>
+                  ⚠ 여기 style 상수(폰트 12 · 좌우 padding 8 · 체크박스 14 · 라벨 gap 6 · 항목 gap 5)는
+                    lib/hangingProtocol.HP_OPTION_ROW 와 **같은 값이어야 한다** — 그 값으로 계산한
+                    hpSettingsMinWidth() 로 이 페이지의 창 폭을 잡는다(아래 모달 width). 예전엔
+                    기본 폭 860px 에서 편집 영역이 약 363px 밖에 안 남아 다섯 라벨(≈416px)이 애초에
+                    한 줄에 들어갈 수 없었다 — flexWrap 이 잘림은 막았지만 사양대로 1열이 아니었다.
+                  ⚠ flexWrap 은 그대로 둔다: 창을 좁히거나 96vw 제한에 걸리면 접혀야 하고, nowrap 로
+                    박으면 오른쪽 항목이 잘려 나간다(예전에 고친 문제). */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: HP_OPTION_ROW.itemGap, margin: "16px 0 8px" }}>
                 {HP_OPTIONS.map((o) => {
                   const on = !!draft[o.key];
                   return (
                     <label key={String(o.key)} title={o.desc}
-                           style={{ display: "flex", alignItems: "center", gap: 7, padding: "9px 10px",
+                           style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 8px",
                                     flex: "1 1 auto", whiteSpace: "nowrap",
                                     border: `1px solid ${on ? "var(--accent)" : "var(--border)"}`,
                                     borderRadius: 8, cursor: "pointer", background: "var(--bg-canvas)" }}>
                       <input type="checkbox" checked={on}
                              onChange={(e) => upd({ [o.key]: e.target.checked } as Partial<HpRule>)}
-                             style={{ width: 16, height: 16, flexShrink: 0 }} />
-                      <span style={{ fontSize: 12.5, fontWeight: 600 }}>{o.label}</span>
+                             style={{ width: 14, height: 14, flexShrink: 0 }} />
+                      <span style={{ fontSize: HP_OPTION_ROW.fontPx, fontWeight: 600 }}>{o.label}</span>
                     </label>
                   );
                 })}
@@ -3461,6 +3471,14 @@ function HpPartFieldPicker({ value, onChange }: {
           {" "}<b>Study Description</b> 을 함께 켜면 로컬·Live 양쪽에서 찾습니다.
         </div>
       )}
+      {/* 사양이 이름을 댔지만 목록에 없는 출처가 **있을 때만** 안내한다.
+          지금은 전부 올라가 문구가 비어 있다 — 빈 문구로 빈 줄을 그리면 안 된다. */}
+      {HP_PART_FIELDS_UNAVAILABLE && (
+        <div style={{ marginTop: 7, fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>
+          · <b>{HP_PART_FIELDS_UNAVAILABLE}</b> 는 서버가 그 DICOM 태그를 저장하지 않아 목록에 없습니다
+          (올려 두면 고를 수는 있는데 <b>어떤 검사에도 걸리지 않는</b> 항목이 됩니다).
+        </div>
+      )}
       {!value?.length && (
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.5 }}>
           이 규칙은 예전 버전에서 저장된 것이라 출처가 <b>Body Part Examined 하나</b>로 읽혔습니다
@@ -3500,6 +3518,8 @@ function HpScreenEditor({ screens, monitors, monitorSel, onChange }: {
     cells: fitHpCells(undefined, { r: 1, c: 1 }),
   }]);
 
+  // 3D 칸이 하나라도 있으면 아래 경고를 띄운다(뷰어가 복원하지 못한다 — hpPlanCells 의 skip:"3d")
+  const has3d = screens.some((sc) => (sc.cells ?? []).some((c) => readHpSlot(c?.slot).kind === "3d"));
   // 모니터 콤보 — 감지된 목록이 있으면 그것을, 없으면 설정>모니터에서 뷰어로 고른 번호만이라도 보여 준다
   const monOpts = monitors.length
     ? monitors.map((m, i) => ({
@@ -3629,12 +3649,28 @@ function HpScreenEditor({ screens, monitors, monitorSel, onChange }: {
       <div style={{ display: "flex", justifyContent: "center", marginTop: 10 }}>
         <button onClick={add} style={{ fontSize: 11.5 }}>＋ 화면 추가</button>
       </div>
+      {/* 3D 칸은 저장은 되지만 뷰어가 복원하지 못한다 — **저장 전에** 알린다.
+          (예전에는 고르고 저장한 뒤 뷰어를 열어야 '빈 칸'이라는 것을 알 수 있었다) */}
+      {has3d && (
+        <div style={{ marginTop: 8, fontSize: 11, lineHeight: 1.55, borderRadius: 6, padding: "6px 9px",
+                      color: "#fbbf24", border: "1px solid rgba(251,191,36,0.5)", background: "rgba(251,191,36,0.10)" }}>
+          ⚠ <b>3D 영상</b>을 고른 칸이 있습니다 — 뷰어는 그 칸을 <b>빈 칸으로 두고</b> 상태줄에 알립니다.
+          뷰어의 3D 는 페인이 아니라 뷰포트 전체를 바꾸는 모드라 칸 하나에 대응시킬 수 없습니다.
+        </div>
+      )}
       <div style={{ fontSize: 10.5, color: "var(--text-secondary)", marginTop: 8, lineHeight: 1.6 }}>
         · 기간은 <b>오늘이 아니라 지금 보는 검사의 검사일</b>을 기준으로 거슬러 올라갑니다(같은 날 포함).
         1주=7일 · 1개월=30일 · 1년=365일(달력 월/년이 아닙니다 — 백엔드 비교 기준과 같습니다).<br />
         · 같은 시간대를 고른 칸이 여러 개면 <b>최신 순으로 한 건씩</b> 나뉘어 들어갑니다.<br />
-        · <b>지금 뷰어가 실제로 읽는 것은 첫 viewer 화면의 Series/Image 레이아웃뿐입니다.</b>
-        두 번째 모니터·칸별 시간대·3D 는 저장은 되지만 아직 화면에 반영되지 않습니다(뷰어 작업 예정).
+        {/* ⚠ 이 문단은 예전에 '두 번째 모니터·칸별 시간대·3D 는 아직 반영되지 않습니다' 라고
+            적혀 있었는데, 그 뒤 뷰어가 pickHpScreen(모니터별 화면) + hpPlanCells(칸별 시간대)를
+            실제로 적용하게 되면서 **거짓말이 됐다**. 안내가 '아직 안 된다'고 하면 사용자는 그 기능을
+            안 쓴다 — 동작이 바뀌면 이 문단도 같이 바꾼다(짝이 되는 규정은 lib/hpCapture.ts). */}
+        · <b>칸별 시간대와 모니터별 화면은 뷰어가 그대로 적용합니다.</b> 이 창의 모니터에 맞는 화면이
+        없으면 <b>모니터 미지정 화면 → 첫 viewer 화면</b> 순으로 폴백합니다. 조건에 맞는 과거검사가
+        없는 칸은 비워 두고 상태줄에 알립니다.<br />
+        · <b>3D 영상 칸만</b> 뷰어가 복원하지 않습니다(3D 는 페인이 아니라 뷰포트 전체를 바꾸므로
+        칸에 대응시킬 수 없습니다).
       </div>
     </div>
   );

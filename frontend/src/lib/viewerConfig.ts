@@ -296,7 +296,7 @@ export const TOOLBAR_DEFS: { section: string; items: { id: string; label: string
   // TY-3: 워크플로·연동 계열 (In Viewer 이식)
   { section: "Workflow Tools", items: [
     { id: "hist", label: "◀◯▶", desc: "작업 히스토리 — Undo/초기화/Redo (시각조정+주석 스냅샷 최대 50, 상단바)" },
-    { id: "xlink", label: "Link", desc: "Crosslink 5모드 — Off/AutoSync(같은 검사)/SyncOther(과거 포함)/Scout/AllLines" },
+    { id: "xlink", label: "Link", desc: "Crosslink — 독립 토글 5개: Crosslink(마스터)/AutoSync(같은 검사)/SyncOther(과거 포함)/Scout/AllLines(기준 축 전체)" },
     { id: "cursor3d", label: "3DC", desc: "3D Cursor — 클릭점을 다른 페인의 동일 3D 위치로 이동+십자 마커" },
     { id: "pcine", label: "▶p", desc: "페인별 시네 — 페인 호버 시 재생/정지+간격(초) 미니 컨트롤" },
     { id: "key2d", label: "Key", desc: "키이미지 등록/해제 — 현재 이미지 토글 (워크리스트 🔑 연동)" },

@@ -292,6 +292,10 @@ export interface StudyRow {
   source_aet: string;
   bookmark: boolean;
   order_name: string;
+  // 행잉 프로토콜 '부위 출처'(사양 ③) — 시리즈 레벨 DICOM 태그, 로컬(Orthanc) 검사만 값이 있다
+  protocol_name?: string;
+  procedure_code?: string;
+  step_desc?: string;
   // QC/판독 상태 (read_state 아이콘 — 서버 계산, 워크리스트 '판독' 컬럼)
   read_state?: "fixed" | "read" | "reading" | "open" | "unread";
   merged?: boolean;          // 병합(Merge)된 환자의 검사 — 이름 앞 병합 아이콘

@@ -541,6 +541,8 @@ def import_study(db: Session, cfg: dict[str, Any], remote_idx: int, *,
                 meta = orthanc.study_metadata(sid)
                 tags = meta.get("MainDicomTags", {})
                 ptags = meta.get("PatientMainDicomTags", {})
+                # 시리즈 레벨 HP 태그 — Orthanc 동기화 경로와 같은 것을 쓴다(부위가 비면 HP·Compare 가 죽는다)
+                _htags = orthanc.hanging_tags(sid)
                 register_study(
                     db,
                     study_uid=tags.get("StudyInstanceUID", ""),
@@ -554,6 +556,10 @@ def import_study(db: Session, cfg: dict[str, Any], remote_idx: int, *,
                     modality=tags.get("ModalitiesInStudy", "").split("\\")[0]
                     if tags.get("ModalitiesInStudy") else "",
                     study_desc=tags.get("StudyDescription", ""),
+                    body_part=_htags.get("BodyPartExamined", ""),
+                    protocol_name=_htags.get("ProtocolName", ""),
+                    procedure_code=_htags.get("RequestedProcedureID", ""),
+                    step_desc=_htags.get("PerformedProcedureStepDescription", ""),
                     institution=tags.get("InstitutionName", "")
                     or str(detail.get("hospital_name") or ""),
                     referring_physician=str(tags.get("ReferringPhysicianName", "")),

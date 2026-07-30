@@ -35,7 +35,7 @@ import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewe
 import { decideCloseScope, markViewerClosing, markViewerMounted, shouldCloseAllMonitors } from "../lib/viewerClose";
 import { clearViewerSlots, isViewerSlotName, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
-import { hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
+import { hpExamOf, hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
 import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pickHpScreen } from "../lib/hpCapture";
 import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
 // vdot/vsub 은 3D Cursor(가장 가까운 슬라이스 찾기, 아래 1720행대)가 아직 직접 쓴다 —
@@ -617,11 +617,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       //          규정은 lib/hangingProtocol.ts 의 matchHpRule 하나뿐이다 — 뷰어마다 find 를 복사하면 또 갈린다.
       const hpDoc = readHpDoc(hpRes.value);
       setHpRules(hpRuleOrder(hpDoc.rules));          // 행잉 콤보 순서 = 매칭 순서
-      const hpMatch = matchHpRule({
-        modality: detail.modality, body_part: detail.body_part,
-        study_desc: detail.study_desc, order_name: detail.order_name,
-        study_date: detail.study_date,
-      }, hpDoc.rules, { forExamOpen: true });
+      // ⚠ 매칭에 넘길 검사 정보는 lib 의 hpExamOf 하나로만 만든다 — 뷰어가 객체 리터럴로 만들던 때
+      //   **series_descs 를 아무도 안 넣어** 부위 출처 'Series Description' 을 고른 규칙이 어떤 검사에도
+      //   걸리지 않았다(설정 화면은 '로컬 ✓ Live ✓' 라고 말하고 있었다). I-View 는 이 시점에 검사별
+      //   시리즈(list)를 이미 갖고 있으므로 그대로 넘긴다.
+      const hpSeries = list.find((e) => e.d.id === detail.id)?.series;
+      const hpMatch = matchHpRule(hpExamOf(detail, hpSeries), hpDoc.rules, { forExamOpen: true });
       // ⑤ Key Image View: 주 검사의 시리즈를 키이미지 SOP 만 남긴 [KEY] 시리즈로 필터
       if (keySops?.length) {
         const prim = list.find((e) => e.d.id === detail.id);

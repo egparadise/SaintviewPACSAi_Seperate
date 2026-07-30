@@ -63,6 +63,46 @@ class OrthancClient:
         data.setdefault("MainDicomTags", {}).update(data.get("RequestedTags", {}))
         return data
 
+    # 행잉 프로토콜(HP)이 '부위' 를 찾을 때 볼 수 있는 DICOM 출처들.
+    # ⚠ 전부 **시리즈 레벨** 태그다 — 검사 레벨 MainDicomTags 에는 없어서, 이걸 안 읽는 동안
+    #   로컬(Orthanc) 검사의 body_part 는 **항상 빈 문자열**이었다. 그 결과
+    #   ① HP 의 Body Part 규칙이 로컬에서 한 번도 안 걸렸고
+    #   ② Compare 의 '부위' 체크가 로컬에서 항상 0건이었다(compare_basis 는 부위가 비면 [] 를 준다).
+    HANGING_TAGS = (
+        "BodyPartExamined",                    # (0018,0015)
+        "ProtocolName",                        # (0018,1030) — 사양 ③ 'Protocol Code'
+        "PerformedProcedureStepDescription",   # (0040,0254) — 사양 ③ 'Procedure Step Description'
+        "RequestedProcedureID",                # (0040,1001) — 사양 ③ 'Procedure Code'
+    )
+
+    def hanging_tags(self, orthanc_study_id: str) -> dict[str, str]:
+        """검사의 HP 부위 출처 태그 — 시리즈들을 한 번 조회해 **처음 비어 있지 않은 값**을 쓴다.
+
+        검사 안에서 시리즈마다 다를 수 있지만(예: CT 에 스카우트가 섞임) HP 규칙은 검사 단위로
+        걸리므로 대표값 하나면 된다. 값이 있는 첫 시리즈를 쓴다 — 빈 값보다 무엇이든 낫다.
+        요청은 1회(왕복 N+1 금지). requestedTags 미지원 구버전이면 MainDicomTags 만 본다.
+        """
+        out = dict.fromkeys(self.HANGING_TAGS, "")
+        try:
+            r = self._client.get(
+                f"/studies/{orthanc_study_id}/series",
+                params={"requestedTags": ";".join(self.HANGING_TAGS)},
+                timeout=60,
+            )
+            if r.status_code != 200:
+                return out
+            for s in r.json():
+                tags = {**s.get("MainDicomTags", {}), **s.get("RequestedTags", {})}
+                for k in self.HANGING_TAGS:
+                    if not out[k]:
+                        out[k] = str(tags.get(k) or "").strip()
+                if all(out.values()):
+                    break
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            # 이 태그가 없어도 검사 등록은 되어야 한다 — 조회 실패는 빈 값으로 접는다
+            logger.warning("hanging_tags 조회 실패(orthanc=%s) — 빈 값으로 등록", orthanc_study_id)
+        return out
+
     def study_source_aet(self, orthanc_study_id: str) -> str:
         """수신 RemoteAET (AETITLE 컬럼) — 첫 인스턴스 메타데이터에서 조회."""
         try:
@@ -275,6 +315,9 @@ def sync_new_studies(db, client: OrthancClient, since: int = 0) -> tuple[int, in
         meta = client.study_metadata(ch["ID"])
         tags = meta.get("MainDicomTags", {})
         ptags = meta.get("PatientMainDicomTags", {})
+        # 시리즈 레벨 태그(부위·프로토콜·시술코드·단계설명) — 검사 레벨에는 없다.
+        # 이걸 안 읽는 동안 로컬 검사의 body_part 가 항상 비어 HP·Compare 의 부위 조건이 죽어 있었다.
+        htags = client.hanging_tags(ch["ID"])
         study = register_study(
             db,
             study_uid=tags.get("StudyInstanceUID", ""),
@@ -289,6 +332,10 @@ def sync_new_studies(db, client: OrthancClient, since: int = 0) -> tuple[int, in
             if tags.get("ModalitiesInStudy")
             else "",
             study_desc=tags.get("StudyDescription", ""),
+            body_part=htags.get("BodyPartExamined", ""),
+            protocol_name=htags.get("ProtocolName", ""),
+            procedure_code=htags.get("RequestedProcedureID", ""),
+            step_desc=htags.get("PerformedProcedureStepDescription", ""),
             institution=tags.get("InstitutionName", ""),
             referring_physician=str(tags.get("ReferringPhysicianName", "")),
             department=tags.get("InstitutionalDepartmentName", ""),

@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  AXIS_LABEL, XLINK_DEFAULT, axisOf, fromLegacyXmode, geomOf, lineStyle,
-  pickLineSources, positionLabel, readXlink, scoutSegment,
+  AXIS_LABEL, XLINK_DEFAULT, axisOf, geomOf, lineStyle,
+  pickLineSources, positionLabel, scoutSegment,
 } from "../src/lib/scoutLines.ts";
 
 /* 축별 표본 — orientation 은 DICOM ImageOrientationPatient(row 3 + col 3) */
@@ -127,19 +127,5 @@ test("독립 토글 — Crosslink 와 Scout 를 동시에 켤 수 있다", () =>
   assert.equal(x.all_lines, false, "All Lines 기본은 꺼짐");
 });
 
-test("옛 단일선택 값이 새 모델로 이관된다 — 설정을 다시 잡게 하지 않는다", () => {
-  assert.equal(fromLegacyXmode("off").crosslink, false);
-  assert.equal(fromLegacyXmode("sync_other").sync_other, true);
-  assert.equal(fromLegacyXmode("scout").scout, true);
-  assert.equal(fromLegacyXmode("scout").all_lines, false);
-  assert.equal(fromLegacyXmode("all_lines").all_lines, true);
-  assert.equal(fromLegacyXmode("all_lines").scout, false);
-  assert.deepEqual(fromLegacyXmode("모르는값"), XLINK_DEFAULT);
-});
-
-test("readXlink — 문자열(옛 저장값)도 객체도 받는다", () => {
-  assert.equal(readXlink("all_lines").all_lines, true);
-  assert.equal(readXlink({ all_lines: true, scout: false }).all_lines, true);
-  assert.deepEqual(readXlink(null), XLINK_DEFAULT);
-  assert.deepEqual(readXlink({ crosslink: "네" }), XLINK_DEFAULT, "타입이 틀리면 기본값");
-});
+/* 옛 값 이관 테스트는 지웠다 — 옛 xmode 는 저장된 적이 없어 이관할 대상이 없다.
+   호출자 0인 함수를 테스트로 덮으면 '있는 기능' 으로 착각하게 된다(lib/scoutLines.ts 주석 참조). */

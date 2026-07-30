@@ -10,6 +10,7 @@ Node CLI(tools/htj2k_encode.mjs)로 재사용 — 실측 무손실 압축률 ~6%
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -42,14 +43,45 @@ def encoder_available() -> bool:
     return shutil.which("node") is not None
 
 
-def _run_node(jobs: list[dict]) -> dict[str, dict]:
-    """Node OpenJPH 배치 실행 — out 경로 → 결과 dict."""
+def batch_tag(sop: str, idx: int) -> str:
+    """시리즈 배치의 인스턴스별 임시 파일 이름 조각 — **반드시 유일해야 한다.**
+
+    ⚠ 예전에는 `sop[:32]` 를 썼다. 그런데 **같은 시리즈의 SOP UID 는 앞부분이 똑같다**:
+
+        1.2.840.113619.2.55.3.604688119.868.1700000000.1
+        1.2.840.113619.2.55.3.604688119.868.1700000000.2
+        → 앞 32자가 둘 다 '1.2.840.113619.2.55.3.604688119.'
+
+    그래서 같은 이름의 .raw 를 서로 덮어써 **마지막 인스턴스의 픽셀만 남고**, Node 결과가
+    out 경로로 키를 잡으니 그 한 장이 시리즈 전 인스턴스의 캐시로 복사됐다.
+    스크롤해도 같은 영상이 보이는 판독 사고다(tests/test_htj2k_batch_collision.py 가 고정).
+
+    UID 를 이름에 넣지 않는다 — 배치 안의 **순번**이 유일성의 근거고, 짧은 해시는 로그에서
+    어느 인스턴스인지 되짚기 위한 것뿐이다.
+    """
+    h = hashlib.sha1(sop.encode("utf-8", "replace")).hexdigest()[:10]  # noqa: S324 — 식별용, 보안용 아님
+    return f"b{idx:05d}_{h}"
+
+
+# 배치(검사·시리즈 전체)는 오래 걸릴 수 있어 넉넉히, **단일 프레임은 짧게** 끊는다.
+# ⚠ 예전에는 둘 다 1800초였다. 온디맨드 프레임 요청은 sync 핸들러가 스레드풀 스레드를 쥔 채
+#   기다리므로, 인코더가 멈추면 스레드 하나가 30분간 묶인다 — 그런 요청 몇 개면 로그인이 굶는다.
+NODE_TIMEOUT_BATCH = float(os.getenv("SAINTVIEW_HTJ2K_NODE_TIMEOUT", "1800"))
+NODE_TIMEOUT_FRAME = float(os.getenv("SAINTVIEW_HTJ2K_FRAME_TIMEOUT", "30"))
+
+
+def _run_node(jobs: list[dict], timeout: float = NODE_TIMEOUT_BATCH) -> dict[str, dict]:
+    """Node OpenJPH 배치 실행 — out 경로 → 결과 dict. 타임아웃이면 빈 dict(호출부가 실패 처리)."""
     tmp = Path(tempfile.mkdtemp(prefix="htj2k_j_"))
     try:
         jobp = tmp / "jobs.json"
         jobp.write_text(json.dumps(jobs), encoding="utf-8")
-        r = subprocess.run(["node", str(_ENCODER), str(jobp)],
-                           capture_output=True, text=True, timeout=1800)
+        try:
+            r = subprocess.run(["node", str(_ENCODER), str(jobp)],
+                               capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # 스레드를 물고 무한정 기다리지 않는다. 프레임 경로는 500 으로, 배치는 0건으로 접힌다.
+            return {}
         return {x["out"]: x for x in json.loads(r.stdout or "[]")}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -74,7 +106,7 @@ def encode_frame(ds, frame_idx: int) -> bytes | None:
     tmp = Path(tempfile.mkdtemp(prefix="htj2k_f_"))
     try:
         jobs = _frame_jobs(ds, tmp, "f", [frame_idx])
-        res = _run_node(jobs)
+        res = _run_node(jobs, timeout=NODE_TIMEOUT_FRAME)   # 단일 프레임 — 짧게 끊는다
         r = res.get(jobs[0]["out"])
         return Path(jobs[0]["out"]).read_bytes() if r and r.get("ok") else None
     finally:
@@ -90,7 +122,8 @@ def encode_frames_batch(specs: list[tuple[str, "pydicom.Dataset"]], cache_dir: P
         index = []  # (out, cache path)
         for sop, ds in specs:
             n = int(getattr(ds, "NumberOfFrames", 1) or 1)
-            js = _frame_jobs(ds, tmp, sop[:32], list(range(n)))
+            # ★ 인스턴스별 유일한 이름 — sop[:32] 는 같은 시리즈에서 충돌한다(batch_tag 주석)
+            js = _frame_jobs(ds, tmp, batch_tag(sop, len(index)), list(range(n)))
             for f, j in enumerate(js):
                 jobs.append(j)
                 index.append((j["out"], cache_dir / f"{sop}_{f + 1}.j2c"))

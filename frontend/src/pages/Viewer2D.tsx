@@ -2,7 +2,7 @@
 // 설정 연동: 팔레트/썸네일 방향·크기, 썸네일 모드(시리즈/전체), 행잉(모달리티→분할), 판독 도크
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, openViewer, type Anno, type InstanceNode, type SeriesNode, type StudyDetail, type RelatedExam} from "../api";
-import { annoLabel, contentRect, measureAnno, refLineOn, screenToImage } from "../lib/annotations";
+import { annoLabel, contentRect, measureAnno, screenToImage } from "../lib/annotations";
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
@@ -11,8 +11,9 @@ import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerCl
 import { clearViewerSlots, isViewerSlotName, otherLiveViewerCount, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
 import { Splitter, clampSz } from "../lib/Splitter";
-import { hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
-import { XLINK_DEFAULT, pickLineSources, type XlinkState } from "../lib/scoutLines";
+import { hpExamOf, hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
+import { XLINK_DEFAULT, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment,
+         vdot, vsub, type V3, type XlinkState } from "../lib/scoutLines";
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
 import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pickHpScreen } from "../lib/hpCapture";
 import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
@@ -178,18 +179,10 @@ const XLINK_MODES: { key: keyof XlinkState; label: string; desc: string }[] = [
   { key: "all_lines", label: "AllLines", desc: "기준 뷰와 **같은 축**의 전체 교차선" },
 ];
 
-/* ── TY-3: 3D Cursor 기하 — DICOM Position/Orientation 평면 계산 (In geomOf 이식, 최소 부분) ── */
-type V3 = number[];
-const vsub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const vdot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const vcross = (a: V3, b: V3): V3 =>
-  [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-interface Geom3 { pos: V3; row: V3; col: V3; rs: number; cs: number; n: V3 }
-function geomOf(inst: InstanceNode): Geom3 | null {
-  if (inst.position?.length !== 3 || inst.orientation?.length !== 6 || inst.pixel_spacing?.length !== 2) return null;
-  const row = inst.orientation.slice(0, 3), col = inst.orientation.slice(3, 6);
-  return { pos: inst.position, row, col, rs: inst.pixel_spacing[0], cs: inst.pixel_spacing[1], n: vcross(row, col) };
-}
+/* ── 3D Cursor·절단선 기하 — lib/scoutLines 를 쓴다(3뷰어 공용).
+      여기 있던 사본(Geom3/geomOf/vsub/vdot/vcross)을 지웠다. 공용 Geom 은 Geom3 의 상위집합이고,
+      사본을 남겨 두면 I-View 와 계산이 또 갈린다 — 실제로 절단선 클리핑 여유가 달라
+      같은 검사에서 선 길이가 다르게 나왔다. ── */
 /* YYYYMMDD → Date, 두 검사일 간 기간 문자열 "- 1 Year, 3month, 5day" (Compare 과거영상 얼마전 표시) */
 function ymdToDate(s: string): Date | null {
   return /^\d{8}$/.test(s) ? new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)) : null;
@@ -611,6 +604,22 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const applyHpCellsRef = useRef<(rule: HpRule) => void>(() => {});
   // 시리즈가 아직 도착하지 않은 상태에서 HP 가 걸리면(검사 열기 직후) 칸 배정을 보류했다가 한 번 다시 건다.
   const pendingHpRef = useRef<HpRule | null>(null);
+  /* 과거검사 칸이 '후보 없음' 으로 접힌 규칙 — related_exams 가 늦게 오면 그 칸만 다시 채운다.
+     ⚠ Live(A) 검사는 뷰어 오픈 경로에서 related_exams 를 **일부러 빼고** 받는다(api.ts:
+       A 의 환자별 검색이 느린 사이트가 있어 실측 4.11s 가 오픈을 막았다). 그래서 시리즈가 먼저
+       도착해 HP 가 걸리고, 그 시점의 후보는 0건이라 시간대 슬롯 칸이 전부 빈 채로 확정됐다.
+       hpAutoRef 가 검사당 1회만 허용하므로 뒤늦게 후보가 와도 다시 걸릴 기회가 없었다.
+       → hpAutoRef 는 그대로 두고(사용자가 손으로 잡은 배치를 지켜야 한다) **과거검사 칸만** 재시도한다. */
+  const priorRetryHpRef = useRef<HpRule | null>(null);
+  // HP 자동 매칭용 — 규칙(설정 로드 결과) · 이미 자동 적용한 검사 id · 지금 series 가 어느 검사 것인가.
+  // ⚠ series 를 기다리는 이유: 부위 출처 'Series Description'(HP_PART_FIELDS.series_desc)은 시리즈가
+  //   있어야 값이 생긴다. 예전엔 detail 만으로 매칭해 그 출처를 고른 규칙이 절대 안 걸렸다.
+  const hpRulesRef = useRef<HpRule[] | null>(null);
+  const hpAutoRef = useRef<number | null>(null);
+  // { id: 지금 series state 가 어느 검사 것인가, ok: 시리즈 조회가 성공했는가 }
+  // 조회 실패도 '도착'으로 친다 — 그때까지 HP 를 안 걸면 레이아웃·링크 옵션까지 통째로 안 걸린다(구 동작 후퇴).
+  const seriesForRef = useRef<{ id: number; ok: boolean }>({ id: -1, ok: false });
+  const [hpLoadTick, setHpLoadTick] = useState(0);
   const [wlAll, setWlAll] = useState(false);  // W/L 프리셋을 전체 페인에 적용 (UBPACS All)
   const [menu, setMenu] = useState<null | "opened" | "related" | "series" | "hp">(null);
   const [mprOn, setMprOn] = useState(false);  // 내장 MPR/MIP (CT/MR — 뷰포트 영역 전환)
@@ -1211,19 +1220,33 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (t.ty_sel_color) setTySelColor(t.ty_sel_color);
       if (t.ty_cine_sec) setTyCineSec(Math.min(10, Math.max(0.05, t.ty_cine_sec)));
     }).catch(() => {});
-    // HP: 장비×부위(고른 DICOM 출처)×Projection 매칭 — '가장 우선 적용' 규칙 → 그 외 순.
-    // 규정·순서는 lib/hangingProtocol.ts 의 matchHpRule 이 유일한 구현이다(뷰어 3종 공용).
+    // HP: 규칙만 받아 둔다. **매칭은 이 검사의 시리즈가 도착한 뒤**(아래 effect) 한다 —
+    // 부위 출처로 'Series Description' 을 고른 규칙은 series 없이 매칭하면 hpHaystack 이 "" 라
+    // 절대 걸리지 않는다(예전 동작이 정확히 그랬다).
     api.getSetting("viewer.hp").then((r) => {
       const doc = readHpDoc(r.value);
       setHpRules(hpRuleOrder(doc.rules));            // 드롭다운 순서 = 매칭 순서
-      const m = matchHpRule({
-        modality: detail.modality, body_part: detail.body_part,
-        study_desc: detail.study_desc, order_name: detail.order_name,
-        study_date: detail.study_date,
-      }, doc.rules, { forExamOpen: true });           // 'Exam 열 때 HP 사용' 꺼진 규칙은 건너뛰고 다음 규칙을 본다
-      if (m) applyHp(m);
+      hpRulesRef.current = doc.rules;
+      setHpLoadTick((n) => n + 1);                   // 아래 매칭 effect 를 깨운다
     }).catch(() => {});
   }, [detail.modality, detail.body_part, detail.study_desc, detail.order_name, detail.study_date, applyHp]);
+
+  /* HP 자동 매칭 — 장비×부위(고른 DICOM 출처)×Projection. '가장 우선 적용' 규칙 → 그 외 순.
+     규정·순서는 lib/hangingProtocol.ts 의 matchHpRule 이 유일한 구현이다(뷰어 3종 공용).
+     ⚠ 검사 하나당 **한 번만** 건다(hpAutoRef). Stack View·Refresh 로 series 가 다시 바뀔 때
+       재적용하면 사용자가 잡아 둔 배치를 뷰어가 멋대로 갈아엎는다.
+     ⚠ 시리즈가 이 검사 것으로 도착한 뒤에 건다 — hpExamOf 가 series_descs 를 채워야
+       'Series Description' 출처 규칙이 실제로 걸린다(빌더는 lib/hangingProtocol.ts 한 곳뿐). */
+  useEffect(() => {
+    const rules = hpRulesRef.current;
+    const sf = seriesForRef.current;
+    if (!rules || hpAutoRef.current === detail.id) return;
+    if (sf.id !== detail.id) return;                  // 아직 이전 검사의 시리즈 — 도착하면 다시 온다
+    hpAutoRef.current = detail.id;
+    const m = matchHpRule(hpExamOf(detail, sf.ok ? series : null), rules, { forExamOpen: true });
+    if (m) applyHp(m);                                // 'Exam 열 때 HP 사용' 꺼진 규칙은 건너뛰고 다음 규칙
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [series, hpLoadTick, detail.id, applyHp]);
 
   /* 2D-MG 행잉 — 4-view 가 한 시리즈에 다 들어 있는 MG 검사(대부분)는 Series 2×2 로 걸면 3칸이 빈다.
      설정(뷰어 공통 > 2D 행잉 > MG)의 Image layout(1×2/2×2/2×3) 타일로 건다.
@@ -1321,6 +1344,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           .filter((s) => s.instances.length > 0);
         setStatus(`Key Image View — 키 이미지 ${keySops.length}장만 표시`);
       }
+      // HP 자동 매칭이 기다리는 표식 — '지금 series 는 이 검사 것' (series_descs 를 채워 매칭한다)
+      seriesForRef.current = { id: detail.id, ok: true };
       setSeries(imgSeries);
       // Mammo(MG) 전용 행잉 — 표준 2×2 [R CC, L CC, R MLO, L MLO] + 오버레이 텍스트 제거 (전 뷰어 공통 규칙)
       const mammo = detail.modality === "MG";
@@ -1363,7 +1388,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         else void loadStackMany(withOpen.ids);
       }
       window.setTimeout(pushHist, 300);   // TY-3(1): 로드 완료 후 초기 스냅샷
-    }).catch(() => setStatus("시리즈 조회 실패"));
+    }).catch(() => {
+      setStatus("시리즈 조회 실패");
+      // 시리즈가 없어도 HP(레이아웃·링크 옵션)는 건다 — 아래 매칭 effect 를 깨운다(series 는 안 바뀐다).
+      seriesForRef.current = { id: detail.id, ok: false };
+      setHpLoadTick((n) => n + 1);
+    });
     // 리포트/상용구/판독설정 로드는 ReportDock 내부로 이동 (detail.id 변경 시 자체 재로드)
     api.annotations(detail.id).then((r) => {
       setAnnos(r.items);
@@ -1662,6 +1692,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // ③ 복원하지 못한 칸을 **숨기지 않고** 알린다 — 저장은 됐는데 조용히 안 뜨는 것이 가장 나쁘다.
     const none = plan.map((p, k) => (p.skip === "none" ? k + 1 : 0)).filter(Boolean);
     const d3 = plan.map((p, k) => (p.skip === "3d" ? k + 1 : 0)).filter(Boolean);
+    // 후보 목록이 아직 비어 있어서 접힌 것이라면 재시도 대상이다(진짜 과거검사가 없는 것과 구분).
+    priorRetryHpRef.current = none.length && !hpPriors().length ? rule : null;
     if (none.length || d3.length) {
       setStatus([`HP ${rule.name} 적용`,
                  none.length ? `${none.join("·")}번 칸: 조건에 맞는 과거검사 없음` : "",
@@ -1670,6 +1702,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     }
   };
   applyHpCellsRef.current = applyHpCells;   // applyHp(useCallback[])가 최신 클로저로 부른다
+  /* 과거검사 후보가 뒤늦게 도착했을 때 — 그때 접힌 규칙의 과거검사 칸을 한 번 더 건다.
+     의존성을 [detail] 전체로 두면 Stack View·Refresh 마다 배치가 갈아엎히므로 **후보 개수만** 본다. */
+  useEffect(() => {
+    const r = priorRetryHpRef.current;
+    if (!r || !detail.related_exams.length || !series.length) return;
+    priorRetryHpRef.current = null;
+    applyHpCellsRef.current(r);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail.related_exams.length, series.length]);
+
   /* 시리즈가 늦게 도착한 경우 보류해 둔 HP 를 한 번 더 건다(검사 열기 직후 자동 적용 경로). */
   useEffect(() => {
     const r = pendingHpRef.current;
@@ -2911,16 +2953,25 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // 교차선 — Ref 버튼 + Scout/All Lines. 소스 선택은 lib/scoutLines 한 곳에서만 정한다.
     // All Lines = **스크롤 기준 뷰와 같은 축**의 전체(사용자 확정 규칙). 로컬라이저처럼 한 시리즈에
     // SAG·COR·AX 가 섞여 있으면 예전 구현은 관계없는 방향까지 다 그려 화면을 덮었다.
-    const refSegs: { seg: [number, number][]; current: boolean }[] = [];
+    const refSegs: { x1: number; y1: number; x2: number; y2: number;
+                     current: boolean; label?: string }[] = [];
     if ((refOn || xlink.scout || xlink.all_lines) && pid !== activePane) {
       const act = panes[activePane];
-      if (act.series) {
+      const tg = geomOf(inst);
+      if (act.series && tg) {
         const srcs = pickLineSources(act.series.instances, act.index,
                                      { scout: xlink.scout || refOn, all_lines: xlink.all_lines });
+        // "현재/전체" — 축으로 거른 뒤의 개수. I-View 와 같은 규칙.
+        const label = positionLabel(srcs);
         srcs.forEach((sc) => {
           if (sc.inst.sop_uid === inst.sop_uid) return;
-          const seg = refLineOn(sc.inst, inst);
-          if (seg) refSegs.push({ seg, current: sc.current });
+          const sg = geomOf(sc.inst);
+          if (!sg) return;
+          // ★ 기하는 공용 모듈 한 벌만 쓴다(lib/scoutLines). 예전에는 여기서 lib/annotations 의
+          //   refLineOn 을 불러 I-View 와 계산이 갈렸다 — 클리핑 여유도 달라 선 길이가 달랐다.
+          const seg = scoutSegment(sg, tg);
+          if (!seg) return;
+          refSegs.push({ ...seg, current: sc.current, label: sc.current ? label : undefined });
         });
       }
     }
@@ -3033,11 +3084,28 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 width={sx(Math.abs(marquee.b[0] - marquee.a[0]))} height={sy(Math.abs(marquee.b[1] - marquee.a[1]))}
                 fill="rgba(34,197,94,0.10)" stroke="#22c55e" strokeWidth={fs * 0.06} strokeDasharray={`${fs * 0.5} ${fs * 0.3}`} />
         )}
-        {refSegs.map((r, i) => (
-          <line key={`ref${i}`} x1={sx(r.seg[0][0])} y1={sy(r.seg[0][1])} x2={sx(r.seg[1][0])} y2={sy(r.seg[1][1])}
-                stroke="#4dd0e1" strokeDasharray={`${fs * 0.6} ${fs * 0.4}`}
-                strokeWidth={fs * (r.current ? 0.08 : 0.05)} opacity={r.current ? 1 : 0.35} />
-        ))}
+        {/* 절단선 — 현재 스크롤 중인 영상은 **색을 달리**하고 '몇 번째/전체' 를 적는다(사용자 요구).
+            예전에는 전부 같은 색(#4dd0e1)이고 굵기·투명도만 달라 어느 것이 현재인지 알기 어려웠다.
+            색·굵기 규칙은 lib/scoutLines.lineStyle — I-View 와 같은 값을 쓴다. */}
+        {refSegs.map((r, i) => {
+          const st = lineStyle(r.current ? "current" : "other");
+          const ex = r.x1 >= r.x2 ? { x: r.x1, y: r.y1 } : { x: r.x2, y: r.y2 };
+          return (
+            <g key={`ref${i}`}>
+              <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2}
+                    stroke={st.color} strokeDasharray={`${fs * 0.6} ${fs * 0.4}`}
+                    strokeWidth={fs * (r.current ? 0.08 : 0.05)} opacity={st.opacity} />
+              {r.label && (
+                <text x={Math.min(Math.max(ex.x - fs * 1.6, fs * 0.2), cols - fs * 2)}
+                      y={Math.min(Math.max(ex.y - fs * 0.2, fs), rows - fs * 0.2)}
+                      fill={st.color} fontSize={fs * 0.9} fontWeight={700}
+                      style={{ paintOrder: "stroke", stroke: "#000", strokeWidth: fs * 0.22 }}>
+                  {r.label}
+                </text>
+              )}
+            </g>
+          );
+        })}
         {c3on && (
           <g stroke="#22d3ee" strokeWidth={fs * 0.1}>
             <line x1={sx(c3.x) - fs} y1={sy(c3.y)} x2={sx(c3.x) + fs} y2={sy(c3.y)} />
@@ -4683,7 +4751,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         <HpMenu hpName={hpName} rules={hpRules}
                 open={menu === "hp"} setOpen={(v) => setMenu(v ? "hp" : null)}
                 onSelect={applyHp}
-                onClear={() => { setHpName("기본"); setImgLay({ r: 1, c: 1 }); setLayout("1x1"); }}
+                onClear={() => {
+                  setHpName("기본");
+                  setImgLay({ r: 1, c: 1 });
+                  setLayout("1x1");
+                  // ⚠ 표시값(imgLay)만 바꾸면 안 된다 — 렌더는 **페인별 p.il** 을 본다(3305 근처).
+                  //   예전에는 툴바가 1×1 이라고 표시하는데 타일 분할이 그대로 남아 값과 화면이 어긋났다.
+                  //   ilPrev 도 비운다. 남겨 두면 타일 더블클릭 '되돌리기'가 해제한 HP 의 옛 분할을 되살린다.
+                  setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, p]) => [k, {
+                    ...p, il: { r: 1, c: 1 }, ilPrev: null,
+                    index: snapTileIndex(p.index, 1, p.series?.instances.length ?? 0),
+                  }])));
+                }}
                 capture={hpCaptureNow}
                 onSaved={(next) => setHpRules(next)}
                 onStatus={setStatus} />

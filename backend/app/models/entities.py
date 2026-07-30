@@ -64,6 +64,11 @@ class Study(Base):
     body_part: Mapped[str] = mapped_column(String(64), default="", index=True)
     study_desc: Mapped[str] = mapped_column(String(256), default="")
     clinical_info: Mapped[str] = mapped_column(Text, default="")
+    # 행잉 프로토콜(HP)이 '부위' 를 찾을 수 있는 DICOM 출처 — 사양 ③ 이 이름 댄 항목들.
+    # 전부 **시리즈 레벨** 태그라 검사 등록 시 OrthancClient.hanging_tags 로 한 번에 읽는다.
+    protocol_name: Mapped[str] = mapped_column(String(128), default="")    # (0018,1030) Protocol Code
+    procedure_code: Mapped[str] = mapped_column(String(64), default="")    # (0040,1001) Procedure Code
+    step_desc: Mapped[str] = mapped_column(String(256), default="")        # (0040,0254) Procedure Step Desc
     # DICOM 헤더 기반 조회 컬럼 (UBPACS-Z Filter Setting — InstitutionName/ReferringPhysicianName)
     institution: Mapped[str] = mapped_column(String(128), default="")
     referring_physician: Mapped[str] = mapped_column(String(128), default="")

@@ -14,6 +14,7 @@
  * 실행: node --test frontend/tests/hp_capture.test.mjs
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   findHpRuleByName, hpCaptureScreen, hpDaysBefore, hpMonitorIndex, hpPlanCells, hpPriorsByRecency,
@@ -239,6 +240,42 @@ test("⑦ 같은 이름으로 저장하면 설정에서 넣은 매칭 조건을 
   assert.equal(next.projection, "PA");
   assert.equal(next.description, "설정에서 쓴 설명");
   assert.deepEqual(next.s, { r: 1, c: 1 });      // 배치는 갱신된다
+});
+
+test("⑦ 덮어써도 기존 체크박스(자동적용·우선·링크 4종)가 조용히 꺼지지 않는다", () => {
+  // 실제로 났던 사고: Setting>행잉 에서 'Exam 열 때 HP 사용'과 '전체 링크'를 켜 둔 규칙을
+  // 뷰어에서 같은 이름으로 배치만 다시 저장하면 체크박스가 전부 false 로 눌려
+  // **자동 적용되던 프로토콜이 조용히 수동 전용**이 됐다.
+  const { screen } = hpCaptureScreen(SNAP, CTX);
+  const base = {
+    ...hpRuleFromScreen({ name: "흉부 표준", screen }),
+    use_on_exam_open: true, priority: true,
+    full_link: true, full_scroll_sync: true, cross_link: true, scout_image: true,
+  };
+  // 호출자가 아무것도 지정하지 않으면 → base 값 유지
+  const keep = hpRuleFromScreen({ name: "흉부 표준", screen, base });
+  assert.equal(keep.use_on_exam_open, true, "자동 적용이 살아 있어야 한다");
+  assert.equal(keep.priority, true);
+  assert.deepEqual(
+    [keep.full_link, keep.full_scroll_sync, keep.cross_link, keep.scout_image],
+    [true, true, true, true]);
+  // 명시하면 그 값으로 바뀐다(체크박스가 있는 이유) — HpMenu 는 기존 값을 프리필해 넘긴다
+  const off = hpRuleFromScreen({ name: "흉부 표준", screen, base,
+                                 useOnExamOpen: false, priority: false,
+                                 options: { full_link: false, full_scroll_sync: true,
+                                            cross_link: false, scout_image: false } });
+  assert.equal(off.use_on_exam_open, false);
+  assert.equal(off.priority, false);
+  assert.deepEqual([off.full_link, off.full_scroll_sync, off.cross_link, off.scout_image],
+                   [false, true, false, false]);
+  // 새 규칙(base 없음)은 사양 6 그대로 전부 off 로 시작한다
+  const fresh = hpRuleFromScreen({ name: "새 것", screen });
+  assert.equal(fresh.use_on_exam_open, false);
+  assert.equal(fresh.priority, false);
+  // 뷰어 메뉴가 기존 규칙 값을 체크박스에 프리필하는가(안 하면 저장 순간 사용자가 모르게 바뀐다)
+  const menu = readFileSync(new URL("../src/components/HpMenu.tsx", import.meta.url), "utf8");
+  assert.match(menu, /findHpRuleByName\(rules, name\)/);
+  assert.match(menu, /setAutoOpen\(dup \? dup\.use_on_exam_open !== false : false\)/);
 });
 
 test("⑦ 다른 모니터에서 저장하면 화면이 모니터별로 쌓인다(사양 4 다중 모니터)", () => {

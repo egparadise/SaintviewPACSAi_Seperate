@@ -106,27 +106,11 @@ export const XLINK_DEFAULT: XlinkState = {
   crosslink: true, auto_sync: true, sync_other: false, scout: true, all_lines: false,
 };
 
-/** 예전 Viewer2D 의 단일선택 값(xmode)을 새 모델로 이관.
- *  ⚠ 사용자가 이미 잡아 둔 설정을 잃지 않게 하는 것이 목적이다 — 모르는 값은 기본값으로. */
-export function fromLegacyXmode(mode: string | null | undefined): XlinkState {
-  switch (mode) {
-    case "off":        return { ...XLINK_DEFAULT, crosslink: false, auto_sync: false, scout: false };
-    case "auto_sync":  return { ...XLINK_DEFAULT, crosslink: true, auto_sync: true, sync_other: false };
-    case "sync_other": return { ...XLINK_DEFAULT, crosslink: true, auto_sync: true, sync_other: true };
-    case "scout":      return { ...XLINK_DEFAULT, scout: true, all_lines: false };
-    case "all_lines":  return { ...XLINK_DEFAULT, scout: false, all_lines: true };
-    default:           return { ...XLINK_DEFAULT };
-  }
-}
-
-/** 저장값 해석 — 깨진 값이 와도 화면은 떠야 한다. */
-export function readXlink(v: unknown): XlinkState {
-  if (typeof v === "string") return fromLegacyXmode(v);
-  const o = (v ?? {}) as Partial<XlinkState>;
-  const pick = (k: keyof XlinkState) => (typeof o[k] === "boolean" ? (o[k] as boolean) : XLINK_DEFAULT[k]);
-  return { crosslink: pick("crosslink"), auto_sync: pick("auto_sync"),
-           sync_other: pick("sync_other"), scout: pick("scout"), all_lines: pick("all_lines") };
-}
+/* 이관 함수는 두지 않는다 — **옮길 값이 없다.**
+ * 옛 Viewer2D 의 단일선택 xmode 는 useState 로만 살던 화면 상태였고 viewer.prefs 어디에도
+ * 저장되지 않았다(뷰어를 열 때마다 "off" 로 시작했다). 그래서 fromLegacyXmode/readXlink 를
+ * 만들어 뒀다가 지웠다 — 호출자가 0인 채로 테스트만 초록이면, 없는 기능을 있다고 믿게 된다.
+ * 나중에 이 토글을 계정에 저장하기로 하면 그때 읽기 함수를 만들면 된다. */
 
 /* ── All Lines / Scout 소스 선택 ──────────────────────────────────────────── */
 

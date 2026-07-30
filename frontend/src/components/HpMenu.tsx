@@ -81,6 +81,23 @@ export default function HpMenu({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [direct, open]);
 
+  /* 같은 이름의 기존 규칙(덮어쓸 대상) — 저장 **전에** 알리고 체크박스를 그 값으로 프리필한다.
+     ⚠ 프리필이 없으면: Setting 에서 'Exam 열 때 HP 사용'을 켜 둔 규칙 "흉부 표준" 을 뷰어에서 같은
+       이름으로 다시 저장하는 순간 체크박스 기본값(언체크)이 그대로 저장돼 **자동 적용되던 프로토콜이
+       조용히 수동 전용**이 됐다. 저장 후 "(덮어씀)" 만 알렸으니 사용자는 알 방법이 없었다.
+       (lib/hpCapture.hpRuleFromScreen 도 '지정 안 한 체크박스는 base 유지'로 함께 고쳤다.) */
+  const dup = direct ? findHpRuleByName(rules, name) : null;
+  const dupId = dup?.id ?? "";
+  const prefilledRef = useRef<string | null>(null);   // 아직 한 번도 안 맞춤(빈 문자열과 구분)
+  useEffect(() => {
+    if (prefilledRef.current === dupId) return;
+    prefilledRef.current = dupId;
+    // 덮어쓸 규칙이 생기면 그 값으로, 사라지면 사양 6 기본값(둘 다 언체크)으로 되돌린다.
+    setAutoOpen(dup ? dup.use_on_exam_open !== false : false);
+    setPrio(dup ? !!dup.priority : false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dupId]);
+
   const save = async () => {
     const cap = capture();
     if (!cap) { onStatus?.("직접설정 저장 실패 — 지금 화면을 읽을 수 없습니다"); return; }
@@ -182,6 +199,13 @@ export default function HpMenu({
                   <input type="checkbox" checked={prio} onChange={(e) => setPrio(e.target.checked)} />
                   가장 우선 적용
                 </label>
+                {dup && (
+                  <div style={{ fontSize: 10, color: "#fbbf24", lineHeight: 1.35, whiteSpace: "normal" }}>
+                    ⚠ 기존 &lsquo;{dup.name}&rsquo; 을 덮어씁니다 — 화면 배치·장비·W/L·링크 4종(전체 링크·스크롤
+                    동기화·Cross Link·Scout)이 <b>지금 화면 값</b>으로 바뀝니다. 부위·출처·Projection·설명은
+                    유지되고, 위 두 체크박스는 기존 값을 불러왔습니다.
+                  </div>
+                )}
                 {warn.map((w, k) => (
                   <div key={k} style={{ fontSize: 10, color: "#fbbf24", lineHeight: 1.35, whiteSpace: "normal" }}>⚠ {w}</div>
                 ))}
