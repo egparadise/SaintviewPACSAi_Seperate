@@ -19,8 +19,8 @@ import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pic
 import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
 import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
 import {
-  DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgProbe, mgReadable, mgRatioBox, mgStamp, mgWallByCol,
-  mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
+  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgPaneIs, mgProbe, mgReadable, mgRatioBox,
+  mgStamp, mgWallByCol, mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 import { ToolIconTy } from "../components/ToolIconTy";
@@ -1312,6 +1312,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const g = toRC2(mgCfg.layout);
     mgHungRef.current = key;
     mgHangTo(`${g.r}x${g.c}`);
+    // MG 를 열면 마우스는 **Select** 여야 한다. 확대·이동 모드가 남아 있으면 유방을 클릭하는
+    // 순간 화면이 움직여 버린다(사용자 보고: "맘모일 때 마우스가 확대로 되어 있다").
+    // 모드는 검사를 전환해도 유지되는 값이라, MG 행잉 지점에서 명시적으로 되돌린다.
+    setTool(null);
+    setMouseMode("select");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mgReady, detail.id, detail.modality, detail.study_uid, series, mgCfg.on, mgCfg.layout]);
 
@@ -2962,7 +2967,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const srcs = pickLineSources(act.series.instances, act.index,
                                      { scout: xlink.scout || refOn, all_lines: xlink.all_lines });
         // "현재/전체" — 축으로 거른 뒤의 개수. I-View 와 같은 규칙.
-        const label = positionLabel(srcs);
+        // 시리즈 전체 장수를 함께 넘긴다 — Scout 만 켠 경우 "1/1" 대신 "8/74" 처럼
+        // **지금 몇 번째 슬라이스인가**가 보여야 한다.
+        const label = positionLabel(srcs, act.series.instances.length);
         srcs.forEach((sc) => {
           if (sc.inst.sop_uid === inst.sop_uid) return;
           const sg = geomOf(sc.inst);
@@ -3259,7 +3266,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /* 페인 1개 렌더 — 경계 스플리터 뷰포트(행×열 flex) 안에서 사용.
      더블클릭=최대화/복원(spineCurve 드래프트 수집 중에는 종료 전용 — 최대화 금지), 확대경=마우스 추적 3배 렌즈 */
   // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
-  const mgSeries = (p: PaneState) => (p.series?.modality || "") === "MG";
+  // ★ 이 술어 하나가 2D-MG 전체를 게이트한다 — mgShared(공유 배율)·mgFitFor·mgAt·mgTiles.
+  //   예전엔 시리즈 modality 만 봐서, 그 값이 비어 오면 체크박스도 없고 보정도 안 돌았다.
+  //   과거검사 페인은 그 검사의 modality 를 모르므로 보강하지 않는다(시리즈 값만 믿는다).
+  const mgSeries = (p: PaneState) =>
+    mgPaneIs(p.series?.modality,
+             (p.studyUid || detail.study_uid) === detail.study_uid ? detail.modality : "");
   /** 흉벽 방향: 탐지 결과 우선 → 검사명 laterality → 타일 열 위치 */
   const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number): MgBox | null => {
     if (mgCfg.detect === "auto") {
@@ -3286,6 +3298,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     let z: number | null = null;      // 화소 기준 최소 배율(폴백)
     let K: number | null = null;      // 화면 px / mm
     let mmOk = true;
+    let want = 0, got = 0;            // 보정 대상 칸 수 / 상자를 얻은 칸 수
     for (const [pid, p] of Object.entries(panes)) {
       if (!mgSeries(p)) continue;
       const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
@@ -3293,9 +3306,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const inst = p.series?.instances[p.index + t];
         const size = tiles > 1 ? tileSizes[`${pid}:${t}`] : paneSizes.current[pid];
         if (!inst || !size) continue;
+        want++;
         const c = mgZoomOf(size, { w: inst.cols, h: inst.rows },
                            mgBoxFor(p, inst, t, p.il?.c ?? 1), mgCfg);
         if (c === null) continue;
+        got++;
         z = z === null ? c : Math.min(z, c);
         const ps = inst.pixel_spacing?.[1] ?? inst.pixel_spacing?.[0] ?? 0;
         const s0 = Math.min(size.w / (inst.cols || 1), size.h / (inst.rows || 1));
@@ -3303,6 +3318,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         else mmOk = false;
       }
     }
+    // ★ 전부 아니면 전부 — 상자를 얻은 칸만 확대하면 **같은 화면에 두 배율이 공존**한다.
+    //   실제로 났다: 위 행 108% / 아래 행 100%. 좌우 유방의 크기 비교가 판독의 핵심이라
+    //   배율이 다르면 **없는 비대칭이 보인다**. 한 칸이라도 아직 상자가 없으면 이번 프레임은
+    //   전부 원본으로 둔다(탐지가 끝나면 다음 프레임에 한꺼번에 걸린다).
+    if (!want || got !== want) return null;
     return { z, K: mmOk ? K : null };
   })();
   /** 이 칸에 적용할 강제 배율 — 물리 정규화 가능하면 mm 기준, 아니면 화소 기준 최소 배율 */
@@ -3315,6 +3335,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   };
   const mgFitFor = (pid: string, t: number, p: PaneState, inst: InstanceNode | undefined): MgFit | null => {
     if (!mgOn || !inst || !mgSeries(p)) return null;
+    // ★ 공유 배율이 없으면(= 아직 한 칸이라도 상자를 못 얻었다) **아무 칸도 보정하지 않는다.**
+    //   여기서 칸별로 자기 배율을 계산해 버리면 위 '전부-아니면-전부' 가 무의미해진다.
+    if (!mgShared) return null;
     // 마주 볼 짝이 없는 칸은 손대지 않는다(밖으로 밀어내는 사고 방지).
     // Series 분할로 걸린 MG 는 페인 그리드의 열 위치로 판정한다.
     const gCols = (p.il?.c ?? 1) > 1 ? p.il!.c : LAYOUTS[layout].cols;
@@ -3334,6 +3357,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const mgAt = (p: PaneState, rect: { width: number; height: number }, pid?: string): PaneState => {
     const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
     if (!mgOn || tiles > 1 || !mgSeries(p)) return p;
+    if (!mgShared) return p;      // 보정을 안 걸었으면 좌표 변환도 걸지 않는다(주석·계측 일치)
     const inst = p.series?.instances[p.index];
     if (!inst) return p;
     const box = mgBoxFor(p, inst, 0, 1);
@@ -4778,7 +4802,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         <div style={{ flex: 1 }} />
         {/* 2D-MG — MG 검사를 열었을 때만 노출(T-View·SaintView 공통).
             체크: 좌우 사이 공기 여백을 잘라내고 흉벽을 바깥에 붙여 배치 / 해제: 원본 그대로 */}
-        {Object.values(panes).some((pp) => (pp.series?.modality || "") === "MG") && (
+        {/* 노출 조건도 엔진과 **같은 술어**를 쓴다 — 체크박스는 보이는데 켜도 아무 일이 없는
+             상태를 만들지 않기 위해서다(mgSeries 가 mgShared·mgFitFor·mgTiles 를 함께 게이트한다). */}
+        {(isMg(detail.modality) || Object.values(panes).some(mgSeries)) && (
           <span style={{ display: "flex", alignItems: "center", gap: 6, marginRight: 14, whiteSpace: "nowrap" }}>
             <label title="2D-MG — 유방 사이 빈 공간(공기)을 잘라내고 흉벽을 바깥에 붙여 배치. 해제하면 원본 그대로"
                    style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5,

@@ -129,3 +129,32 @@ test("독립 토글 — Crosslink 와 Scout 를 동시에 켤 수 있다", () =>
 
 /* 옛 값 이관 테스트는 지웠다 — 옛 xmode 는 저장된 적이 없어 이관할 대상이 없다.
    호출자 0인 함수를 테스트로 덮으면 '있는 기능' 으로 착각하게 된다(lib/scoutLines.ts 주석 참조). */
+
+/* ── 라벨이 스크롤 위치를 알려 주는가 (사용자 지적: 스크롤해도 늘 1/1) ────────── */
+
+test("Scout 단독 — 라벨이 '1/1' 이 아니라 시리즈 내 위치를 보여 준다", () => {
+  const list = Array.from({ length: 74 }, (_, i) => inst(AX, i * 3));
+  const got = pickLineSources(list, 7, { scout: true, all_lines: false });
+  assert.equal(got.length, 1, "Scout 단독은 현재 이미지 1장");
+  // 시리즈 전체를 넘기면 '8/74' — 스크롤을 내리면 앞 숫자가 따라 움직여야 한다
+  assert.equal(positionLabel(got, list.length), "8/74");
+  const next = pickLineSources(list, 20, { scout: true, all_lines: false });
+  assert.equal(positionLabel(next, list.length), "21/74", "스크롤해도 라벨이 안 바뀐다");
+});
+
+test("Scout 단독 — 전체 장수를 안 주면 예전처럼 1/1 (호출부가 넘겨야 한다는 계약)", () => {
+  const list = [inst(AX, 0), inst(AX, 5), inst(AX, 10)];
+  assert.equal(positionLabel(pickLineSources(list, 1, { scout: true, all_lines: false })), "1/1");
+});
+
+test("All Lines — 분모는 여전히 **축으로 거른 집합** (화면에 보이는 전체)", () => {
+  const list = [inst(SAG), inst(AX, 0), inst(COR), inst(AX, 5), inst(AX, 10)];
+  const got = pickLineSources(list, 3, { scout: false, all_lines: true });
+  // 시리즈 전체(5)를 넘겨도 All Lines 는 3장 기준이어야 한다 — 선이 3개만 보이니까
+  assert.equal(positionLabel(got, list.length), "2/3");
+});
+
+test("한 장짜리 시리즈는 1/1 이 맞다", () => {
+  const one = [inst(AX, 0)];
+  assert.equal(positionLabel(pickLineSources(one, 0, { scout: true, all_lines: false }), 1), "1/1");
+});

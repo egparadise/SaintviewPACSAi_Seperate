@@ -550,6 +550,11 @@ def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
         instances.sort(key=lambda i: (i["instance_number"], i["sop_uid"]))
         series_out.append({
             "series_uid": se_uid,
+            # ⚠ 이 값은 v2 메타데이터 **한 번의 조회**에만 걸려 있어, 실패하거나 태그가 없으면
+            #   조용히 "" 가 된다. A 의 StudySeries 스키마에는 modality 컬럼이 없어 시리즈 행에서
+            #   보충할 수도 없고, 여기서 study_detail 을 더 부르면 A 왕복이 늘어난다.
+            #   → **프론트가 검사 modality 로 보완한다**(Viewer2D 의 2D-MG 노출 조건).
+            #     빈 값이어도 해로운 곳은 없다(프리페치 SKIP 은 '건너뛰지 않음' 으로 동작).
             "modality": str(_tag1(meta_by_sop.get(instances[0]["sop_uid"], {}), "00080060", "") or "") if instances else "",
             "series_desc": str(s.get("series_description") or ""),
             "series_number": int(s.get("series_sequence") or 0),

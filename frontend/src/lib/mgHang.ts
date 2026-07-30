@@ -39,6 +39,32 @@ export interface MgCfg {
 }
 
 /** MG 모드가 지원하는 Image layout — 사용자 요구(1:2 · 2:2 · 2:3) */
+/** 이 modality 문자열이 MG 인가. A 가 다중값("MG\CR")을 줄 수 있어 분해해서 본다. */
+export const isMg = (m?: string | null): boolean =>
+  // 구분자를 열거하지 않고 **영숫자가 아닌 것 전부**로 쪼갠다.
+  // DICOM 다중값 구분자는 역슬래시인데, 문자 클래스에 역슬래시를 쓰면 이스케이프가
+  // 도구를 거칠 때마다 하나씩 줄어 조용히 빠진다(실제로 그렇게 한 번 틀렸다).
+  // 이 형태는 역슬래시·슬래시·쉼표·공백을 모두 덮고, 'MGX' 는 한 토큰으로 남아 걸리지 않는다.
+  String(m ?? "").toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean).includes("MG");
+
+/**
+ * 이 페인이 MG 인가 — **시리즈 modality 가 있으면 그것만 믿고, 비어 있을 때만** 검사
+ * modality 로 보강한다.
+ *
+ * ⚠ 왜 보강이 필요한가: Live 경로에서 시리즈 modality 의 출처는 DICOMweb v2 메타데이터의
+ *   (0008,0060) **하나뿐**이고, 그 조회가 실패하거나 태그가 없으면 조용히 "" 가 된다.
+ *   그러면 2D-MG 체크박스가 사라지고 보정 엔진도 통째로 안 돈다 —
+ *   **MG 검사인데 4-view 는 걸리고 2D-MG 만 없는** 상태(사용자 보고: 첫 로그인 후 첫 맘모).
+ *
+ * ⚠ 왜 '비어 있을 때만' 인가: MG 검사 안의 US·CT 시리즈까지 MG 로 보면 안 된다.
+ *   시리즈가 자기 modality 를 말했다면 그것이 최종이다.
+ */
+export const mgPaneIs = (seriesModality?: string | null,
+                         examModality?: string | null): boolean => {
+  const sm = String(seriesModality ?? "").trim();
+  return sm ? isMg(sm) : isMg(examModality);
+};
+
 export const MG_LAYOUTS = ["1x2", "2x2", "2x3"] as const;
 
 export const DEFAULT_MG_CFG: MgCfg = {
@@ -261,6 +287,26 @@ export interface MgFit { mz: number; mtx: number; mty: number }
 /** 배율 상한 — 탐지가 지나치게 작은 상자를 내놓아도 화면이 폭주하지 않게 */
 export const MG_MAX_ZOOM = 4;
 
+/** 탐지 오차 여유(headroom). 조직 상자를 타일에 **딱** 채우면 여유가 0 이라,
+ *  경계 탐지가 조금이라도 덜 잡은 만큼 그대로 잘려 나간다.
+ *  ⚠ 실제로 났다: MLO 는 겨드랑이·대흉근이 밝기 임계에 덜 걸려 상자가 유방 일부만 덮었고,
+ *    그 상자를 타일에 꽉 맞추는 순간 유방 아래쪽이 화면 밖으로 밀려 **잘린 채로 그럴듯하게**
+ *    보였다. MG 에서 조직이 잘려 보이는 것은 병변을 놓치는 것과 같다.
+ *  판독에서는 '조금 작게 보이는 것' 이 '잘려 보이는 것' 보다 언제나 안전하다. */
+export const MG_HEADROOM = 0.94;
+
+/** 상자 기준 **세로** 확대 상한. 탐지가 세로로 덜 잡았을 때 피해를 가둔다.
+ *  가로(공기 여백 제거)는 이 기능의 목적이라 상한을 따로 두지 않고 MG_MAX_ZOOM 만 쓴다. */
+export const MG_MAX_V_ZOOM = 1.35;
+
+/** 상자를 타일에 앉힐 때의 배율 — 헤드룸과 세로 상한을 **한 곳에서만** 계산한다.
+ *  mgZoomOf(후보 산출)와 mgFit(실제 적용)이 서로 다른 값을 쓰면 칸마다 배율이 갈린다. */
+function boxZoom(W: number, H: number, dw: number, dh: number, bw: number, bh: number): number {
+  const zW = W / (bw * dw);
+  const zH = Math.min(H / (bh * dh), MG_MAX_V_ZOOM);
+  return Math.min(zW, zH, MG_MAX_ZOOM) * MG_HEADROOM;
+}
+
 /** 이 타일 하나만 놓고 봤을 때의 후보 배율. 실제 적용 배율은 호출부가 대상 전체의
  *  **최소값**을 취해 동일하게 맞춘다(좌우 유방 크기 비교 보존). */
 export function mgZoomOf(
@@ -277,7 +323,7 @@ export function mgZoomOf(
   const bh = Math.min(1, box.y1 + m) - Math.max(0, box.y0 - m);
   if (bw <= 0.02 || bh <= 0.02) return null;
   const s0 = Math.min(W / iw, H / ih);
-  const z = Math.min(W / (bw * iw * s0), H / (bh * ih * s0), MG_MAX_ZOOM);
+  const z = boxZoom(W, H, iw * s0, ih * s0, bw, bh);
   return isFinite(z) && z > 0 ? z : null;
 }
 
@@ -312,7 +358,7 @@ export function mgFit(
   const dw = iw * s0, dh = ih * s0;
   const mz = forceZoom !== undefined && forceZoom > 0
     ? forceZoom
-    : Math.min(W / (bw * dw), H / (bh * dh), MG_MAX_ZOOM);
+    : boxZoom(W, H, dw, dh, bw, bh);
   if (!isFinite(mz) || mz <= 0) return null;
 
   const sx = flipH ? -1 : 1, sy = flipV ? -1 : 1;

@@ -44,8 +44,8 @@ import { axisOf, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
 import { activeHang2dMap, mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
 import {
-  DEFAULT_MG_CFG, MG_LAYOUTS, mgApply, mgFit, mgFromEl, mgProbe, mgReadable, mgRatioBox,
-  mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
+  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgFromEl, mgPaneIs, mgProbe, mgReadable,
+  mgRatioBox, mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
 
@@ -1847,7 +1847,9 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   };
 
   // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
-  const mgSeries = (p: Pane) => (p.series?.modality || "") === "MG";
+  // Viewer2D 와 **같은 술어**(lib/mgHang.mgPaneIs) — 두 뷰어가 갈리면 같은 검사에서
+  // 한쪽만 2D-MG 가 도는 일이 생긴다. 시리즈 modality 가 비었을 때만 검사 값으로 보강한다.
+  const mgSeries = (p: Pane) => mgPaneIs(p.series?.modality, curD?.modality);
   /** 탐지 결과가 있으면 그걸로, 없으면(canvas 오염·고정비율 모드) 검사명 laterality → 열 위치로 흉벽 추정 */
   /** 이 타일에 쓸 조직 상자 — 탐지 결과 우선, 못 읽었을 때만(설정 시) 고정 비율 */
   const mgBoxAt = (p: Pane, inst: InstanceNode, t: number): MgBox | null => {
@@ -3199,7 +3201,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // 관계없는 방향의 선까지 겹쳐 그려져 화면이 읽히지 않았다.
       const srcs = pickLineSources(act.series.instances, act.index,
                                    { scout: !!xlink.scout, all_lines: !!xlink.all_lines });
-      const label = positionLabel(srcs);      // 축으로 거른 **뒤** 기준의 '현재/전체'
+      // All Lines: 축으로 거른 뒤 기준 / Scout 단독: 시리즈 전체 기준(1/1 이 되지 않게)
+      const label = positionLabel(srcs, act.series.instances.length);
       srcs.forEach((s) => {
         const sg = geomOf(s.inst);
         if (!sg) return;
@@ -3415,7 +3418,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         {toast && <span style={{ color: "#facc15" }}>{toast}</span>}
         <span style={{ display: "flex", gap: 8, marginLeft: "auto", alignItems: "center" }}>
           {/* 2D-MG — MG 검사를 열었을 때만 노출. 체크: 좌우 사이 공기 여백 제거(흉벽 바깥 정렬) */}
-          {panes.some((pp) => (pp.series?.modality || "") === "MG") && (
+          {(isMg(curD?.modality) || panes.some(mgSeries)) && (
             <>
               <label title="2D-MG — 유방 사이 빈 공간(공기)을 잘라내고 흉벽을 바깥에 붙여 배치. 해제하면 원본 그대로"
                      style={{ display: "flex", gap: 3, alignItems: "center", color: "#f0abfc", fontWeight: 700 }}>

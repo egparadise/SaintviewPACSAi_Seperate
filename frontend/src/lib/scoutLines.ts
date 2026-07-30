@@ -163,7 +163,15 @@ export function lineStyle(kind: "current" | "cross" | "other"):
 }
 
 /** "현재/전체" 라벨 — 전체 중 몇 번째인지. all_lines 에서 축 필터 뒤의 개수를 쓴다. */
-export function positionLabel(sources: LineSource<unknown>[]): string {
+export function positionLabel(sources: LineSource<unknown>[], seriesTotal?: number): string {
   const i = sources.findIndex((s) => s.current);
-  return i < 0 ? "" : `${i + 1}/${sources.length}`;
+  if (i < 0) return "";
+  // ⚠ Scout Line 만 켠 경우 sources 는 **현재 이미지 1장**이라 그대로 세면 언제나 "1/1" 이
+  //   된다. 스크롤을 내려도 1/1 이면 라벨이 아무것도 알려 주지 않는다(실제 사용자 지적).
+  //   그럴 때는 시리즈 전체를 분모로 삼아 '지금 몇 번째 슬라이스인가' 를 보여 준다.
+  //   All Lines 는 선이 여러 개이므로 **축으로 거른 그 집합**이 분모다(그것이 화면에 보이는 전체다).
+  if (sources.length <= 1 && seriesTotal && seriesTotal > 1) {
+    return `${sources[i].index + 1}/${seriesTotal}`;
+  }
+  return `${i + 1}/${sources.length}`;
 }
