@@ -36,6 +36,15 @@ export interface MgCfg {
   //    기본 off — 근거 없이 맘모를 자르는 것은 조직을 숨길 수 있어 원본 유지가 안전하다.
   blind_ratio: boolean;
   ratio: number;      // detect=ratio 또는 blind_ratio 일 때 안쪽에서 잘라낼 폭 %(0~60)
+  /**
+   * layout 을 **Series 분할**로 걸 것인가. 기본 false = **Image 분할**(페인 안 타일).
+   *
+   * ⚠ 이 선택에 실제 대가가 있다 — T-View/SaintView 는 타일 페인(il>1)에 주석·계측 SVG 와
+   *   오버레이를 **렌더하지 않는다**(Viewer2D 의 `tileCount <= 1` 분기). 즉 Image 분할로 걸면
+   *   MG 에서 계측·주석이 화면에 안 나온다. 계측이 필요하면 이 체크를 켜서 Series 분할로 쓴다.
+   *   (I-View 는 타일별 레이어가 있어 무관하다.)
+   */
+  series_layout: boolean;
 }
 
 /** MG 모드가 지원하는 Image layout — 사용자 요구(1:2 · 2:2 · 2:3) */
@@ -69,6 +78,7 @@ export const MG_LAYOUTS = ["1x2", "2x2", "2x3"] as const;
 
 export const DEFAULT_MG_CFG: MgCfg = {
   on: true, layout: "2x2", margin: 2, thr: 12, detect: "auto", blind_ratio: false, ratio: 38,
+  series_layout: false,      // 기본은 **항상 uncheck** — Image 분할로 건다
 };
 
 /** viewer.prefs 값 → MgCfg (결측·이상값 방어) */
@@ -85,6 +95,8 @@ export function readMgCfg(v: unknown): MgCfg {
     detect: o.detect === "ratio" ? "ratio" : "auto",
     blind_ratio: typeof o.blind_ratio === "boolean" ? o.blind_ratio : DEFAULT_MG_CFG.blind_ratio,
     ratio: num(o.ratio, DEFAULT_MG_CFG.ratio, 0, 60),
+    // 구 저장본에는 이 키가 없다 → false(Image 분할). 기본이 uncheck 라는 요구와 일치한다.
+    series_layout: typeof o.series_layout === "boolean" ? o.series_layout : DEFAULT_MG_CFG.series_layout,
   };
 }
 

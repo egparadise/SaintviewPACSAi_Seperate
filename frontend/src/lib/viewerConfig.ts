@@ -305,3 +305,67 @@ export const TOOLBAR_DEFS: { section: string; items: { id: string; label: string
     { id: "cmp", label: "⇄", desc: "Compare — 같은 환자 과거검사 다중 선택 비교 오픈 (상단바)" },
   ]},
 ];
+
+/* ── 검사 전환 시 분할 재계산 ───────────────────────────────────────────────
+ * ⚠ 실제로 났던 사고: CT(Series 2×2)를 보다가 탭으로 DR/MG 검사를 열면 **CT 의 2×2 가 그대로
+ *   남았다.** 화면은 4칸인데 DR 은 시리즈가 1~2개라 나머지 칸이 빈 채로 있어 "영상이 안 뜬다"
+ *   처럼 보였고, DR·MG 자기 설정(Series 1×1)은 무시됐다.
+ *
+ *   원인은 단순했다 — pickHang2d 가 **prefs 로드 effect 안에서 주 검사 modality 로 한 번만**
+ *   불렸다. 탭 전환에는 재계산 지점이 아예 없었다.
+ *
+ * 그래서 '어떤 modality 를 열 때 어떤 분할인가' 를 이 순수 함수 하나로 못박고, 뷰어는 검사가
+ * 바뀔 때마다 이것을 다시 부른다. 규칙이 두 군데로 갈리지 않게 하는 것이 목적이다.
+ */
+export interface Hang2dResolved {
+  /** Series 분할 키(LAYOUTS 의 키, 예 "2x2") — 없으면 뷰어가 현재 값을 유지한다 */
+  s: string | null;
+  /** Image(페인 내 타일) 분할 — 없으면 1×1 */
+  i: { r: number; c: number } | null;
+}
+
+/**
+ * 이 검사(modality)를 열 때 걸 분할.
+ *
+ * MG 는 2D 행잉 표 밖이라 pickHang2d 가 null 을 준다 — 대신 **mg 전용 규정**을 쓴다.
+ * mgLayout 을 넘기지 않으면(2D-MG 꺼짐 등) MG 도 분할을 강제하지 않는다.
+ */
+export function resolveHang2d(
+  prefs: Hang2dPrefs | undefined,
+  viewer: Hang2dViewer,
+  modality: string,
+  mgLayout?: string | null,
+  /** 지금 **행잉 프로토콜이 걸려 있는가**. 걸려 있으면 분할은 HP 가 정한다(사용자 확정 규정). */
+  hpActive = false,
+): Hang2dResolved {
+  // ── 우선순위 (사용자가 '결코 변하지 않는다' 고 못박은 규정) ──────────────
+  //   ① 행잉 프로토콜이 **선택**되어 있으면 그것이 이긴다. HP 기본은 해제다.
+  //   ② HP 해제 상태에서 '이 공통 설정을 모든 뷰어에 우선 적용' 이 **체크**면 공통 표.
+  //   ③ 그 체크가 **해제**면 그 뷰어(SaintView/I-View/T-View) 개별 표.
+  //   ④ MG 는 위 표 밖 — 언제나 맘모 규정(mg_hang).
+  //   ②③ 판정은 pickHang2d 한 곳에만 있다(폴백 없음). 여기서 다시 분기하지 않는다.
+  if (hpActive) return { s: null, i: null };      // ① HP 가 정한다 — 건드리지 않는다
+  const mod = String(modality || "").toUpperCase();
+  if (mod === "MG") {
+    return { s: mgLayout || null, i: null };     // MG 는 뷰당 페인 1칸(타일 분할 없음)
+  }
+  const hv = pickHang2d(prefs, viewer, mod);
+  const s = hv?.s || null;
+  const i = hv?.i ? rcOf(hv.i) : null;
+  return { s, i: i && (i.r > 1 || i.c > 1) ? i : null };
+}
+
+/** "2x3" → {r:2,c:3}. 형식이 아니면 null. */
+function rcOf(key: string): { r: number; c: number } | null {
+  const m = /^(\d+)x(\d+)$/.exec(String(key).trim());
+  if (!m) return null;
+  const r = Number(m[1]), c = Number(m[2]);
+  return r > 0 && c > 0 ? { r, c } : null;
+}
+
+/** 분할 키의 페인 수. ⚠ setLayout 직후에는 state 가 아직 옛값이라, 새 분할로 페인을 채울 때는
+ *  **이 값**을 써야 한다(그 혼동이 빈 칸 사고의 절반이었다). */
+export function paneCountOf(layoutKey: string | null | undefined, fallback = 1): number {
+  const rc = layoutKey ? rcOf(layoutKey) : null;
+  return rc ? rc.r * rc.c : fallback;
+}

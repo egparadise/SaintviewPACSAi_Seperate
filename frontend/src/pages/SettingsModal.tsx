@@ -2254,8 +2254,23 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       ))}
                     </select>
                     <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
-                      4뷰가 한 시리즈에 들어 있는 검사에 이 타일 분할로 겁니다(행:열).
+                      4뷰가 한 시리즈에 들어 있는 검사에 이 분할로 겁니다(행:열).
                     </span>
+                  </Row>
+                  <Row label="분할 방식">
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                      <input type="checkbox" checked={mgCfg.series_layout}
+                             onChange={(e) => setMgCfg({ ...mgCfg, series_layout: e.target.checked })} />
+                      위 값을 <b>Series Layout</b> 으로 적용 (해제 시 <b>Image Layout</b>)
+                    </label>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, lineHeight: 1.5 }}>
+                      기본은 해제 — 페인 하나 안에 4뷰를 <b>타일(Image Layout)</b>로 겁니다.
+                      <br />
+                      ⚠ T-View·SaintView 는 타일로 나뉜 페인에 <b>계측·주석·오버레이를 표시하지
+                      않습니다</b>. MG 에서 계측을 쓰신다면 이 체크를 켜서 Series Layout 으로
+                      두세요(뷰 하나당 페인 하나 — W/L·확대·계측이 뷰마다 따로 동작합니다).
+                      I-View 는 타일에도 계측이 나오므로 영향이 없습니다.
+                    </div>
                   </Row>
                   <Row label="흉벽 판정">
                     <select value={mgCfg.detect}
