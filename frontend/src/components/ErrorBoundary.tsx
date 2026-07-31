@@ -10,6 +10,8 @@
 //  ② 무엇이 왜 터졌는지 **localStorage 에 남긴다** — 새로고침해도 증거가 살아남는다.
 //     설정 > 정보 에서 확인·복사할 수 있다.
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { APP_VERSION, BUILD_DATE } from "../lib/appVersion";
+import { describeReason } from "../lib/crashReason";
 
 const LOG_KEY = "sv_crash_log";
 const LOG_MAX = 20;
@@ -22,7 +24,12 @@ export interface CrashEntry {
   componentStack: string;
   url: string;
   build: string;
+  /** 같은 오류가 짧은 시간에 되풀이된 횟수. 20건이 같은 원인이면 1행 + count 로 남는다. */
+  count?: number;
 }
+
+/** 같은 오류로 볼 기준 — 짧은 시간에 같은 자리·같은 메시지면 한 줄로 접는다. */
+const DEDUPE_MS = 10_000;
 
 export function readCrashLog(): CrashEntry[] {
   try {
@@ -40,14 +47,30 @@ export function clearCrashLog(): void {
 export function recordCrash(e: Partial<CrashEntry> & { message: string }): void {
   try {
     const list = readCrashLog();
+    const where = e.where || "unknown";
+    const message = String(e.message).slice(0, 500);
+    // ⚠ 폭주 접기 — 영상 로딩 실패는 타일마다 동시에 터져 같은 줄이 20개씩 쌓였고,
+    //   그 20줄이 링버퍼(LOG_MAX)를 채워 **정작 원인이 된 첫 오류를 밀어냈다.**
+    const head = list[0];
+    if (head && head.where === where && head.message === message
+        && Date.now() - Date.parse(head.at) < DEDUPE_MS) {
+      head.count = (head.count ?? 1) + 1;
+      head.at = new Date().toISOString();
+      localStorage.setItem(LOG_KEY, JSON.stringify(list.slice(0, LOG_MAX)));
+      return;
+    }
     list.unshift({
       at: new Date().toISOString(),
-      where: e.where || "unknown",
-      message: String(e.message).slice(0, 500),
+      where,
+      message,
       stack: String(e.stack || "").slice(0, 2000),
       componentStack: String(e.componentStack || "").slice(0, 2000),
       url: location.href.slice(0, 300),
-      build: (globalThis as { __APP_VERSION__?: string }).__APP_VERSION__ || "",
+      // ⚠ vite 의 define 은 **식별자 치환**이라 globalThis 에는 안 붙는다.
+      //   예전 코드가 globalThis.__APP_VERSION__ 를 읽어 build 가 늘 빈 문자열이었고,
+      //   그래서 사용자가 보낸 로그가 어느 빌드에서 났는지 알 수 없었다.
+      build: `${APP_VERSION} (${BUILD_DATE})`,
+      count: 1,
     });
     localStorage.setItem(LOG_KEY, JSON.stringify(list.slice(0, LOG_MAX)));
   } catch { /* 용량 초과 등 — 기록 실패가 앱을 막지는 않는다 */ }
@@ -61,9 +84,8 @@ export function installGlobalCrashLog(): void {
                   stack: ev.error?.stack || `${ev.filename}:${ev.lineno}:${ev.colno}` });
   });
   window.addEventListener("unhandledrejection", (ev) => {
-    const r = ev.reason as { message?: string; stack?: string } | undefined;
-    recordCrash({ where: "unhandledrejection",
-                  message: r?.message || String(ev.reason).slice(0, 200), stack: r?.stack || "" });
+    const d = describeReason(ev.reason);
+    recordCrash({ where: "unhandledrejection", message: d.message, stack: d.stack });
   });
 }
 

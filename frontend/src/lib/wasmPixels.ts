@@ -3,6 +3,8 @@
 // 기존 <img> 요소·CSS 변환·주석 수학은 그대로 — blob URL 만 갈아끼운다.
 // 핵심 이득: W/L 조정이 서버 왕복 없이 로컬 LUT 재계산(픽셀 원본은 1회만 수신·캐시).
 import { authHeader, framesBase, getWadoTs } from "./imageFormat";
+import { describeReason } from "./crashReason";
+import { recordCrash } from "../components/ErrorBoundary";
 // ⚠ cornerstone 코어/로더는 무겁다(수 MB) — WASM 모드가 실제로 켜졌을 때만 동적 로드(번들 분리)
 type CsImage = {
   columns: number; rows: number; color?: boolean; invert?: boolean;
@@ -43,7 +45,22 @@ async function ensureCs(): Promise<void> {
       }
     },
   } as Parameters<typeof loader.init>[0]);
-  csLoadImage = (id: string) => core.imageLoader.loadAndCacheImage(id) as unknown as Promise<CsImage>;
+  csLoadImage = (id: string) => {
+    const p = core.imageLoader.loadAndCacheImage(id) as unknown as Promise<CsImage>;
+    // ⚠ 이 promise 는 **cornerstone 의 이미지 캐시에도 보관된다.** 우리가 await 를 try/catch 로
+    //   감싸도, 캐시에 남은 그 사본에는 핸들러가 없어 브라우저가 unhandledrejection 으로
+    //   신고한다 — 화면은 서버 렌더로 폴백해 멀쩡한데 오류 로그만 쌓이는 상태가 된다.
+    //   (실제 신고: 로그가 `[object XMLHttpRequest]` 로 20줄. 로더는 Error 가 아니라 XHR 을
+    //    그대로 reject 한다.)
+    //   여기서 핸들러를 붙여 '처리됨' 으로 표시하고, 실패한 항목은 캐시에서 빼 재시도가
+    //   가능하게 한다. 원인은 삼키지 않고 진단 기록으로 남긴다.
+    p.catch((reason: unknown) => {
+      try { core.cache.removeImageLoadObject?.(id); } catch { /* 캐시 API 변동 대비 */ }
+      const d = describeReason(reason);
+      recordCrash({ where: "wasm-frame", message: `${d.message} · imageId=${id.slice(-80)}` });
+    });
+    return p;
+  };
 }
 
 /** 픽셀 → 8bit RGBA 캔버스 (Modality LUT + VOI 윈도우 + MONOCHROME1 반전) → blob URL */
@@ -121,7 +138,7 @@ export function wasmFrameUrl(studyUid: string, seriesUid: string, sopUid: string
       // 픽셀 원본은 cornerstone 캐시가 보관 — W/L 변경 시 재수신 없이 LUT 만 재계산
       const image = await csLoadImage!(imageId);
       renderToBlobUrl(image, wl, key);
-    } catch { /* 디코딩 실패 — 서버 렌더링 폴백 유지 */ }
+    } catch { /* 디코딩 실패 — 서버 렌더링 폴백 유지(원인은 csLoadImage 가 기록한다) */ }
     finally { pixelPending.delete(key); }
   })();
   return null;

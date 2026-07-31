@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, Report, Study
@@ -41,23 +42,35 @@ def save_draft_from_ai(db: Session, study: Study, sr_json: dict, *, model: str, 
     # 실행 시점 잠금 검사 — analyze 큐잉 가드만으로는 TOCTOU(큐잉→잠금→워커 실행)에서
     # 잠금 중 새 리포트가 생기고 study.status 가 finalized→draft_ready 로 오염된다(SPEC §C).
     _ensure_not_locked(study)
-    version = (latest_report(db, study.id).version + 1) if latest_report(db, study.id) else 1
-    report = Report(
-        study_id=study.id,
-        version=version,
-        status="draft",
-        sr_json=sr_json,
-        narrative_text=narrative_from_sr(sr_json),
-        created_by="ai",
-        ai_model=model,
-        ai_sources=sources,
-    )
-    db.add(report)
-    study.status = "draft_ready"
-    if has_critical(sr_json):
-        study.emergency = True  # critical → 워크리스트 최우선(설계 §6.2)
-    db.commit()
-    return report
+    # ⚠ 버전 번호는 (study_id, version) 유니크다. '읽고 +1 해서 쓰기' 사이에 다른 경로가
+    #   같은 검사에 초안을 넣으면 충돌한다 — 같은 검사가 두 번 큐잉되는 일이 실제로 있다
+    #   (Orthanc 재폴링 since=0, 수동 재분석, 테스트의 큐 드레인).
+    #   그때 IntegrityError 로 **잡이 통째로 죽으면** 그 검사는 영영 초안이 안 생긴다.
+    #   → 충돌하면 되읽어서 다시 시도한다. 몇 번 해도 안 되면 그때 올린다.
+    for attempt in range(3):
+        last = latest_report(db, study.id)
+        report = Report(
+            study_id=study.id,
+            version=(last.version + 1) if last else 1,
+            status="draft",
+            sr_json=sr_json,
+            narrative_text=narrative_from_sr(sr_json),
+            created_by="ai",
+            ai_model=model,
+            ai_sources=sources,
+        )
+        db.add(report)
+        study.status = "draft_ready"
+        if has_critical(sr_json):
+            study.emergency = True  # critical → 워크리스트 최우선(설계 §6.2)
+        try:
+            db.commit()
+            return report
+        except IntegrityError:
+            db.rollback()
+            if attempt == 2:
+                raise
+    raise RuntimeError("판독 초안 버전 배정 실패")   # 도달 불가(위에서 raise)
 
 
 def update_report(db: Session, report: Report, sr_json: dict, *, username: str) -> Report:
