@@ -13,6 +13,7 @@ description: Saintview Viewer Suite 의 표준 개발·검증·배포 절차(Dev
 
 ```bash
 cd C:/Project/SaintviewViewerSuite && git status --short
+git log --oneline -1        # HEAD 가 내가 알던 커밋인가 — 다른 세션이 밀었을 수 있다
 ```
 
 - **다른 세션이 같은 저장소에서 작업 중일 수 있다.** 내 것이 아닌 변경·미추적 파일이 보이면
@@ -184,3 +185,30 @@ Vault: `C:/Users/egpar/OneDrive - Inviz/15.Vibe Cording/Obsidian/SaintviewPACSai
 | 리포터가 정보를 버림 | `String(xhr)` → `[object XMLHttpRequest]` |
 | 비동기 setState 직후 옛 state 읽기 | `setLayout` 후 `LAYOUTS[layout].count` |
 | 이스케이프가 도구를 거치며 소실 | 정규식 문자 클래스의 역슬래시 |
+| **공유 가드에 예외를 무조건 넣음** | `_require_study` 에 협진 예외 → 그 가드를 쓰던 **쓰기 9개**가 함께 열렸다. 예외는 **기본 거부 + 호출부 opt-in** 이어야 새 코드가 자동으로 안전하다 |
+| **422 로 통과하는 공허한 단언** | 권한 차단 테스트가 틀린 본문을 보내 `422`(검증 실패)로 통과 — 게이트가 사라져도 초록. 차단 테스트는 **유효 본문**으로 보내고 허용 코드에서 422 를 뺀다 |
+| **캐시를 '바꾼 쪽' 기준으로만 무효화** | 제어권 승인은 Master 소켓이 처리하는데 알아야 하는 건 게스트 소켓 — 소켓 로컬 캐시라 TTL 만큼 옛 값을 믿었다. **공유 리비전 + TTL** 두 축이 필요 |
+| **렌더 안에서 컴포넌트 정의** | `const Section = () => …` 를 컴포넌트 본문에 두면 매 렌더 새 타입 → 재마운트 → **입력 포커스가 한 글자마다 날아간다** |
+| **순수 규칙이 `window` 에 묶임** | `window.setTimeout` → node 테스트 불가 → 사실상 검증 없이 흘러간다. `lib/*.ts` 규칙 모듈은 전역 API 만 쓴다 |
+| **모듈 전역을 렌더에서 읽기** | `collab.status` 를 렌더 중 읽어 표시등을 그림 → 값이 바뀌어도 다시 그릴 이유가 없어 **끊겨도 초록불**. 구독해야 한다 |
+
+### 신규 기능일 때 추가로 볼 것
+
+증상 수정이 아니라 **기능 추가**면 아래를 반드시 훑는다(이번에 4건이 여기서 나왔다).
+
+```bash
+# ① 호출자 0 — 백엔드
+for f in backend/app/services/새모듈.py; do
+  grep -oP '^def \K\w+' "$f" | grep -v '^_' | while read fn; do
+    n=$(grep -rn "\b$fn\b" backend/app backend/tests --include=*.py | grep -v "def $fn" | wc -l)
+    [ "$n" -eq 0 ] && echo "❌ 호출자 0: $fn"
+  done
+done
+# ② 호출자 0 — 프론트 export / 훅 반환 멤버 / 안 넘기는 옵션
+grep -oP 'export (function|const) \K\w+' src/lib/새모듈.ts | while read fn; do …; done
+# ③ 형식·규칙이 여러 곳에서 손으로 다뤄지는지 (교차 언어면 특히)
+grep -rn '접두사:\|split(":")' backend/app frontend/src
+```
+
+**교차 언어 계약(프론트↔백엔드 문자열 형식)은 양쪽 테스트에 같은 리터럴을 박는다.**
+한쪽만 바뀌면 반드시 하나가 깨진다. 예: `dm_room(7,3) == "dm:3:7"` 을 pytest·node 양쪽에.
