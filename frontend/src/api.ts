@@ -96,6 +96,14 @@ function serverLogout(prevToken: string) {
 let lastWipe: Promise<void> | null = null;
 export function opfsWipeDone(): Promise<void> { return lastWipe ?? Promise.resolve(); }
 
+/** 현재 토큰 — 협진 WebSocket 전용 접근자.
+ *  fetch 경로는 req()/panelFetch 가 알아서 헤더를 붙이지만, 브라우저 WebSocket API 는
+ *  헤더를 못 붙여 토큰을 **서브프로토콜**로 넘겨야 한다(lib/collab.ts 참조).
+ *  폴백 순서는 panelFetch 와 동일 — 메모리 우선(새 창 인계 커버), 없으면 저장소. */
+export function getToken(): string | null {
+  return token ?? localStorage.getItem("sv_token") ?? sessionStorage.getItem("sv_token");
+}
+
 export function setToken(t: string | null, remember = false) {
   const prev = token;
   token = t;
@@ -784,6 +792,47 @@ export const api = {
     req<HospitalScu>(`/api/hospitals/${hid}/scu`, { method: "PUT", body: JSON.stringify(body) }),
   /** 내 유효 권한 (병원 매트릭스 반영 — 워크리스트/뷰어 게이트용) */
   permMe: () => req<PermMe>("/api/perm/me"),
+
+  // ── 협진(Co-Reading) — 실시간 경로는 lib/collab.ts(WebSocket)가 담당하고,
+  //    여기는 최초 로드 목록과 WS 가 끊겼을 때도 되어야 하는 조작만 맡는다. ──
+  collabDirectory: (q = "", otherOnly = false) =>
+    req<{ items: CollabUser[]; caps: Record<string, string> }>(
+      `/api/collab/directory?q=${encodeURIComponent(q)}${otherOnly ? "&other_only=true" : ""}`),
+  collabFriends: () => req<CollabFriends>("/api/collab/friends"),
+  collabRequestFriend: (target_id: number, message = "") =>
+    req<{ ok: boolean; result: string }>("/api/collab/friends/request",
+      { method: "POST", body: JSON.stringify({ target_id, message }) }),
+  collabRespondFriend: (other_id: number, accept: boolean) =>
+    req<{ ok: boolean }>("/api/collab/friends/respond",
+      { method: "POST", body: JSON.stringify({ other_id, accept }) }),
+  collabBlockFriend: (other_id: number, blocked: boolean) =>
+    req<{ ok: boolean }>(`/api/collab/friends/block?blocked=${blocked}`,
+      { method: "POST", body: JSON.stringify({ other_id }) }),
+  collabRemoveFriend: (other_id: number) =>
+    req<{ ok: boolean }>("/api/collab/friends/remove",
+      { method: "POST", body: JSON.stringify({ other_id }) }),
+  /** 룸 백필 — WS 로는 신규만 오므로 과거 메시지는 여기서 읽는다(before_id = 무한 스크롤) */
+  collabMessages: (room: string, before_id = 0) =>
+    req<{ items: CollabMessage[] }>(
+      `/api/collab/messages?room=${encodeURIComponent(room)}${before_id ? `&before_id=${before_id}` : ""}`),
+  collabMarkRead: (room: string) =>
+    req<{ ok: boolean; marked: number }>("/api/collab/messages/read",
+      { method: "POST", body: JSON.stringify({ room }) }),
+  collabOpenSession: (study_id: number, title = "") =>
+    req<CollabSession>("/api/collab/sessions",
+      { method: "POST", body: JSON.stringify({ study_id, title }) }),
+  collabSessions: () => req<{ items: CollabSession[] }>("/api/collab/sessions"),
+  collabSession: (code: string) => req<CollabSession>(`/api/collab/sessions/${code}`),
+  collabInvite: (code: string, target_id: number) =>
+    req<CollabSession>(`/api/collab/sessions/${code}/invite`,
+      { method: "POST", body: JSON.stringify({ target_id }) }),
+  collabDecline: (code: string) =>
+    req<{ ok: boolean }>(`/api/collab/sessions/${code}/decline`, { method: "POST" }),
+  collabLeave: (code: string) =>
+    req<{ ok: boolean }>(`/api/collab/sessions/${code}/leave`, { method: "POST" }),
+  /** 세션 종료(Master 전용) — 전 참가자의 임시 열람권이 이 시점에 무효화된다 */
+  collabClose: (code: string) =>
+    req<{ ok: boolean }>(`/api/collab/sessions/${code}/close`, { method: "POST" }),
   /** 검사 관리 작업 (삭제/이동/매칭/언매칭/복제 — 유효 권한 강제, 403 시 안내) */
   studyAdminAction: (id: number, body: { action: StudyAdminActionKind; target_hid?: number; order_id?: number | string }) =>
     req<{ ok: boolean; detail?: string }>(`/api/studies/${id}/admin-action`, { method: "POST", body: JSON.stringify(body) }),
@@ -1241,6 +1290,18 @@ export interface ModalityTestResult {
 }
 export interface HospitalScu { name: string; ae_title: string; ip: string; port: number }
 export interface PermMe { role: string; hospital_id: number | null; perms: string[] }
+
+// 협진 — 서버 표현은 lib/collab.ts 가 단일 원천이다(WS 이벤트와 같은 모양이어야 하므로).
+// 여기서는 재수출만 해 호출부가 api 하나만 import 해도 되게 한다.
+export type { CollabUser, CollabSeat, CollabSession, CollabMessage } from "./lib/collab";
+import type { CollabUser, CollabSession, CollabMessage } from "./lib/collab";
+export interface CollabFriends {
+  friends: CollabUser[];
+  incoming: CollabUser[];   // 내가 받은 요청
+  outgoing: CollabUser[];   // 내가 보낸 요청
+  blocked: CollabUser[];
+  unread: Record<string, number>;   // room_key → 안읽음 수
+}
 export type StudyAdminActionKind = "delete" | "move" | "match" | "unmatch" | "copy";
 
 /* ── 유효 권한 게이트 (레인 W) — GET /api/perm/me 1회 로드·캐시 ──

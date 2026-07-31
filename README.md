@@ -81,6 +81,40 @@ npm run build        :: tsc -b + vite build → frontend/dist (정적 파일 —
 `frontend/dist` 를 임의의 웹서버로 서빙하는 경우 `/api`·`/dicom-web`·`/orthanc` 경로를
 백엔드·Orthanc 로 리버스 프록시해야 한다(개발 모드에서는 vite 가 이 프록시를 대신한다).
 
+## 실시간 협진 (Co-Reading)
+
+같은 병원·다른 병원에 접속해 있는 사용자끼리 **친구 요청 → 수락 → 협진 세션**으로 한 환자의
+영상을 함께 보며 의견을 교환한다. 메신저 채팅 · 음성 · 화상이 모두 된다.
+
+| 항목 | 구현 |
+|---|---|
+| 화면 공유 | **뷰어 상태 미러링** — 검사/시리즈/레이아웃/줌·팬·회전·W-L을 JSON으로만 전송(초당 수 KB). Slave 브라우저가 원본 픽셀을 직접 받아 그리므로 **진단 화질이 그대로**다 |
+| 타 병원 영상 | **세션 한정 임시 열람권**(`collab_grant`) — 세션이 열려 있고 참가 중인 동안 그 검사에만 유효. 세션 종료 시 즉시 회수 + 전 접근 감사로그(`collab_study_read`) |
+| 화상·음성 | **P2P mesh WebRTC** — 미디어가 서버를 거치지 않는다. 신규 컨테이너 없음, 정원 6명 |
+| 권한 | Master(초청자)가 제어권을 승인해야 Slave가 화면을 조작한다. **판독 수정·영상 삭제 등은 어떤 경우에도 위임되지 않는다** |
+
+**권한 모델의 핵심** — 임시 열람권은 조회 게이트(`worklist._require_study(allow_collab=True)`)
+**4개 엔드포인트에만** opt-in으로 꽂혀 있고, 쓰기 경로(`require_effective`)는 협진의 존재를
+모른다. 위임 가능한 것은 `collab.*` capability뿐이며 `permissions.sanitize_collab_caps`가
+화이트리스트 교집합으로 강제한다 — `report.write`·`study.delete`는 통과 자체가 불가능하다.
+검증: `backend/tests/test_collab.py`(21건).
+
+### ⚠ 운영 배포 시 필수 — nginx WebSocket 설정
+
+협진은 `WS /api/collab/ws` 를 쓴다. **기존 `location /api/` 블록은 keep-alive 를 위해
+`Connection ""` 를 넣기 때문에 그대로 두면 업그레이드가 깨진다.** `deploy/nginx-viewer.conf`
+에 더 구체적인 `location /api/collab/ws` 블록이 추가돼 있으니 운영 nginx에도 함께 반영할 것
+(`nginx -t` 후 `nginx -s reload`). 개발 모드는 `vite.config.ts` 의 `/api` 프록시에 `ws: true`
+가 들어가 있어 별도 설정이 필요 없다.
+
+### 병원 밖 협진 (선택)
+
+사내망은 host candidate 만으로 연결되므로 기본값(ICE 서버 없음) 그대로 동작한다. 인터넷을
+건너는 협진이 필요하면 브라우저 `localStorage` 키 `sv_collab_ice` 에 STUN/TURN 배열을 넣는다
+(예: `[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]`).
+공개 STUN 을 기본값으로 박지 않은 이유는 폐쇄망에서 매 통화마다 못 나가는 주소로 질의해
+연결이 느려지기 때문이다.
+
 ## 참고
 
 - 뷰어는 **HTTPS 전용**(원격 PC 다중 모니터 감지 `getScreenDetails` = secure context 필수) —

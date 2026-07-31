@@ -36,19 +36,35 @@ def _report_out(r: Report) -> dict:
     }
 
 
-def _require_study_scope(db: Session, study_id: int, user: dict) -> Study:
-    """검사 병원 스코프 가드(테넌시 IDOR 차단) — 시스템관리자=전체, 병원소속=자기 병원만. 아니면 404."""
+def _require_study_scope(db: Session, study_id: int, user: dict,
+                         allow_collab: bool = False) -> Study:
+    """검사 병원 스코프 가드(테넌시 IDOR 차단) — 시스템관리자=전체, 병원소속=자기 병원만. 아니면 404.
+
+    allow_collab: 협진 임시 열람권을 인정할지. **기본은 False(거부)** — worklist._require_study
+    와 같은 규칙이다. 협진 게스트는 판독문을 **읽어야** 논의가 되지만(그게 협진의 목적이다),
+    쓰기는 어떤 경우에도 안 된다. 그래서 조회 엔드포인트에만 True 를 준다.
+    쓰기 경로(_require_report 를 쓰는 PUT/POST 전부)는 손대지 않았으므로 계속 404 다.
+    """
     st = db.get(Study, study_id)
     if not st:
         raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     is_sys = user.get("role") == "admin" and not user.get("hid")
     if not is_sys and user.get("hid") and st.hospital_id != user.get("hid"):
-        raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
+        if not allow_collab:
+            raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
+        from app.api.worklist import _collab_may_read
+
+        if not _collab_may_read(db, user, study_id):
+            raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     return st
 
 
 def _require_report(db: Session, report_id: int, user: dict) -> Report:
-    """리포트 소속 검사의 병원 스코프 가드 → 통과 시 Report 반환."""
+    """리포트 소속 검사의 병원 스코프 가드 → 통과 시 Report 반환.
+
+    ⚠ 협진을 인정하지 않는다(allow_collab 기본 False). 이 함수를 쓰는 곳은 전부
+      쓰기(수정·확정·2차승인·보류·SR 전송)이거나 반출(export)이다 — 게스트가 해서는 안 되는 일들이다.
+    """
     report = db.get(Report, report_id)
     if not report:
         raise HTTPException(status_code=404, detail="리포트를 찾을 수 없습니다")
@@ -59,7 +75,8 @@ def _require_report(db: Session, report_id: int, user: dict) -> Report:
 
 @router.get("/studies/{study_id}/reports")
 def get_reports(study_id: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    _require_study_scope(db, study_id, user)
+    # 협진 게스트도 판독문을 읽어야 의견 교환이 된다 — 읽기만(쓰기 경로는 위 _require_report 주석)
+    _require_study_scope(db, study_id, user, allow_collab=True)
     return {"items": [_report_out(r) for r in list_reports(db, study_id)]}
 
 

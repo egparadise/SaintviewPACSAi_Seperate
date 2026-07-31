@@ -4329,12 +4329,17 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
      Master 의 화면 상태를 JSON 으로 미러링한다(픽셀 전송이 아니다 — lib/collabState 주석).
      여기서 하는 일은 셋뿐이다: 현재 상태를 훅에 넘기고, 수신 스냅샷을 뷰어 상태로 되돌리고,
      읽기전용 여부를 위쪽 키보드 가드에 알린다. 나머지(세션 수명·제어권·커서·WebRTC)는 훅 안에 있다. */
+  // 시리즈 uid → 노드 해석기. 미러 스냅샷은 uid 만 싣기 때문에(용량) 받는 쪽이 자기 트리에서 찾는다.
+  // effect 에서 갱신한다(렌더 중 ref 쓰기 금지). 트리 로드 직후 한 스냅샷 정도는 못 찾을 수 있는데,
+  // applyPane 이 그때 이전 시리즈를 유지하고 다음 스냅샷(100ms 뒤)이 맞춰 준다.
   const resolveSeriesRef = useRef<(uid: string) => SeriesNode | null>(() => null);
-  resolveSeriesRef.current = (uid: string) =>
-    thumbSeries.find((x) => x.series_uid === uid)
-    ?? series.find((x) => x.series_uid === uid)
-    ?? Object.values(priorTrees).flatMap((t) => t.series).find((x) => x.series_uid === uid)
-    ?? null;
+  useEffect(() => {
+    resolveSeriesRef.current = (uid: string) =>
+      thumbSeries.find((x) => x.series_uid === uid)
+      ?? series.find((x) => x.series_uid === uid)
+      ?? Object.values(priorTrees).flatMap((t) => t.series).find((x) => x.series_uid === uid)
+      ?? null;
+  }, [thumbSeries, series, priorTrees]);
 
   const applySnapshot = useCallback((snap: CollabSnapshot) => {
     const resolve = (uid: string) => resolveSeriesRef.current(uid);
@@ -4360,7 +4365,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     },
     applySnapshot,
   });
-  collabRO.current = cl.readOnly;
+  useEffect(() => { collabRO.current = cl.readOnly; }, [cl.readOnly]);
 
   // Slave 따라가기 — Master 가 다른 검사로 옮기면 이 창도 그 검사를 연다.
   // 미러 스냅샷은 '한 검사 안의 화면 상태'만 담는다(시리즈 uid·줌·W/L…). 검사 자체가 바뀌는 것은

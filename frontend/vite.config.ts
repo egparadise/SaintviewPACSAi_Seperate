@@ -37,7 +37,9 @@ function httpsOption() {
 // ⚠ 프록시 대상은 반드시 127.0.0.1 — 'localhost' 는 IPv6(::1) 우선 조회 후 IPv4 폴백으로
 // 연결당 ~200ms 가 붙어 프레임 로딩이 눈에 띄게 느려진다(실측: localhost 219ms vs 127.0.0.1 11ms).
 const proxyConfig = {
-  '/api': process.env.SV_API_URL ?? 'http://127.0.0.1:8010',            // 백엔드 FastAPI
+  // ⚠ 문자열 단축형이 아니라 객체 + ws:true — 협진 WebSocket(/api/collab/ws)이 이 프록시를 탄다.
+  //   단축형은 http 만 프록시하므로 업그레이드 요청이 vite 에서 그대로 끊긴다(핸드셰이크 실패).
+  '/api': { target: process.env.SV_API_URL ?? 'http://127.0.0.1:8010', ws: true },  // 백엔드 FastAPI
   '/dicom-web': process.env.SV_DICOMWEB_URL ?? 'http://127.0.0.1:3001', // Orthanc DICOMweb (OHIF nginx 경유)
   '/orthanc': {                            // 썸네일 프리뷰 — Orthanc 네이티브 /instances/.../preview
     target: process.env.SV_ORTHANC_URL ?? 'http://127.0.0.1:8043',

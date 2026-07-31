@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -10,7 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import current_user
 from app.db import get_db
-from app.models import Study
+from app.models import AuditLog, Study
+
+logger = logging.getLogger("saintview.worklist")
 from app.services.study_service import (
     WorklistFilter,
     queue_ai_job,
@@ -111,16 +114,69 @@ def _scoped_hospital(db: Session, user: dict, selected: int = 0) -> int | None:
     return None
 
 
-def _require_study(db: Session, study_id: int, user: dict) -> Study:
+def _require_study(db: Session, study_id: int, user: dict, allow_collab: bool = False) -> Study:
     """검사 단위 병원 스코프 가드 — 시스템관리자=전체, 병원 소속=자기 병원 검사만.
-    없거나 타 병원이면 404(존재 은닉). 모든 per-study 엔드포인트 단일 진입점(테넌시 IDOR 차단)."""
+    없거나 타 병원이면 404(존재 은닉). 모든 per-study 엔드포인트 단일 진입점(테넌시 IDOR 차단).
+
+    allow_collab: 협진 임시 열람권을 인정할지. **기본은 False(거부)** 다.
+
+    ⚠ 왜 기본이 거부인가 — 이 함수는 GET 뿐 아니라 PUT/POST 도 함께 쓴다
+      (bookmark·memo·priority·key-images·presentation·annotations·send-gsps·send-kos·analyze).
+      그중 상당수는 별도 권한 게이트 없이 이 가드 하나에 의존한다. 그러니 여기서 협진을
+      무조건 통과시키면 **게스트가 타 병원 검사의 주석을 덮어쓰는** 경로가 즉시 생긴다.
+      실제로 초안 구현이 그랬고, 그것이 "판독 수정은 할 수 없다"는 요구를 정면으로 어긴다.
+      그래서 opt-in 으로 뒤집었다: 새 엔드포인트가 생겨도 아무것도 하지 않으면 안전하다.
+
+    True 를 주는 곳은 **게스트 뷰어가 화면을 그리는 데 실제로 필요한 조회 4개뿐**이다
+    (검사 상세·시리즈 트리·인스턴스·GSPS). 통과 시 감사로그를 남긴다.
+    """
     study = db.get(Study, study_id)
     if not study:
         raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     is_sys_admin = user.get("role") == "admin" and not user.get("hid")
     if not is_sys_admin and user.get("hid") and study.hospital_id != user.get("hid"):
-        raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
+        if not (allow_collab and _collab_may_read(db, user, study_id)):
+            raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     return study
+
+
+# 협진 열람 감사 중복 억제 — (uid, study_id) 당 이 초 안에는 한 번만 기록한다.
+# 뷰어는 검사 하나를 여는 동안 per-study 엔드포인트를 수십 번 때리므로(상세·시리즈·판독·
+# 썸네일…) 그대로 남기면 감사 테이블이 같은 줄로 뒤덮여 정작 사건을 못 찾는다.
+_COLLAB_AUDIT_TTL = 300.0
+_collab_audit_seen: dict[tuple[int, int], float] = {}
+
+
+def _collab_may_read(db: Session, user: dict, study_id: int) -> bool:
+    """협진 임시 열람권 판정 + 감사. 실패는 조용히 False(존재 은닉 유지)."""
+    uid = user.get("uid")
+    if not uid:
+        return False
+    try:
+        from app.services.collab_service import has_active_grant
+
+        if not has_active_grant(db, int(uid), int(study_id)):
+            return False
+    except Exception:  # noqa: BLE001 — 협진 조회 실패가 기존 테넌시 판정을 흔들면 안 된다
+        logger.debug("협진 열람권 조회 실패(거부로 처리)", exc_info=True)
+        return False
+    key = (int(uid), int(study_id))
+    now = time.monotonic()
+    if _collab_audit_seen.get(key, 0.0) < now:
+        _collab_audit_seen[key] = now + _COLLAB_AUDIT_TTL
+        if len(_collab_audit_seen) > 4096:      # 무한 성장 방지 — 만료분 청소
+            for k, exp in list(_collab_audit_seen.items()):
+                if exp < now:
+                    _collab_audit_seen.pop(k, None)
+        try:
+            db.add(AuditLog(account_id=int(uid), action="collab_study_read",
+                            target_type="study", target_id=str(study_id),
+                            detail={"via": "collab_grant", "username": user.get("sub", "")}))
+            db.commit()
+        except Exception:  # noqa: BLE001 — 감사 실패로 판독 화면이 죽으면 안 된다
+            db.rollback()
+            logger.warning("협진 열람 감사로그 기록 실패 (study_id=%s)", study_id, exc_info=True)
+    return True
 
 
 class NlQueryBody(BaseModel):
@@ -139,7 +195,8 @@ def nl_query(body: NlQueryBody, user: dict = Depends(current_user)):
 
 @router.get("/studies/{study_id}")
 def get_study(study_id: int, db: Session = Depends(get_db), user: dict = Depends(current_user)):
-    _require_study(db, study_id, user)   # 병원 스코프 가드
+    # allow_collab — 협진 게스트가 화면을 그리려면 반드시 필요한 조회 4개 중 하나(읽기 전용)
+    _require_study(db, study_id, user, allow_collab=True)   # 병원 스코프 가드
     detail = study_detail(db, study_id)
     if not detail:
         raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
@@ -287,7 +344,7 @@ def series_tree(study_id: int, db: Session = Depends(get_db), user: dict = Depen
     from app.config import get_settings
     from app.dicom.orthanc import OrthancClient
 
-    study = _require_study(db, study_id, user)
+    study = _require_study(db, study_id, user, allow_collab=True)   # 협진 게스트 조회 허용
     if not study:
         raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     if not study.orthanc_id:
@@ -324,7 +381,7 @@ def study_instances(study_id: int, db: Session = Depends(get_db), user: dict = D
     from app.config import get_settings
     from app.dicom.orthanc import OrthancClient
 
-    study = _require_study(db, study_id, user)
+    study = _require_study(db, study_id, user, allow_collab=True)   # 협진 게스트 조회 허용
     if not study:
         raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     if not study.orthanc_id:
@@ -810,7 +867,8 @@ def load_gsps(study_id: int, db: Session = Depends(get_db), user: dict = Depends
     from app.dicom.orthanc import OrthancClient
     from pydicom import dcmread
 
-    study = _require_study(db, study_id, user)
+    # 협진 게스트도 호스트가 저장해 둔 주석(PR)을 봐야 논의가 된다 — 읽기 전용
+    study = _require_study(db, study_id, user, allow_collab=True)
     if not study:
         raise HTTPException(status_code=404, detail="검사를 찾을 수 없습니다")
     if not study.orthanc_id:

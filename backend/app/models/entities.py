@@ -559,3 +559,131 @@ class ActiveSession(Base):
     # 인계 예약 — 설정되면 해당 세션은 'revoke 대기'(신규 로그인 대상에서 제외) + 카운트다운 종료
     revoke_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoke_reason: Mapped[str] = mapped_column(String(200), default="")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 실시간 협진(Co-Reading) — 친구·메신저·세션·제어권·임시 열람권
+#
+# 설계 요지(app/services/collab_service.py 와 짝):
+#   · 화면 공유는 **픽셀이 아니라 뷰어 상태**를 미러링한다. 그래서 여기에 영상 관련 저장은 없다.
+#   · 게스트의 권한 상승 경로가 **존재하지 않는다**: CollabGrant 는 조회 게이트
+#     (worklist._require_study) 한 곳에서만 참조되고, 쓰기 엔드포인트가 쓰는
+#     require_effective(...) 는 협진을 전혀 모른다. 즉 '읽기 전용'이 설계로 보장된다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class CollabFriend(Base):
+    """친구 관계·요청 — (low_id, high_id) 정규화 쌍당 1행.
+
+    왜 정규화하나: A→B 요청과 B→A 요청이 각각 행을 만들면 '수락했는데 저쪽엔 아직 대기'
+    같은 반쪽 상태가 생긴다. 쌍을 min/max 로 정규화해 유니크를 걸면 그 상태가 구조적으로 없다.
+    방향(누가 걸었나)은 requester_id 로 따로 들고 있으므로 정보 손실도 없다.
+    """
+
+    __tablename__ = "collab_friend"
+    __table_args__ = (UniqueConstraint("low_id", "high_id", name="uq_collab_friend_pair"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    low_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)   # min(요청자, 상대)
+    high_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)  # max(요청자, 상대)
+    requester_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    # pending | accepted | declined | blocked
+    message: Mapped[str] = mapped_column(String(200), default="")   # 요청 시 첨부 메모
+    blocked_by: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 차단한 쪽 account id
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CollabMessage(Base):
+    """메신저 — 1:1 DM 과 협진 세션 룸 채팅을 room_key 하나로 함께 담는다.
+
+    room_key: "dm:<낮은id>:<높은id>" | "sess:<세션 code>"
+    read_at 은 DM(수신자 1명)에서만 의미가 있다 — 세션 룸은 참가 중이면 곧 읽은 것이라
+    안읽음 개념을 두지 않는다(팬아웃 테이블을 만들지 않기 위한 의도적 단순화).
+    """
+
+    __tablename__ = "collab_message"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    room_key: Mapped[str] = mapped_column(String(96), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16), default="text")  # text | system | invite
+    body: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CollabSession(Base):
+    """협진 세션 — 초청자(host=Master)가 검사 1건을 걸고 연다.
+
+    study_id 는 '지금 공유 중인 검사'다. Master 가 Exam 탭을 바꾸면 이 값이 바뀌고
+    참가자마다 새 CollabGrant 가 발급된다(과거 grant 는 세션 종료까지 유효 유지 —
+    게스트가 이전 검사로 되돌아가 비교하는 것이 협진의 정상 동작이기 때문).
+    """
+
+    __tablename__ = "collab_session"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    host_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    host_hospital_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    study_id: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    study_uid: Mapped[str] = mapped_column(String(128), default="")
+    title: Mapped[str] = mapped_column(String(256), default="")
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | closed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CollabParticipant(Base):
+    """세션 참가자 + 제어권(talking stick).
+
+    제어권은 세션당 최대 1명이 갖는다(host 가 기본 보유). control='granted' 인 참가자만
+    뷰어 상태를 송출할 수 있고, 서버가 그것을 검증한다(비보유자의 state 는 폐기).
+    caps 는 위임된 협진 capability 목록 — permissions.COLLAB_CAPS 의 부분집합이며
+    기존 권한 키(report.write 등)는 **여기에 절대 들어갈 수 없다**(collab_service 가 교집합으로 강제).
+    """
+
+    __tablename__ = "collab_participant"
+    __table_args__ = (
+        UniqueConstraint("session_id", "account_id", name="uq_collab_participant"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("collab_session.id"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    role: Mapped[str] = mapped_column(String(8), default="guest")   # host | guest
+    state: Mapped[str] = mapped_column(String(16), default="invited", index=True)
+    # invited | joined | left | denied
+    control: Mapped[str] = mapped_column(String(16), default="none")  # none | requested | granted
+    control_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    caps: Mapped[list] = mapped_column(JSON, default=list)
+    invited_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class CollabGrant(Base):
+    """세션 한정 임시 열람권 — 타 병원 참가자가 그 검사를 '볼 수만' 있게 하는 유일한 근거.
+
+    ⚠ 이 행은 오직 worklist._require_study 의 **조회** 게이트에서만 참조된다.
+      쓰기(판독 저장·영상 삭제·이동…)는 기존 require_effective 경로가 그대로 막는다.
+      즉 이 테이블에 행이 아무리 많아도 게스트의 쓰기 권한은 1mm 도 늘어나지 않는다.
+    세션이 닫히면 collab_service.close_session 이 전 행에 revoked_at 을 찍는다.
+    """
+
+    __tablename__ = "collab_grant"
+    __table_args__ = (
+        UniqueConstraint("session_id", "account_id", "study_id", name="uq_collab_grant"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("collab_session.id"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("accounts.id"), index=True)
+    study_id: Mapped[int] = mapped_column(Integer, index=True)
+    granted_by: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

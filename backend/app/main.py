@@ -15,6 +15,8 @@ from app.api import (
     admin,
     auth,
     backup,
+    collab,
+    collab_ws,
     examctl,
     hospital_admin,
     hospital_storage,
@@ -198,6 +200,8 @@ app.include_router(examctl.router)  # Exam Control — 관리자용 검사 QC(/a
 app.include_router(activity.router)  # 활동 하트비트 — 판독 상태(read_state) 신호
 app.include_router(webpacs.router)  # WebPACS 브리지 — 인계 웹서비스(webpacs_api) 검사 가져오기
 app.include_router(webpacs_live.router)  # WebPACS Live — A 직결(복사 없음, vid≥90M 라우팅)
+app.include_router(collab.router)     # 협진 — 친구·메신저·세션 REST
+app.include_router(collab_ws.router)  # 협진 실시간 — WS /api/collab/ws (프레즌스·미러·시그널링)
 from app.api import export_dicom  # noqa: E402 — 검사 DICOM 반출(폴더/USB·ZIP·CD용 ISO)
 app.include_router(export_dicom.router)
 if insights_api is not None:

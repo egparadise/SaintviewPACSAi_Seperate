@@ -2,9 +2,11 @@
 // 흐름: 홈 → (가입) → [관리자 로그인 → 관리자 콘솔] 또는 [Client 뷰어 로그인(병원ID+ID+PW) → PACS Viewer]
 // 포트 계약: 5173 Landing(소개+가입) / 5174 관리자 포털 / 5175 Client 포털 / 그 외 'all' 폴백(단일 서빙 전체 기능)
 // ⚠ 5174/5175 는 별개 오리진 — localStorage 세션 미공유. 각 포털에서 최초 1회 로그인이 의도된 설계다.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import "./theme.css";
 import { hasToken, setToken, api, type LoginResp } from "./api";
+import { collab } from "./lib/collab";
+import { CollabGlobal } from "./components/CollabGlobal";
 import { portalRole, portalUrl, type PortalTarget } from "./lib/portals";
 import { Worklist } from "./pages/Worklist";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -98,8 +100,18 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(restoreSession);
   const [authView, setAuthView] = useState<AuthView>(INITIAL_AUTH_VIEW);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [collabOpen, setCollabOpen] = useState(false);
+
+  // 협진 WebSocket — 세션이 있으면 붙고 없으면 끊는다. **창마다 소켓 1개**가 설계다
+  // (다중 모니터에서 각 뷰어 창이 독립적으로 미러를 주고받아야 하므로 — lib/collab.ts 주석).
+  // App 은 워크리스트·뷰어창·판독창 모든 진입점의 루트라 여기 한 곳이면 전 창이 덮인다.
+  useEffect(() => {
+    if (session) collab.reset();
+    else collab.close();
+  }, [session]);
 
   const logout = () => {
+    collab.close();
     // 뷰어 창(sv_viewer)도 닫히도록 신호 — storage 이벤트는 같은 오리진 창에만 전달되므로
     // 이 로그아웃 연쇄는 현재 포털(오리진) 내에서만 동작한다(다른 포털 세션은 영향 없음, 의도된 설계).
     localStorage.setItem("sv_logout", String(Date.now()));
@@ -199,9 +211,16 @@ export default function App() {
         {session.hospitalName && <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>🏥 {session.hospitalName}</span>}
         <div style={{ flex: 1 }} />
         <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{session.name} [{session.role}]</span>
+        {/* 협진 — 같은 병원·타 병원 사용자와 친구를 맺고 메신저로 대화한다.
+            실제 영상 공유(세션)는 뷰어 창에서 [협진] 버튼으로 시작한다. */}
+        <button onClick={() => setCollabOpen((v) => !v)} title="협진 — 친구 · 메신저"
+                style={collabOpen ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>
+          협진
+        </button>
         <button onClick={() => setSettingsOpen(true)}>설정</button>
         <button onClick={logout}>로그아웃</button>
       </header>
+      <CollabGlobal open={collabOpen} onClose={() => setCollabOpen(false)} />
       {settingsOpen && <SettingsModal role={session.role} scope="viewer" onClose={() => setSettingsOpen(false)} />}
       <main style={{ flex: 1, minHeight: 0 }}>
         <ErrorBoundary where="worklist"><Worklist /></ErrorBoundary>
