@@ -737,11 +737,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // ── 검사별 화면 구성 기억(세션) ────────────────────────────────────────
   // 사용자가 화면에서 즉흥적으로 잡은 구성(Series/Image 분할·어느 페인에 어느 시리즈·현재 장·
   // W/L·확대·회전…)은 **설정에 저장한 것이 아니어도** 탭을 오갈 때 유지돼야 한다.
-  // 예전엔 다른 환자 검사로 전환하면 hangAll() 이 기본 행잉으로 전체를 다시 깔아 사용자가
-  // 잡아 둔 구성이 통째로 날아갔다. 창을 닫기 전까지는 검사별로 그대로 기억한다.
-  interface ExamView { layout: keyof typeof LAYOUTS; imgLay: { r: number; c: number };
-                       panes: Record<string, PaneState>; activePane: string; srsPage: number }
-  const examViewRef = useRef<Record<number, ExamView>>({});
+  // ⚠ '검사별 화면 구성 기억/복원' 을 **없앴다.** 사용자가 못박은 규정과 정면으로 충돌했기
+  //   때문이다 — "탭으로 검사를 바꾸면 언제나 설정의 모달리티 분할을 따른다".
+  //   기억해 둔 구성을 되살리면 그 검사를 처음 봤을 때의 격자가 따라다녀서, 설정을 바꿔도
+  //   모달리티가 달라도 이전 화면 구조가 남았다(사용자가 지적한 그 증상).
+  //   분할은 설정(또는 HP)이 정한다. 예외를 두지 않는다.
   // 지금 화면이 보여 주는 검사 — 판독창·상단 정보가 이 값을 따라간다(영상만 바뀌고 판독이
   // 이전 검사에 머물러 있던 문제). 창을 연 검사(detail)와 다를 수 있다.
   const [activeExamId, setActiveExamId] = useState<number>(detail.id);
@@ -1555,23 +1555,6 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setSelPanes(new Set());
   };
 
-  /** 지금 화면 구성을 이 검사 몫으로 저장 — 탭을 떠나기 직전에 부른다 */
-  const saveExamView = (id: number) => {
-    examViewRef.current[id] = {
-      layout, imgLay, panes: panesRef.current, activePane, srsPage,
-    };
-  };
-  /** 기억해 둔 구성 복원. 없으면 false(호출부가 기본 행잉을 한다) */
-  const restoreExamView = (id: number): boolean => {
-    const v = examViewRef.current[id];
-    if (!v) return false;
-    setLayout(v.layout);
-    setImgLay(v.imgLay);
-    setPanes(v.panes);
-    setActivePane(v.activePane);
-    setSrsPage(v.srsPage);
-    return true;
-  };
   /** 판독창·상단 정보가 지금 보는 검사를 따라가게 한다(없으면 1회 조회해 캐시) */
   const focusExam = (id: number) => {
     setActiveExamId(id);
@@ -1586,57 +1569,42 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     try {
       const tree = isMain ? { uid: detail.study_uid, series } : await getTree(id);
       if (!tree.series[0]) { setStatus("이 검사에 표시할 영상 시리즈가 없습니다"); return; }
-      // 대상 검사의 환자 확인(메타 미로드 시 1회 조회) — 탭 전환은 암묵 동선이므로 환자 혼합 금지
+      // 대상 검사의 환자·모달리티 확인 — **둘 다** 필요하다.
+      // 환자: 탭 전환은 암묵 동선이라 환자 혼합을 막아야 한다.
+      // 모달리티: 분할은 이 값으로 다시 계산한다. 못 읽으면 규정을 적용할 수 없으므로
+      //           메타가 없으면 **반드시 1회 조회**한다(예전엔 빈 값이면 그냥 넘어가
+      //           이전 검사의 분할이 그대로 남았다 — 사용자가 지적한 그 증상이다).
       let targetKey = isMain ? detail.patient_key : studyMeta[tree.uid]?.patient_key;
-      if (!targetKey && !isMain) {
+      let targetMod = String((isMain ? detail.modality : studyMeta[tree.uid]?.modality) ?? "");
+      if ((!targetKey || !targetMod) && !isMain) {
         try {
           const d = await api.study(id);
-          targetKey = d.patient_key;
+          targetKey = targetKey || d.patient_key;
+          targetMod = targetMod || d.modality;
           setStudyMeta((m) => ({ ...m, [tree.uid]: metaOf(d) }));
-        } catch { /* 메타 실패 시 아래 혼합 판정은 보수적으로 통과 */ }
+        } catch { /* 메타 실패 — 아래 혼합 판정은 보수적으로 통과, 분할은 강제하지 않는다 */ }
       }
+      targetMod = targetMod.toUpperCase();
       const vis = PANE_IDS.slice(0, LAYOUTS[layout].count);
       const mixed = !!targetKey && vis.some((pid2) => {
         const u = panes[pid2].studyUid || detail.study_uid;
         const k = (studyMeta[u] ?? (u === detail.study_uid ? detail : undefined))?.patient_key;
         return !!k && k !== targetKey;
       });
-      // 대상 검사의 modality — 분할은 **이 값**으로 다시 계산해야 한다.
-      const targetMod = String(
-        (isMain ? detail.modality : studyMeta[tree.uid]?.modality) ?? "").toUpperCase();
-      const curMod = String(
-        (studyMeta[panes[activePane]?.studyUid || detail.study_uid]?.modality
-         ?? detail.modality) || "").toUpperCase();
 
-      if (mixed) {
-        // 다른 환자로의 전환 — 활성 페인만 바꾸면 이전 환자 영상이 격자에 남아 섞이므로 화면 전체를 바꾼다.
-        // ⚠ 떠나기 전에 지금 구성을 저장하고, 대상 검사에 기억해 둔 구성이 있으면 **그것을 되살린다**.
-        //    (예전엔 무조건 기본 행잉이라 사용자가 잡아 둔 구성이 매번 날아갔다)
-        saveExamView(activeExamId);
-        if (restoreExamView(id)) {
-          setStatus("검사 전환 — 이 검사에서 보던 화면 구성을 복원했습니다");
-        } else {
-          // ★ 새 검사의 modality 로 분할을 **다시 계산**한다. 예전엔 현재 layout(예: CT 2×2)을
-          //   그대로 써서, DR 을 열면 4칸 중 3칸이 빈 채로 남고 DR 자기 설정은 무시됐다.
-          hangAll(tree.uid, tree.series, applyHangFor(targetMod));
-          setStatus("검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다 (혼합 비교는 ⇄ Compare/+Add 사용)");
-        }
-        focusExam(id);   // 판독창·상단 정보도 이 검사로
-        return;
-      }
-
-      // 같은 환자라도 **모달리티가 다르면** 분할이 달라야 한다(CT 2×2 격자에 DR 을 끼우지 않는다).
-      if (targetMod && curMod && targetMod !== curMod) {
-        saveExamView(activeExamId);
-        hangAll(tree.uid, tree.series, applyHangFor(targetMod));
-        setStatus(`검사 전환 — ${targetMod} 기본 분할로 다시 배치했습니다`);
-        focusExam(id);
-        return;
-      }
-
-      const s = tree.series[0];
-      patch(activePane, { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2),
-                          il: hang2dImgRef.current ?? undefined });
+      // ★★ 규정: **탭으로 검사를 바꾸면 언제나** 설정(뷰어 공통/뷰어별)의 모달리티 분할을 따른다.
+      //    HP 가 선택돼 있으면 HP 가 이긴다(applyHangFor 안에서 판정 — 그때는 분할을 안 건드린다).
+      //
+      //    ⚠ 예전에 뚫려 있던 구멍 두 개를 여기서 함께 막는다:
+      //      ① `restoreExamView` 가 **옛 분할째로** 되살렸다. 그 검사를 처음 봤을 때의 격자가
+      //         그대로 돌아와, 설정을 바꿔도·모달리티가 달라도 이전 화면 구조가 따라다녔다.
+      //      ② 모달리티를 못 읽으면(메타 미로드) 조건문이 통째로 건너뛰어 이전 분할이 남았다.
+      //    그래서 '언제나 다시 계산' 으로 단순화했다. 규정이 예외를 두지 않으므로 코드도 두지 않는다.
+      const count = applyHangFor(targetMod);
+      hangAll(tree.uid, tree.series, count);
+      setStatus(mixed
+        ? `검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다${targetMod ? ` (${targetMod} 분할)` : ""}`
+        : `검사 전환${targetMod ? ` — ${targetMod} 분할로 배치했습니다` : ""}`);
       focusExam(id);
     } catch { setStatus("검사 전환 실패"); }
   };

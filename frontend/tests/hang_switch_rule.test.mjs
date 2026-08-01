@@ -142,3 +142,40 @@ test("HP 해제가 기본 — hpActive 를 안 넘기면 ②③ 규칙이 그대
   assert.equal(resolveHang2d(COMMON_ON, "ty", "CT").s, "2x2");
   assert.equal(resolveHang2d(COMMON_ON, "ty", "CT", null, false).s, "2x2");
 });
+
+/* ── 탭 전환은 **예외가 없다** ────────────────────────────────────────────────
+ * 사용자 재확인: "뷰어 모니터의 현재 열려있는 layout 구조로 이후 Exam 탭을 전환하더라도
+ *                같이 적용된다. 이 부분이 항상 Setting 의 Modality별 Layout 을 따르게 하라."
+ *
+ * 그래서 코드에서 '검사별 화면 구성 기억/복원' 을 없앴다. 그것이 옛 격자를 되살려
+ * 규정을 무력화했기 때문이다. 아래는 그 규정을 값으로 고정한다.
+ */
+
+test("★ 어떤 조합으로 전환해도 **대상 모달리티의 설정값**이 나온다", () => {
+  const seq = ["CT", "DR", "MR", "DX", "CT", "US"];
+  for (const mod of seq) {
+    const r = resolveHang2d(PREFS, "ty", mod);
+    const expected = PREFS.hanging2d[mod] ?? PREFS.hanging2d["*"];
+    assert.equal(r.s, expected, `${mod} 전환 시 ${expected} 가 아니라 ${r.s}`);
+  }
+});
+
+test("★ 직전에 무엇을 보고 있었는지는 결과에 영향이 없다 (상태 무관)", () => {
+  // resolveHang2d 는 '현재 화면' 을 인자로 받지 않는다 — 그것이 이 규정을 구조적으로 보장한다.
+  const a = resolveHang2d(PREFS, "ty", "DR");
+  const b = resolveHang2d(PREFS, "ty", "DR");
+  assert.deepEqual(a, b);
+  assert.equal(a.s, "1x1", "CT 를 보다 왔든 MR 을 보다 왔든 DR 은 1x1");
+});
+
+test("모달리티를 못 읽으면 **분할을 강제하지 않는다** (옛 격자를 남기지도 않는다)", () => {
+  // 호출부는 메타가 없으면 1회 조회한다. 그래도 모르면 s=null → 현재 분할 유지.
+  // ⚠ 이것이 '이전 검사 분할이 남는' 유일한 정당한 경우다. 그 외에는 없어야 한다.
+  assert.equal(resolveHang2d(PREFS, "ty", "").s, null);
+  assert.equal(resolveHang2d(PREFS, "ty", "   ").s, null);
+});
+
+test("소문자 modality 도 같은 설정을 찾는다 (A 가 어떻게 주든)", () => {
+  assert.equal(resolveHang2d(PREFS, "ty", "ct").s, "2x2");
+  assert.equal(resolveHang2d(PREFS, "ty", "dr").s, "1x1");
+});

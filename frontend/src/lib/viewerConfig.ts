@@ -345,7 +345,10 @@ export function resolveHang2d(
   //   ④ MG 는 위 표 밖 — 언제나 맘모 규정(mg_hang).
   //   ②③ 판정은 pickHang2d 한 곳에만 있다(폴백 없음). 여기서 다시 분기하지 않는다.
   if (hpActive) return { s: null, i: null };      // ① HP 가 정한다 — 건드리지 않는다
-  const mod = String(modality || "").toUpperCase();
+  // ⚠ trim 이 필요하다 — 공백만 있는 값은 '모른다' 이지 '   ' 라는 모달리티가 아니다.
+  //   trim 없이 넘기면 pickHang2d 가 '*'(기타 전체)로 폴백해, 모달리티를 못 읽은 상황에서
+  //   엉뚱한 분할을 **강제**한다. 모르면 강제하지 않는 것이 규정이다.
+  const mod = String(modality || "").trim().toUpperCase();
   if (mod === "MG") {
     return { s: mgLayout || null, i: null };     // MG 는 뷰당 페인 1칸(타일 분할 없음)
   }
