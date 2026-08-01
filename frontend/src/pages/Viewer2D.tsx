@@ -1406,7 +1406,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const mammo = detail.modality === "MG";
       const ma = mammo ? mammoAssign(imgSeries) : null;
       const mammoSeries = ma && ma.some(Boolean) ? ma : null;   // 매칭 0이면 순서대로 폴백(빈 페인 방지)
-      if (mammo) setLayout("2x2");   // 오버레이는 끄지 않는다 — 환자·검사·W/L 은 판독 필수 정보
+      // ⚠ 예전에는 MG 면 **무조건** setLayout("2x2") 였다. 그런데 4뷰가 한 시리즈에 든 검사는
+      //   MG 규정(mg_hang)이 mgHangTo 로 따로 건다(기본 Image 2×2). 둘이 매 로드마다 서로
+      //   덮어써서 화면이 엉망이 됐다 — 어느 쪽이 마지막에 도느냐에 따라 페인 구성과
+      //   배율이 뒤죽박죽이었다(사용자 보고 스크린샷).
+      //   → **뷰별 시리즈가 실제로 매칭된 경우에만** 여기서 2×2 를 건다. 4뷰가 한 시리즈면
+      //     MG 규정이 소유한다(그쪽 effect 도 mammoAssign 이 성립하면 스스로 물러난다).
+      if (mammo && mammoSeries) setLayout("2x2");   // 오버레이는 끄지 않는다 — 판독 필수 정보
       setSelSeries(null);   // 처음 열 때 썸네일 이미지 목록은 모두 접힘 — 더블클릭으로만 펼침
       if (imgSeries[0]) {
         // ② AI 추천 W/L 자동 적용(수동 변경 가능). 합성/비보정 데이터(PixelSpacing 없음)는
