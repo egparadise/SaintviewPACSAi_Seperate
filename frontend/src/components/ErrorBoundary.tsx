@@ -12,6 +12,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { APP_VERSION, BUILD_DATE, BUILD_SHA } from "../lib/appVersion";
 import { describeReason } from "../lib/crashReason";
+import { t as tr } from "../lib/i18n";
 
 const LOG_KEY = "sv_crash_log";
 const LOG_MAX = 20;
@@ -115,11 +116,11 @@ export class ErrorBoundary extends Component<Props, State> {
       <div style={{ padding: 16, color: "var(--text-primary)", background: "var(--bg-canvas)",
                     height: "100%", overflow: "auto", fontSize: 13, lineHeight: 1.7 }}>
         <div style={{ fontSize: 15, fontWeight: 800, color: "#f87171", marginBottom: 6 }}>
-          이 화면을 표시하는 중 오류가 발생했습니다
+          {tr("이 화면을 표시하는 중 오류가 발생했습니다")}
         </div>
         <div style={{ color: "var(--text-secondary)", marginBottom: 10 }}>
-          나머지 기능은 계속 쓸 수 있습니다. 아래 내용을 개발자에게 전달해 주세요 —
-          <b> 새로고침해도 기록은 남습니다</b>(설정 &gt; 정보에서 다시 볼 수 있습니다).
+          {tr("나머지 기능은 계속 쓸 수 있습니다. 아래 내용을 개발자에게 전달해 주세요 —")}
+          <b> {tr("새로고침해도 기록은 남습니다")}</b>{tr("(설정 > 정보에서 다시 볼 수 있습니다).")}
         </div>
         <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 11.5,
                       background: "var(--bg-panel)", border: "1px solid var(--border)",
@@ -128,10 +129,10 @@ export class ErrorBoundary extends Component<Props, State> {
         </pre>
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button className="primary" onClick={() => this.setState({ err: null, info: "" })}>
-            다시 시도
+            {tr("다시 시도")}
           </button>
-          <button onClick={() => location.reload()}>새로고침</button>
-          <button onClick={() => void navigator.clipboard?.writeText(detail)}>오류 내용 복사</button>
+          <button onClick={() => location.reload()}>{tr("새로고침")}</button>
+          <button onClick={() => void navigator.clipboard?.writeText(detail)}>{tr("오류 내용 복사")}</button>
         </div>
       </div>
     );

@@ -5,6 +5,7 @@
 // 워크리스트 화면과 Setting 화면이 동일 컴포넌트로 편집한다.
 import { useState } from "react";
 import { api } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 
 /* ── 타입 ── */
 export interface FolderFilter {
@@ -86,16 +87,16 @@ export function filtersToFolder(filters: Record<string, string>, datePreset: str
 /** 조건 한 줄 요약 — 트리/탭 툴팁·설정 화면 표시 */
 export function folderSummary(f: FolderFilter): string {
   const p: string[] = [];
-  if (f.date) p.push(DATE_LABEL[f.date]);
+  if (f.date) p.push(tr(DATE_LABEL[f.date]));
   if (f.modality) p.push(f.modality);
   if (f.body_part) p.push(f.body_part);
   if (f.desc) p.push(f.desc);
-  if (f.status) p.push(STATUS_LABEL[f.status] ?? f.status);
-  if (f.emergency) p.push("⚠응급");
+  if (f.status) p.push(tr(STATUS_LABEL[f.status] ?? f.status));
+  if (f.emergency) p.push(tr("⚠응급"));
   if (f.pid) p.push(`ID:${f.pid}`);
   if (f.pname) p.push(f.pname);
   if (f.sex) p.push(f.sex);
-  return p.join(" · ") || "조건 없음";
+  return p.join(" · ") || tr("조건 없음");
 }
 
 /* ── 트리 불변 변형 ── */
@@ -142,6 +143,7 @@ export function FolderEditModal({ title, init, onSave, onClose }: {
   onSave: (label: string, filter: FolderFilter) => void;
   onClose: () => void;
 }) {
+  useLang();   // 언어 변경 시 라벨·옵션이 즉시 다시 그려진다
   const [label, setLabel] = useState(init?.label ?? "");
   const [f, setF] = useState<FolderFilter>(init?.filter ?? {});
   const set = (k: keyof FolderFilter, v: string | boolean) => setF((p) => ({ ...p, [k]: v }));
@@ -158,57 +160,57 @@ export function FolderEditModal({ title, init, onSave, onClose }: {
                     width: 560, maxWidth: "94vw", maxHeight: "90vh", overflowY: "auto",
                     padding: 18, display: "flex", flexDirection: "column", gap: 10 }}>
         <b style={{ fontSize: 13 }}>{title}</b>
-        <Row name="이름 *">
+        <Row name={tr("이름 *")}>
           <input autoFocus value={label} onChange={(e) => setLabel(e.target.value)}
-                 placeholder="예: 응급실 / DR / Chest" style={{ flex: 1 }} />
+                 placeholder={tr("예: 응급실 / DR / Chest")} style={{ flex: 1 }} />
         </Row>
         <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-          이 폴더가 더할 조건만 입력 — 상위 폴더 조건과 누적 병합되어 검색됩니다.
+          {tr("이 폴더가 더할 조건만 입력 — 상위 폴더 조건과 누적 병합되어 검색됩니다.")}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <Row name="기간">
+          <Row name={tr("기간")}>
             <select value={f.date ?? ""} onChange={(e) => set("date", e.target.value)} style={{ flex: 1 }}>
-              {Object.entries(DATE_LABEL).map(([k, v]) => <option key={k} value={k}>{k ? v : "(상속)"}</option>)}
+              {Object.entries(DATE_LABEL).map(([k, v]) => <option key={k} value={k}>{k ? tr(v) : tr("(상속)")}</option>)}
             </select>
           </Row>
           <Row name="Modality">
             <select value={f.modality ?? ""} onChange={(e) => set("modality", e.target.value)} style={{ flex: 1 }}>
-              <option value="">(상속)</option>
+              <option value="">{tr("(상속)")}</option>
               {["CR", "DX", "CT", "MR", "US", "MG", "XA", "NM", "ES", "RF", "OT"].map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
           </Row>
-          <Row name="부위">
+          <Row name={tr("부위")}>
             <input value={f.body_part ?? ""} onChange={(e) => set("body_part", e.target.value)}
                    placeholder="CHEST…" style={{ flex: 1, minWidth: 0 }} />
           </Row>
-          <Row name="검사명">
+          <Row name={tr("검사명")}>
             <input value={f.desc ?? ""} onChange={(e) => set("desc", e.target.value)} style={{ flex: 1, minWidth: 0 }} />
           </Row>
-          <Row name="상태">
+          <Row name={tr("상태")}>
             <select value={f.status ?? ""} onChange={(e) => set("status", e.target.value)} style={{ flex: 1 }}>
-              <option value="">(상속)</option>
-              {Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              <option value="">{tr("(상속)")}</option>
+              {Object.entries(STATUS_LABEL).map(([k, v]) => <option key={k} value={k}>{tr(v)}</option>)}
             </select>
           </Row>
-          <Row name="응급">
+          <Row name={tr("응급")}>
             <input type="checkbox" checked={!!f.emergency} onChange={(e) => set("emergency", e.target.checked)} />
           </Row>
-          <Row name="환자 ID">
+          <Row name={tr("환자 ID")}>
             <input value={f.pid ?? ""} onChange={(e) => set("pid", e.target.value)} style={{ flex: 1, minWidth: 0 }} />
           </Row>
-          <Row name="성별">
+          <Row name={tr("성별")}>
             <select value={f.sex ?? ""} onChange={(e) => set("sex", e.target.value)} style={{ flex: 1 }}>
-              <option value="">(상속)</option><option value="M">M</option>
+              <option value="">{tr("(상속)")}</option><option value="M">M</option>
               <option value="F">F</option><option value="O">O</option>
             </select>
           </Row>
         </div>
         <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 4 }}>
           <button className="primary" disabled={!label.trim()}
-                  onClick={() => onSave(label.trim(), stripEmpty(f))}>저장</button>
-          <button onClick={onClose}>취소</button>
+                  onClick={() => onSave(label.trim(), stripEmpty(f))}>{tr("저장")}</button>
+          <button onClick={onClose}>{tr("취소")}</button>
         </div>
       </div>
     </div>
@@ -224,6 +226,7 @@ export function FolderTreeEditor({ nodes, onChange, selectedId, onSelect, applyH
   onSelect: (node: TreeNode) => void;
   applyHint?: boolean;  // 워크리스트: 클릭=검색 적용 힌트 표시
 }) {
+  useLang();   // 언어 변경 시 버튼·툴팁이 즉시 다시 그려진다
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [modal, setModal] = useState<{ mode: "add-root" | "add-child" | "edit" } | null>(null);
 
@@ -236,7 +239,7 @@ export function FolderTreeEditor({ nodes, onChange, selectedId, onSelect, applyH
   const renderRows = (list: TreeNode[], depth: number): React.ReactNode => list.map((n) => (
     <div key={n.id}>
       <div onClick={() => onSelect(n)}
-           title={`${folderSummary(mergedFilter(nodes, n.id) ?? n.filter)}${applyHint ? " — 클릭=검색 적용" : ""}`}
+           title={`${folderSummary(mergedFilter(nodes, n.id) ?? n.filter)}${applyHint ? ` — ${tr("클릭=검색 적용")}` : ""}`}
            style={{
              display: "flex", alignItems: "center", gap: 3, padding: "3px 4px",
              paddingLeft: 4 + depth * 12, borderRadius: 3, cursor: "pointer", fontSize: 12,
@@ -253,13 +256,13 @@ export function FolderTreeEditor({ nodes, onChange, selectedId, onSelect, applyH
         {/* 선택된 행에 바로 수정/삭제 — 어디서 편집하는지 즉시 보이도록 */}
         {selectedId === n.id && (
           <>
-            <span title="이 폴더 이름·조건 수정" style={{ flexShrink: 0, fontSize: 10.5, padding: "0 3px" }}
-                  onClick={(e) => { e.stopPropagation(); setModal({ mode: "edit" }); }}>수정</span>
-            <span title="이 폴더 삭제(하위 포함)"
+            <span title={tr("이 폴더 이름·조건 수정")} style={{ flexShrink: 0, fontSize: 10.5, padding: "0 3px" }}
+                  onClick={(e) => { e.stopPropagation(); setModal({ mode: "edit" }); }}>{tr("수정")}</span>
+            <span title={tr("이 폴더 삭제(하위 포함)")}
                   style={{ flexShrink: 0, fontSize: 11, padding: "0 3px", color: "var(--stat-emergency)" }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (window.confirm(`'${n.label}' 폴더와 하위 폴더를 모두 삭제할까요?`)) {
+                    if (window.confirm(`'${n.label}' ${tr("폴더와 하위 폴더를 모두 삭제할까요?")}`)) {
                       onChange(removeNode(nodes, n.id));
                     }
                   }}>✕</span>
@@ -277,32 +280,32 @@ export function FolderTreeEditor({ nodes, onChange, selectedId, onSelect, applyH
       {/* 편집 버튼 바 — 트리 위에 항상 표시(레일이 넘쳐도 잘리지 않음) */}
       <div style={{ display: "flex", gap: 2, padding: "2px 2px 4px", flexWrap: "wrap",
                     borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-        <button title="루트 폴더 추가" style={{ padding: "1px 6px", fontSize: 10.5 }}
-                onClick={() => setModal({ mode: "add-root" })}>＋루트</button>
-        <button title="선택 폴더 아래에 하위 폴더 추가" style={{ padding: "1px 6px", fontSize: 10.5 }}
-                disabled={!selected} onClick={() => setModal({ mode: "add-child" })}>＋하위</button>
-        <button title="선택 폴더 이름·조건 수정" style={{ padding: "1px 6px", fontSize: 10.5 }}
-                disabled={!selected} onClick={() => setModal({ mode: "edit" })}>수정</button>
-        <button title="선택 폴더 삭제(하위 포함)" style={{ padding: "1px 6px", fontSize: 10.5 }}
+        <button title={tr("루트 폴더 추가")} style={{ padding: "1px 6px", fontSize: 10.5 }}
+                onClick={() => setModal({ mode: "add-root" })}>{tr("＋루트")}</button>
+        <button title={tr("선택 폴더 아래에 하위 폴더 추가")} style={{ padding: "1px 6px", fontSize: 10.5 }}
+                disabled={!selected} onClick={() => setModal({ mode: "add-child" })}>{tr("＋하위")}</button>
+        <button title={tr("선택 폴더 이름·조건 수정")} style={{ padding: "1px 6px", fontSize: 10.5 }}
+                disabled={!selected} onClick={() => setModal({ mode: "edit" })}>{tr("수정")}</button>
+        <button title={tr("선택 폴더 삭제(하위 포함)")} style={{ padding: "1px 6px", fontSize: 10.5 }}
                 disabled={!selected}
                 onClick={() => {
                   if (!selected) return;
-                  if (!window.confirm(`'${selected.label}' 폴더와 하위 폴더를 모두 삭제할까요?`)) return;
+                  if (!window.confirm(`'${selected.label}' ${tr("폴더와 하위 폴더를 모두 삭제할까요?")}`)) return;
                   onChange(removeNode(nodes, selected.id));
                 }}>✕</button>
       </div>
       <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
         {nodes.length === 0 && (
           <div style={{ fontSize: 11, color: "var(--text-secondary)", padding: "4px 6px" }}>
-            ＋루트로 폴더 등록<br />예: 응급실 › DR › Chest
+            {tr("＋루트로 폴더 등록")}<br />{tr("예: 응급실 › DR › Chest")}
           </div>
         )}
         {renderRows(nodes, 0)}
       </div>
       {modal && (
         <FolderEditModal
-          title={modal.mode === "edit" ? `폴더 수정 — ${selected?.label}`
-               : modal.mode === "add-child" ? `'${selected?.label}' 아래 새 폴더` : "새 루트 폴더"}
+          title={modal.mode === "edit" ? `${tr("폴더 수정")} — ${selected?.label}`
+               : modal.mode === "add-child" ? `'${selected?.label}' ${tr("아래 새 폴더")}` : tr("새 루트 폴더")}
           init={modal.mode === "edit" && selected ? { label: selected.label, filter: selected.filter } : undefined}
           onSave={(label, filter) => {
             if (modal.mode === "edit" && selected) {

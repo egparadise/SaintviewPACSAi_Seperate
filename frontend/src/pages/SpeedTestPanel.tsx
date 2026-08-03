@@ -6,6 +6,7 @@
 // 이 패널은 **실제 뷰어가 하는 것과 같은 순서**로 각 구간을 재서 표로 보여준다.
 import { useEffect, useRef, useState } from "react";
 import { api, isLiveId, type StudyRow } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 import { DICOMWEB_ROOT, renderedParams } from "../lib/imageFormat";
 import { renderedRootFor } from "../lib/liveUids";
 
@@ -14,6 +15,7 @@ type Step = { name: string; ms: number; detail: string; warn?: boolean };
 const fmt = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`);
 
 export function SpeedTestPanel() {
+  useLang();
   const [rows, setRows] = useState<StudyRow[]>([]);
   const [sel, setSel] = useState<number>(0);
   const [busy, setBusy] = useState(false);
@@ -65,10 +67,10 @@ export function SpeedTestPanel() {
       const nInst = tree.series.reduce((a, s) => a + s.instances.length, 0);
       const tTree = t() - t0;
       push({ name: "③ 시리즈 목록(series-tree)", ms: tTree, warn: tTree > 800,
-             detail: `시리즈 ${tree.series.length} · 인스턴스 ${nInst}` });
+             detail: `${tr("시리즈")} ${tree.series.length} · ${tr("인스턴스")} ${nInst}` });
 
       const s0 = tree.series.find((s) => s.instances.length) ?? tree.series[0];
-      if (!s0?.instances.length) { setVerdict("영상 시리즈가 없습니다."); setBusy(false); return; }
+      if (!s0?.instances.length) { setVerdict(tr("영상 시리즈가 없습니다.")); setBusy(false); return; }
       const mid = s0.instances[Math.floor(s0.instances.length / 2)];
 
       // ④ 첫 프레임(서버 렌더 + 전송) — 뷰어가 실제로 쓰는 URL 그대로
@@ -84,8 +86,8 @@ export function SpeedTestPanel() {
         push({ name: "④ 첫 영상(콜드)", ms: t() - t0, warn: true,
                detail: r1.status === 401 ? "401 인증 실패 — 다시 로그인하세요" : `HTTP ${r1.status}` });
         setVerdict(r1.status === 401
-          ? "영상 자격증명이 만료됐습니다. 로그아웃 후 다시 로그인하세요."
-          : `영상 요청이 실패했습니다 (HTTP ${r1.status}).`);
+          ? tr("영상 자격증명이 만료됐습니다. 로그아웃 후 다시 로그인하세요.")
+          : `${tr("영상 요청이 실패했습니다")} (HTTP ${r1.status}).`);
         setBusy(false);
         return;
       }
@@ -119,9 +121,9 @@ export function SpeedTestPanel() {
         srvGzip = cached ? null : ratio < 0.85;
         push({
           name: "⑦ 서버 압축(gzip)", ms: 0, warn: srvGzip === false,
-          detail: cached ? `캐시 적중 — 판정 불가(강력 새로고침 후 재측정)`
-            : srvGzip ? `적용됨 — ${raw.toFixed(0)}KB → ${(big.transferSize / 1024).toFixed(0)}KB`
-            : `❌ 꺼짐 — ${raw.toFixed(0)}KB 무압축 전송`,
+          detail: cached ? tr("캐시 적중 — 판정 불가(강력 새로고침 후 재측정)")
+            : srvGzip ? `${tr("적용됨")} — ${raw.toFixed(0)}KB → ${(big.transferSize / 1024).toFixed(0)}KB`
+            : `❌ ${tr("꺼짐")} — ${raw.toFixed(0)}KB ${tr("무압축 전송")}`,
         });
       }
 
@@ -129,8 +131,8 @@ export function SpeedTestPanel() {
       const isLive = isLiveId(sel);
       const v: string[] = [];
       if (env["빌드 모드"]?.includes("개발")) {
-        v.push("🔴 **개발(dev) 모드로 서빙 중** — 새 창마다 수 MB 모듈을 내려받습니다. "
-             + "서버에서 `start_viewer_suite.bat`(인자 없이)로 재기동해 프로덕션 빌드로 전환하세요.");
+        v.push(tr("🔴 **개발(dev) 모드로 서빙 중** — 새 창마다 수 MB 모듈을 내려받습니다.") + " "
+             + tr("서버에서 `start_viewer_suite.bat`(인자 없이)로 재기동해 프로덕션 빌드로 전환하세요."));
       }
       if (rtt > 150) v.push(`🟠 서버 왕복이 ${fmt(rtt)}로 큽니다 — 회선/거리 영향. 단계마다 이 시간이 더해집니다.`);
       if (tTree > 800) v.push(`🟠 시리즈 목록이 ${fmt(tTree)} — 인스턴스 ${nInst}건. 대용량 검사입니다.`);
@@ -139,19 +141,19 @@ export function SpeedTestPanel() {
              + `**JPEG(품질 90)** 으로 바꾸면 통상 5~10배 작아집니다.`);
       }
       if (isLive && tFirst > 1000) {
-        v.push("🟠 Live(원격 직결) 모드입니다 — 첫 열람은 B가 A에서 원본을 받아 디코드합니다. "
-             + "두 번째부터는 캐시로 빨라집니다(⑤ 참고).");
+        v.push(tr("🟠 Live(원격 직결) 모드입니다 — 첫 열람은 B가 A에서 원본을 받아 디코드합니다.") + " "
+             + tr("두 번째부터는 캐시로 빨라집니다(⑤ 참고)."));
       }
       if (srvGzip === false) {
-        v.push("🔴 **서버 gzip 이 꺼져 있습니다** — 앱 번들이 무압축으로 전송됩니다(약 4배). "
-             + "영상 이전에 화면이 뜨는 것 자체가 늦어집니다. 서버에서 아래 한 줄이면 됩니다:\n"
+        v.push(tr("🔴 **서버 gzip 이 꺼져 있습니다** — 앱 번들이 무압축으로 전송됩니다(약 4배).") + " "
+             + tr("영상 이전에 화면이 뜨는 것 자체가 늦어집니다. 서버에서 아래 한 줄이면 됩니다:") + "\n"
              + "  sudo sh deploy/patch_nginx.sh --apply " + location.origin + "\n"
              + "  (Windows nginx: powershell -File deploy\\apply_nginx.ps1 -NginxDir C:\\nginx)");
       }
-      if (!v.length) v.push(`🟢 정상 — 첫 영상까지 ${fmt(tFirst)}. 목표(DR 1s·CT 3s) 내입니다.`);
+      if (!v.length) v.push(`${tr("🟢 정상 — 첫 영상까지")} ${fmt(tFirst)}. ${tr("목표(DR 1s·CT 3s) 내입니다.")}`);
       setVerdict(v.join("\n\n"));
     } catch (e) {
-      setVerdict(`측정 실패: ${e instanceof Error ? e.message : String(e)}`);
+      setVerdict(`${tr("측정 실패:")} ${e instanceof Error ? e.message : String(e)}`);
     } finally { setBusy(false); }
   };
 
@@ -161,19 +163,19 @@ export function SpeedTestPanel() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.7 }}>
-        실제 뷰어가 영상을 여는 순서 그대로 각 구간을 측정합니다.
-        <b> 지금 접속한 이 서버·이 회선 기준</b>이라, 원격 배포 환경의 병목을 그대로 보여줍니다.
+        {tr("실제 뷰어가 영상을 여는 순서 그대로 각 구간을 측정합니다.")}
+        <b> {tr("지금 접속한 이 서버·이 회선 기준")}</b>{tr("이라, 원격 배포 환경의 병목을 그대로 보여줍니다.")}
       </div>
 
       {/* 환경 */}
       <div style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 10 }}>
-        <b style={{ fontSize: 12 }}>실행 환경</b>
+        <b style={{ fontSize: 12 }}>{tr("실행 환경")}</b>
         <table style={{ width: "100%", fontSize: 12, marginTop: 6 }}>
           <tbody>
             {Object.entries(env).map(([k, v]) => (
               <tr key={k}>
-                <td style={{ width: 110, color: "var(--text-secondary)", padding: "2px 0" }}>{k}</td>
-                <td style={{ color: v.includes("⚠") ? "var(--stat-emergency)" : undefined, fontWeight: v.includes("⚠") ? 700 : 400 }}>{v}</td>
+                <td style={{ width: 110, color: "var(--text-secondary)", padding: "2px 0" }}>{tr(k)}</td>
+                <td style={{ color: v.includes("⚠") ? "var(--stat-emergency)" : undefined, fontWeight: v.includes("⚠") ? 700 : 400 }}>{tr(v)}</td>
               </tr>
             ))}
           </tbody>
@@ -182,7 +184,7 @@ export function SpeedTestPanel() {
 
       {/* 대상 선택 + 실행 */}
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>측정할 검사</span>
+        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{tr("측정할 검사")}</span>
         <select value={sel} onChange={(e) => setSel(Number(e.target.value))}
                 style={{ flex: 1, minWidth: 260, padding: "4px 6px", fontSize: 12 }}>
           {rows.map((r) => (
@@ -190,32 +192,32 @@ export function SpeedTestPanel() {
               {r.modality} · {r.patient_name || r.patient_key} · {r.study_date} · {r.study_desc}
             </option>
           ))}
-          {!rows.length && <option value={0}>검사 없음</option>}
+          {!rows.length && <option value={0}>{tr("검사 없음")}</option>}
         </select>
         <button className="primary" disabled={busy || !sel} onClick={() => void run()}
                 style={{ padding: "5px 18px", fontWeight: 700 }}>
-          {busy ? "측정 중…" : "▶ 속도 측정"}
+          {busy ? tr("측정 중…") : tr("▶ 속도 측정")}
         </button>
       </div>
 
       {/* 결과 */}
       {steps.length > 0 && (
         <table className="grid-table" style={{ width: "100%", fontSize: 12 }}>
-          <thead><tr><th style={{ textAlign: "left" }}>구간</th><th style={{ width: 90 }}>시간</th><th>비고</th></tr></thead>
+          <thead><tr><th style={{ textAlign: "left" }}>{tr("구간")}</th><th style={{ width: 90 }}>{tr("시간")}</th><th>{tr("비고")}</th></tr></thead>
           <tbody>
             {steps.map((s) => (
               <tr key={s.name}>
-                <td>{s.name}</td>
+                <td>{tr(s.name)}</td>
                 <td style={{ fontWeight: 700, color: s.warn ? "var(--stat-emergency)" : undefined }}>
                   {s.ms > 0 ? fmt(s.ms) : "—"}
                 </td>
-                <td style={{ color: "var(--text-secondary)" }}>{s.detail}</td>
+                <td style={{ color: "var(--text-secondary)" }}>{tr(s.detail)}</td>
               </tr>
             ))}
             <tr>
-              <td><b>영상이 뜨기까지(①~④ 합)</b></td>
+              <td><b>{tr("영상이 뜨기까지(①~④ 합)")}</b></td>
               <td><b style={{ color: total > 3000 ? "var(--stat-emergency)" : "#22c55e" }}>{fmt(total)}</b></td>
-              <td style={{ color: "var(--text-secondary)" }}>브라우저 창 부팅 시간은 제외</td>
+              <td style={{ color: "var(--text-secondary)" }}>{tr("브라우저 창 부팅 시간은 제외")}</td>
             </tr>
           </tbody>
         </table>

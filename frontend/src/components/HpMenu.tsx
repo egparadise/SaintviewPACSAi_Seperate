@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 import { hpRuleOrder, hpSlotLabel, readHpDoc, writeHpDoc, type HpRule } from "../lib/hangingProtocol";
 import { findHpRuleByName, hpRuleFromScreen, upsertHpRule, type HpCaptureResult } from "../lib/hpCapture";
 
@@ -44,16 +45,17 @@ const ruleSub = (r: HpRule): string => {
   return [
     `${r.modality || "*"}/${r.body_part || "*"}/${r.projection || "*"}`,
     `S${s.r}×${s.c} I${i.r}×${i.c}`,
-    sc.length > 1 ? `화면 ${sc.length}` : "",
-    prior.length ? `과거 ${[...new Set(prior.map((c) => hpSlotLabel(c.slot)))].join("·")}` : "",
-    r.source === "viewer" ? "직접설정" : "",
-    r.use_on_exam_open === false ? "수동" : "",
+    sc.length > 1 ? `${tr("화면")} ${sc.length}` : "",
+    prior.length ? `${tr("과거")} ${[...new Set(prior.map((c) => hpSlotLabel(c.slot)))].join("·")}` : "",
+    r.source === "viewer" ? tr("직접설정") : "",
+    r.use_on_exam_open === false ? tr("수동") : "",
   ].filter(Boolean).join(" · ");
 };
 
 export default function HpMenu({
   hpName, rules, open, setOpen, onSelect, onClear, capture, onSaved, onStatus, compact,
 }: HpMenuProps) {
+  useLang();
   const wrapRef = useRef<HTMLSpanElement>(null);
   // ⚠ 직접설정은 **기본 언체크**(사양 6). 드롭다운을 닫아도 켠 상태를 유지한다 —
   //    '레이아웃을 잡고 → 다시 열어 저장' 이 실제 동선이라 닫힐 때마다 꺼지면 못 쓴다.
@@ -100,9 +102,9 @@ export default function HpMenu({
 
   const save = async () => {
     const cap = capture();
-    if (!cap) { onStatus?.("직접설정 저장 실패 — 지금 화면을 읽을 수 없습니다"); return; }
+    if (!cap) { onStatus?.(tr("직접설정 저장 실패 — 지금 화면을 읽을 수 없습니다")); return; }
     const nm = name.trim();
-    if (!nm) { onStatus?.("프로토콜명을 입력하세요"); return; }
+    if (!nm) { onStatus?.(tr("프로토콜명을 입력하세요")); return; }
     setBusy(true);
     try {
       const cur = await api.getSetting("viewer.hp").catch(() => ({ value: {} as Record<string, unknown> }));
@@ -117,10 +119,10 @@ export default function HpMenu({
       const next = upsertHpRule(doc.rules, rule);
       await api.putSetting("viewer.hp", writeHpDoc({ rules: next, modalities: doc.modalities }), "user");
       onSaved(hpRuleOrder(next));
-      onStatus?.(`행잉 프로토콜 저장 — ${nm}${base ? " (덮어씀)" : ""} · Setting>행잉(HP)에서 부위·조건을 채우세요`);
+      onStatus?.(`${tr("행잉 프로토콜 저장")} — ${nm}${base ? ` (${tr("덮어씀")})` : ""} · ${tr("Setting>행잉(HP)에서 부위·조건을 채우세요")}`);
       setOpen(false);
     } catch {
-      onStatus?.("행잉 프로토콜 저장 실패 — 설정 저장 오류");
+      onStatus?.(tr("행잉 프로토콜 저장 실패 — 설정 저장 오류"));
     } finally { setBusy(false); }
   };
 
@@ -131,13 +133,13 @@ export default function HpMenu({
   return (
     <span ref={wrapRef} style={{ position: "relative" }}>
       <button onClick={() => setOpen(!open)}
-              title="Hanging Protocol — 규칙 선택 · '직접설정'으로 지금 화면을 새 프로토콜로 저장 (관리: Setting>행잉(HP))"
+              title={tr("Hanging Protocol — 규칙 선택 · '직접설정'으로 지금 화면을 새 프로토콜로 저장 (관리: Setting>행잉(HP))")}
               style={compact
                 ? { fontSize: 10.5, padding: "4px 2px", width: "100%", background: open ? "var(--accent)" : undefined,
                     color: open ? "#fff" : undefined, overflow: "hidden", textOverflow: "ellipsis" }
                 : { padding: "3px 10px", fontSize: 15.5, display: "inline-flex", alignItems: "center", gap: 5,
                     background: open ? "var(--accent)" : undefined }}>
-        HP:{hpName}
+        HP:{tr(hpName)}
         {!compact && (
           <span style={{ fontSize: 10, fontWeight: 700, padding: "0 5px", borderRadius: 8, lineHeight: "14px",
                          background: open ? "rgba(255,255,255,0.25)" : "var(--bg-elevated)",
@@ -155,7 +157,7 @@ export default function HpMenu({
                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
                onMouseLeave={(e) => (e.currentTarget.style.background = "")}>
             <div style={{ flex: 1, fontWeight: hpName === "기본" ? 700 : 400 }}>
-              {hpName === "기본" ? "● " : ""}기본 (HP 해제)
+              {hpName === "기본" ? "● " : ""}{tr("기본 (HP 해제)")}
             </div>
           </div>
           {/* ② 등록된 규칙 — hpRuleOrder 순서 = matchHpRule 이 보는 순서 */}
@@ -173,49 +175,46 @@ export default function HpMenu({
           ))}
           {!rules.length && (
             <div style={{ ...row, cursor: "default", color: "var(--text-secondary)" }}>
-              등록된 규칙 없음 — 아래 '직접설정'으로 지금 화면을 저장할 수 있습니다
+              {tr("등록된 규칙 없음 — 아래 '직접설정'으로 지금 화면을 저장할 수 있습니다")}
             </div>
           )}
           {/* ③ 직접설정 */}
           <div style={{ borderTop: "1px solid var(--border)", marginTop: 3, padding: "6px 12px" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, cursor: "pointer",
                             fontWeight: 700 }}
-                   title="지금 뷰어에 잡아 둔 화면(모니터·Series/Image 레이아웃·칸별 영상)을 새 프로토콜로 저장합니다">
+                   title={tr("지금 뷰어에 잡아 둔 화면(모니터·Series/Image 레이아웃·칸별 영상)을 새 프로토콜로 저장합니다")}>
               <input type="checkbox" checked={direct} onChange={(e) => setDirect(e.target.checked)} />
-              직접설정 — 지금 화면을 프로토콜로 저장
+              {tr("직접설정 — 지금 화면을 프로토콜로 저장")}
             </label>
             {direct && (
               <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 5 }}>
-                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="프로토콜명 (예: 흉부 비교 2×2)"
+                <input value={name} onChange={(e) => setName(e.target.value)} placeholder={tr("프로토콜명 (예: 흉부 비교 2×2)")}
                        style={{ fontSize: 11.5, padding: "3px 6px" }} />
                 {/* 사양 5 ①·사양 6 '가장 우선 적용' — 둘 다 기본 언체크 */}
                 <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}
-                       title="켜면 조건(장비)이 맞는 검사를 열 때 자동으로 이 배치가 적용됩니다. 꺼져 있으면 이 드롭다운에서 골라야 적용됩니다">
+                       title={tr("켜면 조건(장비)이 맞는 검사를 열 때 자동으로 이 배치가 적용됩니다. 꺼져 있으면 이 드롭다운에서 골라야 적용됩니다")}>
                   <input type="checkbox" checked={autoOpen} onChange={(e) => setAutoOpen(e.target.checked)} />
-                  Exam 열 때 자동 적용
+                  {tr("Exam 열 때 자동 적용")}
                 </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}
-                       title="여러 규칙이 걸릴 때 이 규칙을 가장 먼저 검사합니다">
+                       title={tr("여러 규칙이 걸릴 때 이 규칙을 가장 먼저 검사합니다")}>
                   <input type="checkbox" checked={prio} onChange={(e) => setPrio(e.target.checked)} />
-                  가장 우선 적용
+                  {tr("가장 우선 적용")}
                 </label>
                 {dup && (
                   <div style={{ fontSize: 10, color: "#fbbf24", lineHeight: 1.35, whiteSpace: "normal" }}>
-                    ⚠ 기존 &lsquo;{dup.name}&rsquo; 을 덮어씁니다 — 화면 배치·장비·W/L·링크 4종(전체 링크·스크롤
-                    동기화·Cross Link·Scout)이 <b>지금 화면 값</b>으로 바뀝니다. 부위·출처·Projection·설명은
-                    유지되고, 위 두 체크박스는 기존 값을 불러왔습니다.
+                    ⚠ {tr("기존")} &lsquo;{dup.name}&rsquo; {tr("을 덮어씁니다 — 화면 배치·장비·W/L·링크 4종(전체 링크·스크롤 동기화·Cross Link·Scout)이")} <b>{tr("지금 화면 값")}</b>{tr("으로 바뀝니다. 부위·출처·Projection·설명은 유지되고, 위 두 체크박스는 기존 값을 불러왔습니다.")}
                   </div>
                 )}
                 {warn.map((w, k) => (
-                  <div key={k} style={{ fontSize: 10, color: "#fbbf24", lineHeight: 1.35, whiteSpace: "normal" }}>⚠ {w}</div>
+                  <div key={k} style={{ fontSize: 10, color: "#fbbf24", lineHeight: 1.35, whiteSpace: "normal" }}>⚠ {tr(w)}</div>
                 ))}
                 <div style={{ fontSize: 10, color: "var(--text-secondary)", lineHeight: 1.35, whiteSpace: "normal" }}>
-                  저장되는 것: 이 모니터 · Series/Image 레이아웃 · 칸별 시리즈 · 칸별 과거검사 기간.
-                  3D 창과 다른 모니터 창의 구성은 저장되지 않습니다(같은 이름으로 각 창에서 저장하면 합쳐집니다).
+                  {tr("저장되는 것: 이 모니터 · Series/Image 레이아웃 · 칸별 시리즈 · 칸별 과거검사 기간. 3D 창과 다른 모니터 창의 구성은 저장되지 않습니다(같은 이름으로 각 창에서 저장하면 합쳐집니다).")}
                 </div>
                 <button onClick={() => void save()} disabled={busy || !name.trim()}
                         style={{ fontSize: 11.5, padding: "4px 0", fontWeight: 700 }}>
-                  {busy ? "저장 중…" : "저장 (Setting>행잉에 등록)"}
+                  {busy ? tr("저장 중…") : tr("저장 (Setting>행잉에 등록)")}
                 </button>
               </div>
             )}

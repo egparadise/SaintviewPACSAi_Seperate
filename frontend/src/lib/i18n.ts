@@ -13,8 +13,24 @@
 //   이관 전 문자열은 언어와 무관하게 한국어로 남는다 — 그것이 폴백의 의미다.
 
 import { useSyncExternalStore } from "react";
+// 언어별 사전 — 키 = 한국어 원문(msgid). 규모가 커서 키를 짓는 대신 원문 자체를 키로 쓴다.
+// 동적 값(예: 상태 라벨 변수)도 tr(값) 한 줄로 번역되는 것이 이 방식의 힘이다.
+import AR from "./i18n/ar.ts";
+import DE from "./i18n/de.ts";
+import EN from "./i18n/en.ts";
+import ES from "./i18n/es.ts";
+import FR from "./i18n/fr.ts";
+import JA from "./i18n/ja.ts";
+import MSGIDS from "./i18n/msgids.ts";
+import RU from "./i18n/ru.ts";
+import VI from "./i18n/vi.ts";
+import ZH from "./i18n/zh.ts";
 
 export type Lang = "ko" | "en" | "ru" | "zh" | "ja" | "es" | "de" | "fr" | "vi" | "ar";
+
+const DICTS: Partial<Record<Lang, Record<string, string>>> = {
+  en: EN, ru: RU, zh: ZH, ja: JA, es: ES, de: DE, fr: FR, vi: VI, ar: AR,
+};
 
 export const LANGS: { code: Lang; native: string }[] = [
   { code: "ko", native: "한국어" },
@@ -179,9 +195,27 @@ export function useLang(): Lang {
   );
 }
 
-/** 번역 조회 — 미등록 키·빈 값은 **한국어로 폴백**(그마저 없으면 키 그대로). */
+/** 번역 조회 — 인자는 ①레거시 키(MSG) 또는 ②한국어 원문(언어별 사전의 msgid).
+ *  어느 쪽에도 없으면 **인자 그대로**(=한국어 폴백) — 번역이 없다고 화면이 깨지면 안 된다. */
 export function t(key: string, lang?: Lang): string {
+  const l = lang ?? cur;
   const e = MSG[key];
-  if (!e) return key;
-  return e[lang ?? cur] || e.ko || key;
+  if (e) return e[l] || e.ko || key;
+  if (l === "ko") return key;
+  const v = DICTS[l]?.[key];
+  // 빈 문자열("")도 정식 번역이다 — 한국어 조사·수량사("호"·"에" 등)는 그 언어에서
+  // 아무것도 붙지 않는 게 맞다. undefined(미등록)만 한국어로 폴백한다.
+  return v !== undefined ? v : key;
+}
+
+/** 번역 커버리지 — 설정>환경 언어 선택 밑에 "N/M (％)" 로 표기한다.
+ *  분모 = 이관된 원문 전체(msgid + 레거시 키), 분자 = 해당 언어에 값이 있는 수. */
+export function coverage(lang: Lang): { done: number; total: number } {
+  const legacy = Object.keys(MSG);
+  const total = MSGIDS.length + legacy.length;
+  if (lang === "ko") return { done: total, total };
+  const d = DICTS[lang] ?? {};
+  let done = legacy.filter((k) => MSG[k][lang]).length;
+  for (const m of MSGIDS) if (d[m] !== undefined) done++;
+  return { done, total };
 }

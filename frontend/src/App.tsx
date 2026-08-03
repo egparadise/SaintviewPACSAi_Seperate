@@ -72,26 +72,26 @@ function AdminLogin({ onLogin, onBack }: { onLogin: (r: LoginResp) => void; onBa
       setToken(r.token, remember);
       localStorage.setItem("sv_remember", remember ? "1" : "0");
       onLogin(r);
-    } catch (err) { setError(err instanceof Error ? err.message : "로그인 실패"); }
+    } catch (err) { setError(err instanceof Error ? err.message : tr("로그인 실패")); }
   };
   return (
     <div style={{ display: "grid", placeItems: "center", height: "100%" }}>
       <form onSubmit={submit} style={{ background: "var(--bg-panel)", padding: 32, borderRadius: 8,
                                        border: "1px solid var(--border)", width: 320, display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ fontSize: 18, fontWeight: 700 }}>Saintview <span style={{ color: "var(--ai)" }}>PACS AI</span></div>
-        <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: -6 }}>관리자 로그인</div>
+        <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: -6 }}>{tr("관리자 로그인")}</div>
         {/* name/autoComplete 를 명시 — 이름 없는 필드는 크롬이 문서 전체를 합성 로그인 폼으로 묶을 때
             엉뚱한 칸(예: 워크리스트 SEARCH)에 저장 자격증명을 채워 넣는 원인이 된다 */}
-        <input placeholder="아이디" value={username} name="username" autoComplete="username"
+        <input placeholder={tr("아이디")} value={username} name="username" autoComplete="username"
                autoCapitalize="off" spellCheck={false} onChange={(e) => setUsername(e.target.value)} />
-        <input placeholder="비밀번호" type="password" value={password} name="password"
+        <input placeholder={tr("비밀번호")} type="password" value={password} name="password"
                autoComplete="current-password" onChange={(e) => setPassword(e.target.value)} />
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, color: "var(--text-secondary)" }}>
-          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> 자동 로그인
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> {tr("자동 로그인")}
         </label>
         {error && <div style={{ color: "var(--stat-emergency)", fontSize: 12 }}>{error}</div>}
-        <button className="primary" type="submit">로그인</button>
-        <button type="button" onClick={onBack} style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer" }}>← 홈으로</button>
+        <button className="primary" type="submit">{tr("로그인")}</button>
+        <button type="button" onClick={onBack} style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer" }}>{tr("← 홈으로")}</button>
       </form>
     </div>
   );
@@ -182,11 +182,11 @@ export default function App() {
                       width: 360, display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ fontSize: 18, fontWeight: 700 }}>Saintview <span style={{ color: "var(--ai)" }}>PACS AI</span></div>
           <div style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: -6 }}>
-            {session.name} 님, 작업 화면은 각 포털에서 열립니다.
+            {session.name} {tr("님, 작업 화면은 각 포털에서 열립니다.")}
           </div>
-          <button className="primary" onClick={() => gotoPortal("admin")}>관리자 포털로 이동</button>
-          <button onClick={() => gotoPortal("client")}>Client 뷰어 포털로 이동</button>
-          <button onClick={logout} style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer" }}>로그아웃</button>
+          <button className="primary" onClick={() => gotoPortal("admin")}>{tr("관리자 포털로 이동")}</button>
+          <button onClick={() => gotoPortal("client")}>{tr("Client 뷰어 포털로 이동")}</button>
+          <button onClick={logout} style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer" }}>{tr("로그아웃")}</button>
         </div>
       </div>
     );
@@ -224,7 +224,7 @@ export default function App() {
         <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{session.name} [{session.role}]</span>
         {/* 협진 — 같은 병원·타 병원 사용자와 친구를 맺고 메신저로 대화한다.
             실제 영상 공유(세션)는 뷰어 창에서 [협진] 버튼으로 시작한다. */}
-        <button onClick={() => setCollabOpen((v) => !v)} title="협진 — 친구 · 메신저"
+        <button onClick={() => setCollabOpen((v) => !v)} title={tr("협진 — 친구 · 메신저")}
                 style={collabOpen ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>
           {tr("collab")}
         </button>

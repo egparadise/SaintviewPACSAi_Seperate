@@ -6,6 +6,7 @@ import { PERM_DENIED_TIP, api, hasPerm, isLiveId, loadPermMe, type PermMe, type 
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { pollWithGuard } from "../lib/netLimit";
 import { MicIcon } from "./MicIcon";
+import { t as tr, useLang } from "../lib/i18n";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   detail: StudyDetail;
@@ -13,6 +14,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   onLoadPrior: (examId: number) => void;    // 과거검사 비교 로드 — 활성 페인에 표시
   onStatus: (msg: string) => void;          // 상단 상태 표시줄 메시지
 }) {
+  useLang();   // 언어 변경 시 리렌더
   const [vreports, setVreports] = useState<Report[]>([]);
   const report = vreports[0] ?? null;
   const [dockTab, setDockTab] = useState<"read" | "hist" | "std" | "tpl">("read");
@@ -74,7 +76,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   // ── 판독 확정(Fixed) 잠금 — study.report_locked. 서버 409 가 최종 방어선, UI 는 선반영(UX) ──
   const [locked, setLocked] = useState(!!detail.report_locked);
   useEffect(() => { setLocked(!!detail.report_locked); }, [detail.id, detail.report_locked]);
-  const LOCK_TIP = "판독 확정(잠금) 상태 — 변경할 수 없습니다";
+  const LOCK_TIP = tr("판독 확정(잠금) 상태 — 변경할 수 없습니다");
   // 다른 창(ReportWindow 등)에서 잠금이 바뀌면 detail 스냅샷이 stale — 저장/토글 실패 시 재조회로 동기화
   const syncLock = async () => {
     try { setLocked(!!(await api.study(detail.id)).report_locked); } catch { /* 조회 실패 → 현 상태 유지 */ }
@@ -83,9 +85,9 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     try {
       const r = await api.reportLock(detail.id, checked);   // 성공 후에만 반영(실패 시 체크 원복)
       setLocked(r.locked);
-      onStatus(r.locked ? "판독 확정 잠금 설정됨" : "판독 확정 잠금 해제됨");
+      onStatus(r.locked ? tr("판독 확정 잠금 설정됨") : tr("판독 확정 잠금 해제됨"));
     } catch (e) {
-      onStatus(e instanceof Error ? e.message : "잠금 변경 실패");
+      onStatus(e instanceof Error ? e.message : tr("잠금 변경 실패"));
       void syncLock();   // 실패(409/403 등) — 서버 기준 잠금 상태로 재동기화
     }
   };
@@ -150,8 +152,8 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   const dockSave = async () => {
     if (locked) { onStatus(LOCK_TIP); return; }             // 확정 잠금 — 단축키 경로 포함 차단
     // 확정본 — Save 버튼 disabled(finalizedDock) 조건과 단축키(Ctrl+S) 경로 일치(서버 400 방지)
-    if (report?.status === "finalized") { onStatus("확정된 판독입니다 — 수정하려면 새 버전(addendum)을 생성하세요"); return; }
-    if (!canWrite) { onStatus(PERM_DENIED_TIP); return; }   // 단축키(Ctrl+S) 경로도 게이트
+    if (report?.status === "finalized") { onStatus(tr("확정된 판독입니다 — 수정하려면 새 버전(addendum)을 생성하세요")); return; }
+    if (!canWrite) { onStatus(tr(PERM_DENIED_TIP)); return; }   // 단축키(Ctrl+S) 경로도 게이트
     const sr = buildDockSr();
     if (!report || !sr) return;
     try {
@@ -161,10 +163,10 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
       const r = await api.reports(detail.id);
       setVreports(r.items);
       setReadingTouched(false);
-      if (rdOpts.save_alert) alert("리포트가 저장되었습니다");
-      else onStatus("리포트 저장됨");
+      if (rdOpts.save_alert) alert(tr("리포트가 저장되었습니다"));
+      else onStatus(tr("리포트 저장됨"));
     } catch (e) {
-      alert(e instanceof Error ? e.message : "저장 실패");
+      alert(e instanceof Error ? e.message : tr("저장 실패"));
       void syncLock();   // 다른 창에서 잠금 변경(409) 등 — 서버 기준 잠금 상태 재동기화
     }
   };
@@ -172,27 +174,27 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   const dockApprove = async () => {
     if (locked) { onStatus(LOCK_TIP); return; }             // 확정 잠금 — 단축키 경로 포함 차단
     // 확정본 — Approve 버튼 disabled(finalizedDock) 조건과 단축키(Ctrl+Shift+A) 경로 일치
-    if (report?.status === "finalized") { onStatus("이미 확정된 판독입니다"); return; }
-    if (!canWrite) { onStatus(PERM_DENIED_TIP); return; }   // 단축키(Ctrl+Shift+A) 경로도 게이트
+    if (report?.status === "finalized") { onStatus(tr("이미 확정된 판독입니다")); return; }
+    if (!canWrite) { onStatus(tr(PERM_DENIED_TIP)); return; }   // 단축키(Ctrl+Shift+A) 경로도 게이트
     const sr = buildDockSr();
     if (!report || !sr) return;
-    if (!window.confirm("판독을 확정(승인·서명)합니다. 확정 후 수정할 수 없습니다.")) return;
+    if (!window.confirm(tr("판독을 확정(승인·서명)합니다. 확정 후 수정할 수 없습니다."))) return;
     try {
       await api.updateReport(report.id, sr);
       await api.finalizeReport(report.id);
       const r = await api.reports(detail.id);
       setVreports(r.items);
       initDockText(r.items[0] ?? null);
-      onStatus("판독 확정(서명) 완료");
+      onStatus(tr("판독 확정(서명) 완료"));
     } catch (e) {
-      alert(e instanceof Error ? e.message : "승인 실패");
+      alert(e instanceof Error ? e.message : tr("승인 실패"));
       void syncLock();   // 다른 창에서 잠금 변경(409) 등 — 서버 기준 잠금 상태 재동기화
     }
   };
 
   const dockInsert = (p: PhraseRow) => {
     if (locked) { onStatus(LOCK_TIP); return; }             // 확정 잠금 — 상용구 삽입 차단
-    if (!canWrite) { onStatus(PERM_DENIED_TIP); return; }   // 상용구 삽입도 판독 변경
+    if (!canWrite) { onStatus(tr(PERM_DENIED_TIP)); return; }   // 상용구 삽입도 판독 변경
     const pos = rdOpts.insert_pos ?? "end";
     const join = (cur: string, add: string) => !add ? cur : (cur ? `${cur}\n${add}` : add);
     if (pos === "cursor") {
@@ -212,8 +214,8 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
 
   const dockApplyTemplate = (p: PhraseRow) => {
     if (locked) { onStatus(LOCK_TIP); return; }             // 확정 잠금 — 템플릿 교체 차단
-    if (!canWrite) { onStatus(PERM_DENIED_TIP); return; }   // 템플릿 교체도 판독 변경
-    if (!window.confirm(`템플릿 '${p.name}'으로 판독/결론을 교체할까요?`)) return;
+    if (!canWrite) { onStatus(tr(PERM_DENIED_TIP)); return; }   // 템플릿 교체도 판독 변경
+    if (!window.confirm(`${tr("템플릿")} '${p.name}'${tr("으로 판독/결론을 교체할까요?")}`)) return;
     setReading(p.reading_text);
     setConclusion(p.text);
     setReadingTouched(true);
@@ -322,17 +324,17 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
         <div style={{ padding: "4px 8px", fontSize: 11, borderBottom: "1px solid var(--border)",
                       background: liveOtherWriting ? "rgba(239,68,68,0.15)" : "rgba(34,197,94,0.12)",
                       color: liveOtherWriting ? "var(--stat-emergency)" : "#22c55e" }}>
-          {liveOtherWriting && <>⚠ 다른 사용자 작성중: <b>{(liveState?.other_writers ?? []).join(", ") || "원격"}</b> — 저장 시 차단될 수 있습니다</>}
+          {liveOtherWriting && <>⚠ {tr("다른 사용자 작성중")}: <b>{(liveState?.other_writers ?? []).join(", ") || tr("원격")}</b> — {tr("저장 시 차단될 수 있습니다")}</>}
           {!liveOtherWriting && liveExternalUpdate && (
-            <>Δ 판독문이 외부에서 갱신됨({liveState?.report_writer || "원격"}) —
+            <>Δ {tr("판독문이 외부에서 갱신됨")}({liveState?.report_writer || tr("원격")}) —
               <button style={{ marginLeft: 4, fontSize: 10, padding: "0 6px" }}
                       onClick={() => {
                         liveBaselineRef.current = liveState?.report_updated ?? null;
                         api.reports(detail.id).then((r) => { setVreports(r.items); initDockText(r.items[0] ?? null); }).catch(() => {});
-                      }}>새로고침</button></>
+                      }}>{tr("새로고침")}</button></>
           )}
           {!liveOtherWriting && !liveExternalUpdate && (liveState?.viewers.length ?? 0) > 1 && (
-            <>👁 동시 열람: {liveState?.viewers.join(", ")}</>
+            <>👁 {tr("동시 열람")}: {liveState?.viewers.join(", ")}</>
           )}
         </div>
       )}
@@ -341,37 +343,37 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
                     borderBottom: "1px solid var(--border)", fontSize: 11, flexWrap: "wrap" }}>
         {/* 음성 판독(STT) 마이크 — Font 왼쪽. 서버 설정 엔진으로 구동, 마지막 포커스 필드에 삽입 */}
         <button onClick={dictation.toggle} disabled={finalizedDock || locked || !canWrite || dictation.busy}
-                title={dictationLabel(dictation.engine, dictation.recording, dictation.busy)}
+                title={tr(dictationLabel(dictation.engine, dictation.recording, dictation.busy))}
                 style={{ display: "flex", alignItems: "center", gap: 4, padding: "1px 7px",
                          border: `1px solid ${dictation.recording ? "var(--stat-emergency)" : "var(--border)"}`,
                          borderRadius: 5, background: dictation.recording ? "var(--stat-emergency)" : "var(--bg-canvas)",
                          color: dictation.recording ? "#fff" : "var(--text-primary)", cursor: "pointer" }}>
           <MicIcon on={dictation.recording} size={13} />
-          {dictation.busy ? "전사…" : dictation.recording ? "녹음" : "음성"}
+          {dictation.busy ? tr("전사…") : dictation.recording ? tr("녹음") : tr("음성")}
         </button>
         <span style={{ color: "var(--text-secondary)" }}>Font</span>
         <button style={{ padding: "0 6px" }} onClick={() => setFontPx((f) => Math.max(10, f - 1))}>−</button>
         <span>{fontPx}px</span>
         <button style={{ padding: "0 6px" }} onClick={() => setFontPx((f) => Math.min(22, f + 1))}>＋</button>
-        <label title="CVR Notice — critical 소견 경고 표시" style={{ display: "flex", gap: 3, alignItems: "center" }}>
+        <label title={tr("CVR Notice — critical 소견 경고 표시")} style={{ display: "flex", gap: 3, alignItems: "center" }}>
           <input type="checkbox" checked={!!rdOpts.cvr_notice}
                  onChange={(e) => setRdOpts((p) => ({ ...p, cvr_notice: e.target.checked }))} />
           CVR
         </label>
         <span style={{ flex: 1 }} />
-        <button title="이전 과거검사 비교" style={{ padding: "0 7px" }}
+        <button title={tr("이전 과거검사 비교")} style={{ padding: "0 7px" }}
                 disabled={!relExams.length}
                 onClick={() => onLoadPrior(relExams[0].id)}>◀</button>
-        <button title="다음 과거검사 비교" style={{ padding: "0 7px" }}
+        <button title={tr("다음 과거검사 비교")} style={{ padding: "0 7px" }}
                 disabled={relExams.length < 2}
                 onClick={() => onLoadPrior(relExams[1].id)}>▶</button>
-        <button title="서버 저장본으로 되돌리기" style={{ padding: "1px 7px" }}
+        <button title={tr("서버 저장본으로 되돌리기")} style={{ padding: "1px 7px" }}
                 onClick={() => initDockText(report)}>Reset</button>
         {/* report.write 게이트(레인 W) + 확정 잠금 — 서버 403/409 가 최종 방어선, UI 는 비활성+안내 툴팁(UX) */}
-        <button className="primary" title={locked ? LOCK_TIP : canWrite ? `저장 (${rdOpts.key_save ?? "Ctrl+S"})` : PERM_DENIED_TIP}
+        <button className="primary" title={locked ? LOCK_TIP : canWrite ? `${tr("저장")} (${rdOpts.key_save ?? "Ctrl+S"})` : tr(PERM_DENIED_TIP)}
                 style={{ padding: "1px 9px" }}
                 disabled={!report || finalizedDock || !canWrite || locked} onClick={() => void dockSave()}>Save</button>
-        <button title={locked ? LOCK_TIP : canWrite ? `승인 — 확정·서명 (${rdOpts.key_approve ?? "Ctrl+Shift+A"})` : PERM_DENIED_TIP}
+        <button title={locked ? LOCK_TIP : canWrite ? `${tr("승인 — 확정·서명")} (${rdOpts.key_approve ?? "Ctrl+Shift+A"})` : tr(PERM_DENIED_TIP)}
                 style={{ padding: "1px 9px", background: "var(--stat-final)", color: "#fff", border: "none",
                          borderRadius: 4, opacity: !report || finalizedDock || !canWrite || locked ? 0.5 : 1 }}
                 disabled={!report || finalizedDock || !canWrite || locked} onClick={() => void dockApprove()}>Approve</button>
@@ -380,13 +382,13 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
       {finalizedDock && (
         <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "4px 8px",
                       borderBottom: "1px solid var(--border)", fontSize: 11 }}>
-          <label title="잠금 중에는 판독 수정·확정·재생성·병합이 전부 차단됩니다"
+          <label title={tr("잠금 중에는 판독 수정·확정·재생성·병합이 전부 차단됩니다")}
                  style={{ display: "flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
             <input type="checkbox" checked={locked} onChange={(e) => void toggleLock(e.target.checked)} />
-            🔒 판독 확정(잠금) — 변경 금지
+            {tr("🔒 판독 확정(잠금) — 변경 금지")}
           </label>
           {locked && (
-            <span style={{ color: "var(--text-secondary)" }}>잠금 상태 — 판독을 변경할 수 없습니다</span>
+            <span style={{ color: "var(--text-secondary)" }}>{tr("잠금 상태 — 판독을 변경할 수 없습니다")}</span>
           )}
         </div>
       )}
@@ -411,13 +413,13 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
           <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}>Reading</div>
           {/* report.write 없으면 readOnly — 조회는 가능(레인 W). 확정 잠금 중에도 readOnly */}
           <textarea value={reading} placeholder="Enter reading findings" disabled={finalizedDock}
-                    readOnly={!canWrite || locked} title={locked ? LOCK_TIP : canWrite ? undefined : PERM_DENIED_TIP}
+                    readOnly={!canWrite || locked} title={locked ? LOCK_TIP : canWrite ? undefined : tr(PERM_DENIED_TIP)}
                     onFocus={() => { dictField.current = "reading"; }}
                     onChange={(e) => { setReading(e.target.value); setReadingTouched(true); lastTypedRef.current = Date.now(); }}
                     style={{ ...taStyle, flex: 1.4, minHeight: 90 }} />
           <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}>Conclusion</div>
           <textarea id="sv-dock-conclusion" value={conclusion} placeholder="Enter conclusion" disabled={finalizedDock}
-                    readOnly={!canWrite || locked} title={locked ? LOCK_TIP : canWrite ? undefined : PERM_DENIED_TIP}
+                    readOnly={!canWrite || locked} title={locked ? LOCK_TIP : canWrite ? undefined : tr(PERM_DENIED_TIP)}
                     onFocus={() => { dictField.current = "conclusion"; }}
                     onChange={(e) => { setConclusion(e.target.value); lastTypedRef.current = Date.now(); }}
                     style={{ ...taStyle, flex: 1, minHeight: 70 }} />
@@ -450,18 +452,18 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
           )}
           <div style={{ padding: "4px 8px", fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)",
                         background: "var(--bg-elevated)", borderTop: "1px solid var(--border)" }}>
-            Prior Studies (클릭=판독 펼침 · 썸네일 클릭=비교 로드)
+            {tr("Prior Studies (클릭=판독 펼침 · 썸네일 클릭=비교 로드)")}
           </div>
           {relExams.map((e) => (
             <div key={e.id}>
               <div onClick={() => togglePriorReport(e.id)}
-                   title="클릭=이 검사의 판독 내용 펼침/접기 · 썸네일 클릭=활성 페인에 비교 로드"
+                   title={tr("클릭=이 검사의 판독 내용 펼침/접기 · 썸네일 클릭=활성 페인에 비교 로드")}
                    style={{ padding: "4px 8px", fontSize: 11.5, cursor: "pointer", borderBottom: "1px solid #24282d",
                             display: "flex", alignItems: "center", gap: 7 }}
                    onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--bg-hover)")}
                    onMouseLeave={(ev) => (ev.currentTarget.style.background = "")}>
                 {priorThumbs[e.id]
-                  ? <img src={priorThumbs[e.id]} alt="" title="비교 로드 — 활성 페인에 표시"
+                  ? <img src={priorThumbs[e.id]} alt="" title={tr("비교 로드 — 활성 페인에 표시")}
                          onClick={(ev) => { ev.stopPropagation(); onLoadPrior(e.id); }}
                          style={{ width: 58, height: 44, objectFit: "cover",
                           borderRadius: 2, border: "1px solid var(--border)", background: "#000", flexShrink: 0 }} />
@@ -477,8 +479,8 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
               {priorOpen === e.id && (
                 <div style={{ padding: "6px 10px 8px 14px", fontSize: 11, lineHeight: 1.55, background: "var(--bg-canvas)",
                               borderBottom: "1px solid #24282d", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                  {priorRpt[e.id] === "loading" && <span style={{ color: "var(--text-secondary)" }}>판독 불러오는 중…</span>}
-                  {priorRpt[e.id] === "none" && <span style={{ color: "var(--text-secondary)" }}>이 검사의 판독이 없습니다</span>}
+                  {priorRpt[e.id] === "loading" && <span style={{ color: "var(--text-secondary)" }}>{tr("판독 불러오는 중…")}</span>}
+                  {priorRpt[e.id] === "none" && <span style={{ color: "var(--text-secondary)" }}>{tr("이 검사의 판독이 없습니다")}</span>}
                   {typeof priorRpt[e.id] === "object" && (
                     <>
                       <div style={{ color: "var(--text-secondary)", fontWeight: 700, marginBottom: 2 }}>Reading</div>
@@ -502,11 +504,11 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
           {dockPhrases.filter((p) => p.kind === (dockTab === "std" ? "phrase" : "template")).map((p) => (
             <div key={p.id}
                  onClick={() => dockTab === "std" ? dockInsert(p) : dockApplyTemplate(p)}
-                 title={`${p.reading_text ? `[판독] ${p.reading_text}\n` : ""}${p.text ? `[결론] ${p.text}` : ""}`}
+                 title={`${p.reading_text ? `${tr("[판독]")} ${p.reading_text}\n` : ""}${p.text ? `${tr("[결론]")} ${p.text}` : ""}`}
                  style={{ padding: "5px 8px", fontSize: 11.5, cursor: "pointer", borderBottom: "1px solid #24282d" }}
                  onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--bg-hover)")}
                  onMouseLeave={(ev) => (ev.currentTarget.style.background = "")}>
-              {p.category && <span style={{ color: "var(--text-secondary)" }}>[{p.category}] </span>}
+              {p.category && <span style={{ color: "var(--text-secondary)" }}>[{tr(p.category)}] </span>}
               {p.name}
               {p.shortcut && <span style={{ color: "var(--accent)", float: "right" }}>Alt+{p.shortcut}</span>}
             </div>

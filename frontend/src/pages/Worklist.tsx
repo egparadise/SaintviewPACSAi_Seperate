@@ -16,6 +16,7 @@ import { readDlPrefs } from "../lib/dlPrefs";
 import { dlConfigure, dlInvalidate, dlPromote, dlReset, dlResume, dlSetQueue, dlStop } from "../lib/dlScheduler";
 import { dlSupportReason, opfsWipe } from "../lib/opfsStore";
 import { setImageFormat } from "../lib/imageFormat";
+import { registerLiveStudyVid } from "../lib/liveUids";
 // 조회 질의는 '확정된 조건(committed)'에서만 만든다 — 규칙과 근거는 lib/worklistQuery.ts 참조
 import {
   buildWorklistQuery,
@@ -31,6 +32,7 @@ import {
   VID_BASE,
   VIEWER_BASE,
   api,
+  isLiveId,
   downloadReportPdf,
   hasPerm,
   loadPermMe,
@@ -80,6 +82,7 @@ import {
   openByPlan, planViewerOpen, readViewerRoundRobin, viewerSlotName, writeViewerRoundRobin,
 } from "../lib/viewerSlots";
 import { Splitter, clampSz } from "../lib/Splitter";
+import { t as tr, useLang } from "../lib/i18n";
 
 const Viewer3D = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewer3D })));
 const ImportDialog = lazy(() => import("./ImportDialog").then((m) => ({ default: m.ImportDialog })));
@@ -186,12 +189,12 @@ function StatusBadge({ status }: { status: string }) {
   const inSt = IN_EXAM_STATUSES.find((s) => s.key === IN_STATUS_MAP[status]);
   return (
     <span className={`badge ${status}`}
-          title={inSt ? `${inSt.label} — ${inSt.desc}` : undefined}>
+          title={inSt ? `${inSt.label} — ${tr(inSt.desc)}` : undefined}>
       {inSt && <span style={{
         display: "inline-block", width: 7, height: 7, borderRadius: 4,
         background: inSt.color, marginRight: 4, verticalAlign: "middle",
       }} />}
-      {STATUS_LABEL[status] ?? status}
+      {tr(STATUS_LABEL[status] ?? status)}
     </span>
   );
 }
@@ -205,13 +208,13 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
     label: "AI",
     render: (r) =>
       r.critical ? <span className="badge critical">CRITICAL</span>
-        : r.report_status === "draft" ? <span className="badge ai">초안</span> : null,
+        : r.report_status === "draft" ? <span className="badge ai">{tr("초안")}</span> : null,
   },
   patient_key: { label: "ID", render: (r) => r.patient_key },
   patient_name: {
     label: "이름",
     // 병합(Merge)된 환자는 이름 앞에 병합 아이콘 표시 (Exam Control 에서 Unmerge 가능)
-    render: (r) => <>{r.merged && <MergeIcon />}{r.has_key && <span title="키이미지 등록 검사">🔑 </span>}{r.patient_name}</>,
+    render: (r) => <>{r.merged && <MergeIcon />}{r.has_key && <span title={tr("키이미지 등록 검사")}>🔑 </span>}{r.patient_name}</>,
   },
   sex: { label: "성별", render: (r) => r.sex },
   birth_date: { label: "생년월일", render: (r) => r.birth_date },
@@ -296,13 +299,13 @@ const DEFAULT_TY_PANELS: Record<string, boolean> = {
 // 숨긴 구역 자리의 얇은 재열기 바 — 클릭하면 마지막 크기로 다시 표시(화면에서 복구, Setting 체크박스와 동기)
 function ReopenBar({ label, onExpand }: { label: string; onExpand: () => void }) {
   return (
-    <div onClick={onExpand} title={`${label} 다시 표시`}
+    <div onClick={onExpand} title={`${label} ${tr("다시 표시")}`}
          style={{ height: 18, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center",
                   gap: 6, padding: "0 8px", margin: "2px 0", fontSize: 11, color: "var(--text-secondary)",
                   background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 4,
                   userSelect: "none" }}>
       <span style={{ fontWeight: 700 }}>▸</span>{label}
-      <span style={{ marginLeft: "auto", opacity: 0.7 }}>펼치기</span>
+      <span style={{ marginLeft: "auto", opacity: 0.7 }}>{tr("펼치기")}</span>
     </div>
   );
 }
@@ -361,7 +364,7 @@ function ActionToolbar({
     return (
       <button className={primary ? "primary" : ""}
               disabled={(need && a !== "batch" && a !== "refresh") || !ok}
-              title={ok ? title : PERM_DENIED_TIP} onClick={() => onAction(a)}>
+              title={ok ? title : tr(PERM_DENIED_TIP)} onClick={() => onAction(a)}>
         {label}
       </button>
     );
@@ -371,23 +374,23 @@ function ActionToolbar({
       display: "flex", gap: 5, padding: "6px 8px", alignItems: "center",
       background: "var(--bg-panel)", borderBottom: "1px solid var(--border)",
     }}>
-      <Btn a="viewdraft" label="View&Draft" primary title="뷰어 + 초안 패널 동시 오픈 (더블클릭과 동일)" />
-      <Btn a="3d" label="3D" title="내장 Cornerstone3D MPR/MIP" />
+      <Btn a="viewdraft" label="View&Draft" primary title={tr("뷰어 + 초안 패널 동시 오픈 (더블클릭과 동일)")} />
+      <Btn a="3d" label="3D" title={tr("내장 Cornerstone3D MPR/MIP")} />
       <span style={{ width: 1, alignSelf: "stretch", background: "var(--border)", margin: "0 3px" }} />
       {/* UBPACS-Z Study Open 5종 */}
-      <Btn a="ub_view" label="🖵 View" title="① View — 기존 영상을 닫고 선택 검사를 그 자리에 표시 (UBPACS-Z)" />
-      <Btn a="ub_add" label="🖵+ Add" title="② Add View — 기존 영상은 닫지 않고 선택 검사를 분할 추가" />
-      <Btn a="ub_stack" label="⧉ Stack" title="③ Stack View — 기존 영상 유지 + 선택 검사를 같은 페인에 중첩" />
-      {ohifOn && <Btn a="ub_adv" label="⌂ Adv" title="④ Advance View — 고급 뷰어(OHIF)로 열기" />}
-      <Btn a="ub_key" label="🔑 Key" title="⑤ Key Image View — 선택 검사의 키 이미지만 표시 (F-16)" />
-      <Btn a="compareOpen" label="⇄ Compare" title="Compare — 뷰어에서 같은 환자의 과거검사를 골라 나란히 비교(모달, In Viewer 동일)" />
+      <Btn a="ub_view" label="🖵 View" title={tr("① View — 기존 영상을 닫고 선택 검사를 그 자리에 표시 (UBPACS-Z)")} />
+      <Btn a="ub_add" label="🖵+ Add" title={tr("② Add View — 기존 영상은 닫지 않고 선택 검사를 분할 추가")} />
+      <Btn a="ub_stack" label="⧉ Stack" title={tr("③ Stack View — 기존 영상 유지 + 선택 검사를 같은 페인에 중첩")} />
+      {ohifOn && <Btn a="ub_adv" label="⌂ Adv" title={tr("④ Advance View — 고급 뷰어(OHIF)로 열기")} />}
+      <Btn a="ub_key" label="🔑 Key" title={tr("⑤ Key Image View — 선택 검사의 키 이미지만 표시 (F-16)")} />
+      <Btn a="compareOpen" label="⇄ Compare" title={tr("Compare — 뷰어에서 같은 환자의 과거검사를 골라 나란히 비교(모달, In Viewer 동일)")} />
       {/* Study With Open (p.13): 더블클릭 시 Related Study를 함께 오픈 */}
-      <label title="Study With Open — 더블클릭으로 열 때 Related Study List의 검사를 한번에 같이 오픈"
+      <label title={tr("Study With Open — 더블클릭으로 열 때 Related Study List의 검사를 한번에 같이 오픈")}
              style={{ display: "flex", gap: 3, alignItems: "center", fontSize: 11.5, marginLeft: 3 }}>
         <input type="checkbox" checked={withOpen} onChange={(e) => setWithOpen(e.target.checked)} />
         With Open
       </label>
-      <select value={withOpenMode} disabled={!withOpen} title="함께 오픈 모드"
+      <select value={withOpenMode} disabled={!withOpen} title={tr("함께 오픈 모드")}
               onChange={(e) => setWithOpenMode(e.target.value as "add" | "stack")}
               style={{ fontSize: 10.5 }}>
         <option value="add">ADD VIEW</option>
@@ -396,42 +399,42 @@ function ActionToolbar({
       {/* Reading/Import/Export/Print/PDF/Emergency/AI/일괄검토/새로고침은 상단 탭 바(Local Server 왼쪽)로 이동(요청) */}
       <div style={{ flex: 1 }} />
       {/* 07 A.2 SearchShortcut: 검색 바로가기 저장/적용 */}
-      <select title="검색 바로가기" defaultValue="" onChange={(e) => {
+      <select title={tr("검색 바로가기")} defaultValue="" onChange={(e) => {
         const sc = JSON.parse(localStorage.getItem("sv_shortcuts") ?? "[]")
           .find((s: { label: string }) => s.label === e.target.value);
         if (sc) window.dispatchEvent(new CustomEvent("sv-apply-shortcut", { detail: sc }));
         e.target.value = "";
       }}>
-        <option value="">바로가기…</option>
+        <option value="">{tr("바로가기…")}</option>
         {JSON.parse(localStorage.getItem("sv_shortcuts") ?? "[]").map((s: { label: string }) => (
           <option key={s.label} value={s.label}>{s.label}</option>
         ))}
       </select>
-      <button title="현재 검색조건을 바로가기로 저장" onClick={() => {
+      <button title={tr("현재 검색조건을 바로가기로 저장")} onClick={() => {
         window.dispatchEvent(new CustomEvent("sv-save-shortcut"));
-      }}>★저장</button>
+      }}>{tr("★저장")}</button>
       {/* S1 자연어 검색 (nl_to_query) — AI 기능이므로 보라 포인트 */}
       {/* ⚠ name/autoComplete 를 반드시 준다 — 이름 없는 텍스트 필드는 크롬이 문서 전체를
           'unowned 합성 로그인 폼' 으로 묶을 때 username 후보로 잡아 저장된 자격증명(예: 병원ID)을
           여기에 채워 넣는다. 실제로 SEARCH 칸에 로그인 병원ID 가 자동입력돼 목록이 비는 사고가 있었다. */}
       <input
-        placeholder="AI 검색 — 예: 지난주 흉부 CT 미판독" value={nlText}
+        placeholder={tr("AI 검색 — 예: 지난주 흉부 CT 미판독")} value={nlText}
         name="wl-nlq" autoComplete="off" autoCorrect="off" spellCheck={false}
         onChange={(e) => setNlText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && nlText.trim()) { onNlSearch(nlText); } }}
-        title="자연어로 검색 조건을 입력하면 AI가 필터로 변환합니다 (적용 전 미리보기)"
+        title={tr("자연어로 검색 조건을 입력하면 AI가 필터로 변환합니다 (적용 전 미리보기)")}
         style={{ width: 200, background: "var(--bg-canvas)", borderColor: "var(--ai)" }}
       />
       <input
-        placeholder="SEARCH — 환자 ID/이름 (=정확 / 접두% / !제외)" value={searchText}
+        placeholder={tr("SEARCH — 환자 ID/이름 (=정확 / 접두% / !제외)")} value={searchText}
         name="wl-q" autoComplete="off" autoCorrect="off" spellCheck={false}
         onChange={(e) => setSearchText(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && onSearch()}
         style={{ width: 280, background: "var(--bg-canvas)" }}
       />
       <button className="primary" onClick={onSearch}
-              title={dirty ? "입력한 검색조건이 아직 적용되지 않았습니다 — 누르면 조회합니다"
-                           : "현재 조건으로 다시 조회"}
+              title={dirty ? tr("입력한 검색조건이 아직 적용되지 않았습니다 — 누르면 조회합니다")
+                           : tr("현재 조건으로 다시 조회")}
               style={dirty ? { boxShadow: "0 0 0 2px var(--stat-emergency,#f87171)" } : undefined}>
         SEARCH{dirty ? " •" : ""}
       </button>
@@ -463,15 +466,15 @@ function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
   const F = (key: string) => {
     switch (key) {
       case "pid":
-        return <input key={key} placeholder="*Any 환자 ID" value={filters.pid ?? ""} style={{ width: 110 }} {...ac("pid")}
+        return <input key={key} placeholder={tr("*Any 환자 ID")} value={filters.pid ?? ""} style={{ width: 110 }} {...ac("pid")}
                       onChange={(e) => set("pid", e.target.value)} onKeyDown={enter} />;
       case "pname":
-        return <input key={key} placeholder="*Any 이름" value={filters.pname ?? ""} style={{ width: 110 }} {...ac("pname")}
+        return <input key={key} placeholder={tr("*Any 이름")} value={filters.pname ?? ""} style={{ width: 110 }} {...ac("pname")}
                       onChange={(e) => set("pname", e.target.value)} onKeyDown={enter} />;
       case "sex":
         return (
           <select key={key} value={filters.sex ?? ""} {...ac("sex")} onChange={(e) => set("sex", e.target.value)}>
-            <option value="">*Any 성별</option><option value="M">M</option>
+            <option value="">{tr("*Any 성별")}</option><option value="M">M</option>
             <option value="F">F</option><option value="O">O</option>
           </select>
         );
@@ -487,30 +490,30 @@ function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
       case "date":
         return (
           <span key={key} style={{ display: "flex", gap: 3, alignItems: "center" }}>
-            <input type="date" value={filters.date_from_iso ?? ""} title="검사일 From" {...ac("date-from")}
+            <input type="date" value={filters.date_from_iso ?? ""} title={tr("검사일 From")} {...ac("date-from")}
                    onChange={(e) => set("date_from_iso", e.target.value)} />
             <span style={{ color: "var(--text-secondary)" }}>~</span>
-            <input type="date" value={filters.date_to_iso ?? ""} title="검사일 To" {...ac("date-to")}
+            <input type="date" value={filters.date_to_iso ?? ""} title={tr("검사일 To")} {...ac("date-to")}
                    onChange={(e) => set("date_to_iso", e.target.value)} />
           </span>
         );
       case "desc":
-        return <input key={key} placeholder="*Any 검사명" value={filters.desc ?? ""} style={{ width: 140 }} {...ac("desc")}
+        return <input key={key} placeholder={tr("*Any 검사명")} value={filters.desc ?? ""} style={{ width: 140 }} {...ac("desc")}
                       onChange={(e) => set("desc", e.target.value)} onKeyDown={enter} />;
       case "body_part":
-        return <input key={key} placeholder="*Any 부위" value={filters.body_part ?? ""} style={{ width: 90 }} {...ac("body_part")}
+        return <input key={key} placeholder={tr("*Any 부위")} value={filters.body_part ?? ""} style={{ width: 90 }} {...ac("body_part")}
                       onChange={(e) => set("body_part", e.target.value)} onKeyDown={enter} />;
       case "status":
         return (
           <select key={key} value={filters.status ?? ""} {...ac("status")} onChange={(e) => set("status", e.target.value)}>
-            <option value="">*Any 상태</option><option value="unread">미판독(확정 전)</option>
-            <option value="received">도착</option>
-            <option value="draft_ready">AI초안</option><option value="reading">판독중</option>
-            <option value="finalized">확정</option>
+            <option value="">{tr("*Any 상태")}</option><option value="unread">{tr("미판독(확정 전)")}</option>
+            <option value="received">{tr("도착")}</option>
+            <option value="draft_ready">{tr("AI초안")}</option><option value="reading">{tr("판독중")}</option>
+            <option value="finalized">{tr("확정")}</option>
           </select>
         );
       case "finding":
-        return <input key={key} placeholder="소견/임프레션 검색 (F-2)" value={filters.finding ?? ""} {...ac("finding")}
+        return <input key={key} placeholder={tr("소견/임프레션 검색 (F-2)")} value={filters.finding ?? ""} {...ac("finding")}
                       style={{ width: 180 }} onChange={(e) => set("finding", e.target.value)} onKeyDown={enter} />;
       case "emergency":
         return (
@@ -522,7 +525,7 @@ function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
         );
       case "key":
         return (
-          <label key={key} title="키이미지가 등록된 검사만 조회 (F-16)"
+          <label key={key} title={tr("키이미지가 등록된 검사만 조회 (F-16)")}
                  style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12 }}>
             <input type="checkbox" checked={filters.key === "true"}
                    onChange={(e) => set("key", e.target.checked ? "true" : "")} />
@@ -539,10 +542,10 @@ function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
     }}>
       {fields.map(F)}
       {dirty && (
-        <button onClick={onSearch} title="입력한 조건으로 조회합니다 (Enter 와 동일)"
+        <button onClick={onSearch} title={tr("입력한 조건으로 조회합니다 (Enter 와 동일)")}
                 style={{ marginLeft: "auto", fontSize: 11.5, padding: "2px 10px",
                          color: "var(--stat-emergency,#f87171)", fontWeight: 700 }}>
-          ● 조건 변경됨 — SEARCH 로 적용
+          {tr("● 조건 변경됨 — SEARCH 로 적용")}
         </button>
       )}
     </div>
@@ -588,12 +591,12 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
   };
   const presets = dpCustom ?? DATE_PRESETS;
   const askPreset = (init?: { label: string; days: number }) => {
-    const label = prompt("기간 이름", init?.label ?? "");
+    const label = prompt(tr("기간 이름"), init?.label ?? "");
     if (!label) return null;
-    const ds = prompt("일수 (0=오늘, 숫자=최근 N일, -1=전체)", String(init?.days ?? 7));
+    const ds = prompt(tr("일수 (0=오늘, 숫자=최근 N일, -1=전체)"), String(init?.days ?? 7));
     if (ds === null) return null;
     const days = Number(ds);
-    if (Number.isNaN(days)) { alert("숫자를 입력하세요"); return null; }
+    if (Number.isNaN(days)) { alert(tr("숫자를 입력하세요")); return null; }
     return { label, days };
   };
   const saveDp = (next: { key: string; label: string; days: number }[]) => {
@@ -608,7 +611,7 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
   // 섹션별 편집 모드 — 헤더의 ✏️ 아이콘을 눌렀을 때만 행에 연필/휴지통 표시
   const [editSec, setEditSec] = useState<{ dp?: boolean; mods?: boolean; favs?: boolean }>({});
   const EditToggle = ({ k }: { k: "dp" | "mods" | "favs" }) => (
-    <button title={editSec[k] ? "편집 모드 끄기" : "편집 모드 — 행별 수정(연필)/삭제(휴지통) 표시"}
+    <button title={editSec[k] ? tr("편집 모드 끄기") : tr("편집 모드 — 행별 수정(연필)/삭제(휴지통) 표시")}
             style={{ padding: "0 6px", fontSize: 10.5,
                      background: editSec[k] ? "var(--accent)" : undefined,
                      color: editSec[k] ? "#fff" : undefined }}
@@ -631,10 +634,10 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
     }}>
       <div style={{ fontSize: 10.5, color: "var(--text-secondary)", fontWeight: 700, padding: "2px 4px",
                     display: "flex", alignItems: "center" }}>
-        기간
+        {tr("기간")}
         <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
           <EditToggle k="dp" />
-          <button title="기간 프리셋 추가" style={{ padding: "0 6px", fontSize: 10.5 }}
+          <button title={tr("기간 프리셋 추가")} style={{ padding: "0 6px", fontSize: 10.5 }}
                   onClick={() => {
                     const r = askPreset();
                     if (r) saveDp([...presets, { key: `c${Math.random().toString(36).slice(2, 8)}`, ...r }]);
@@ -650,20 +653,20 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
                color: active === p.key ? "var(--text-primary)" : "var(--text-secondary)",
              }}>
           <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {p.label}
+            {tr(p.label)}
           </span>
           {editSec.dp && (
             <>
-              <span title="수정" style={{ flexShrink: 0 }}
+              <span title={tr("수정")} style={{ flexShrink: 0 }}
                     onClick={(e) => {
                       e.stopPropagation();
                       const r = askPreset(p);
                       if (r) saveDp(presets.map((x, k) => (k === i ? { ...x, ...r } : x)));
                     }}>✏️</span>
-              <span title="삭제" style={{ flexShrink: 0 }}
+              <span title={tr("삭제")} style={{ flexShrink: 0 }}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (window.confirm(`'${p.label}' 기간을 삭제할까요?`)) {
+                      if (window.confirm(`'${p.label}' ${tr("기간을 삭제할까요?")}`)) {
                         saveDp(presets.filter((_, k) => k !== i));
                       }
                     }}>🗑️</span>
@@ -680,16 +683,16 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
         Search Filter
         <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
           <EditToggle k="mods" />
-          <button title="모달리티 필터 추가 (예: US, MG)" style={{ padding: "0 6px", fontSize: 10.5 }}
+          <button title={tr("모달리티 필터 추가 (예: US, MG)")} style={{ padding: "0 6px", fontSize: 10.5 }}
                   onClick={() => {
-                    const code = prompt("추가할 Modality 코드 (예: US, MG, XA)");
+                    const code = prompt(tr("추가할 Modality 코드 (예: US, MG, XA)"));
                     if (!code) return;
                     const c = code.trim().toUpperCase();
-                    if (shownMods.includes(c)) { alert("이미 목록에 있습니다"); return; }
+                    if (shownMods.includes(c)) { alert(tr("이미 목록에 있습니다")); return; }
                     saveMods([...shownMods, c]);
                   }}>＋</button>
           {modList && (
-            <button title="자동 목록으로 되돌리기 (데이터 집계)" style={{ padding: "0 6px", fontSize: 10.5 }}
+            <button title={tr("자동 목록으로 되돌리기 (데이터 집계)")} style={{ padding: "0 6px", fontSize: 10.5 }}
                     onClick={() => { setModList(null); persistRail({ mod_filters: null }); }}>↺</button>
           )}
         </span>
@@ -703,7 +706,7 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
                background: activeMod === "" ? "var(--accent-subtle)" : undefined,
                color: activeMod === "" ? "var(--text-primary)" : "var(--text-secondary)",
              }}>
-          <span>📁 전체</span><span style={{ fontSize: 11 }}>{total}</span>
+          <span>📁 {tr("전체")}</span><span style={{ fontSize: 11 }}>{total}</span>
         </div>
         {shownMods.map((m, i) => (
           <div key={m} onClick={() => onMod(activeMod === m ? "" : m)}
@@ -714,22 +717,22 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
                  color: activeMod === m ? "var(--text-primary)" : "var(--text-secondary)",
                }}>
             <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {m || "(없음)"}
+              {m || tr("(없음)")}
             </span>
             <span style={{ fontSize: 11, flexShrink: 0 }}>{mods[m] ?? 0}</span>
             {editSec.mods && (
               <>
-                <span title="코드 수정" style={{ flexShrink: 0 }}
+                <span title={tr("코드 수정")} style={{ flexShrink: 0 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        const code = prompt("Modality 코드 수정", m);
+                        const code = prompt(tr("Modality 코드 수정"), m);
                         if (!code || code.trim().toUpperCase() === m) return;
                         saveMods(shownMods.map((x, k) => (k === i ? code.trim().toUpperCase() : x)));
                       }}>✏️</span>
-                <span title="목록에서 제거" style={{ flexShrink: 0 }}
+                <span title={tr("목록에서 제거")} style={{ flexShrink: 0 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (window.confirm(`'${m || "(없음)"}' 필터를 목록에서 제거할까요?`)) {
+                        if (window.confirm(`'${m || tr("(없음)")}' ${tr("필터를 목록에서 제거할까요?")}`)) {
                           saveMods(shownMods.filter((_, k) => k !== i));
                         }
                       }}>🗑️</span>
@@ -747,7 +750,7 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
         Favorites
         <span style={{ marginLeft: "auto", display: "flex", gap: 2 }}>
           <EditToggle k="favs" />
-          <button title="현재 검색조건을 바로가기로 추가 (툴바 ★저장과 동일)"
+          <button title={tr("현재 검색조건을 바로가기로 추가 (툴바 ★저장과 동일)")}
                   style={{ padding: "0 6px", fontSize: 10.5 }}
                   onClick={() => {
                     window.dispatchEvent(new CustomEvent("sv-save-shortcut"));
@@ -758,13 +761,13 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
       <div style={unifiedScroll ? { flexShrink: 0 } : { maxHeight: "22vh", overflowY: "auto", flexShrink: 0 }}>
         {favs.length === 0 && (
           <div style={{ padding: "2px 8px", fontSize: 11, color: "var(--text-secondary)" }}>
-            툴바 ★저장으로 현재 검색조건 등록
+            {tr("툴바 ★저장으로 현재 검색조건 등록")}
           </div>
         )}
         {favs.map((s, i) => (
           <div key={`${s.label}-${favTick}`}
                onClick={() => window.dispatchEvent(new CustomEvent("sv-apply-shortcut", { detail: s }))}
-               title={`클릭=적용 (헤더 ✏️=편집 모드 — 이름 변경/삭제)\n같은 이름으로 ★저장하면 조건이 덮어써집니다`}
+               title={tr("클릭=적용 (헤더 ✏️=편집 모드 — 이름 변경/삭제)\n같은 이름으로 ★저장하면 조건이 덮어써집니다")}
                className="sv-fav-row"
                style={{ padding: "3px 8px", borderRadius: 3, cursor: "pointer", fontSize: 12.5,
                         color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 4 }}>
@@ -773,17 +776,17 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
             </span>
             {editSec.favs && (
               <>
-                <span title="이름 변경" style={{ flexShrink: 0 }}
+                <span title={tr("이름 변경")} style={{ flexShrink: 0 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        const nn = prompt("바로가기 이름 변경", s.label);
+                        const nn = prompt(tr("바로가기 이름 변경"), s.label);
                         if (!nn || nn === s.label) return;
                         saveFavs(favs.map((f, k) => (k === i ? { ...f, label: nn } : f)));
                       }}>✏️</span>
-                <span title="삭제" style={{ flexShrink: 0 }}
+                <span title={tr("삭제")} style={{ flexShrink: 0 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (window.confirm(`'${s.label}' 바로가기를 삭제할까요?`)) {
+                        if (window.confirm(`'${s.label}' ${tr("바로가기를 삭제할까요?")}`)) {
                           saveFavs(favs.filter((_, k) => k !== i));
                         }
                       }}>🗑️</span>
@@ -796,7 +799,7 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
         fontSize: 10.5, color: "var(--text-secondary)", fontWeight: 700,
         padding: "6px 4px 2px", borderTop: "1px solid var(--border)", marginTop: 4,
       }}>
-        검색 폴더
+        {tr("검색 폴더")}
       </div>
       <div style={unifiedScroll
         ? { flexShrink: 0, display: "flex", flexDirection: "column" }
@@ -824,7 +827,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
   const openLocal = (s: string) => {
     api.shareList(s || undefined)
       .then((r) => { setFiles(r.items); setShareDir(r.dir); setSub(r.sub); setErr(""); })
-      .catch((e) => { setFiles([]); setErr(e instanceof Error ? e.message : "조회 실패"); });
+      .catch((e) => { setFiles([]); setErr(e instanceof Error ? e.message : tr("조회 실패")); });
   };
 
   useEffect(() => {
@@ -846,7 +849,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
   return (
     <span style={{ position: "relative", display: "flex", gap: 3, alignSelf: "center" }}>
       <button onClick={() => pick("local")}
-              title="Local Server — 로컬 PACS 모드로 전환(서버 데이터 숨김) + 공유 폴더 보기 (설정>서버 네트워크에서 디렉토리 지정)"
+              title={tr("Local Server — 로컬 PACS 모드로 전환(서버 데이터 숨김) + 공유 폴더 보기 (설정>서버 네트워크에서 디렉토리 지정)")}
               style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700,
                        background: mode === "local" ? "var(--accent)" : undefined,
                        color: mode === "local" ? "#fff" : undefined }}>
@@ -855,7 +858,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
       {/* Web Server 와 Live 는 '어느 서버의 데이터를 볼 것인가'라는 같은 축이라 하나로 합쳤다.
           버튼이 현재 모드를 그대로 보여 주고(Live 는 녹색), 클릭하면 팝오버에서 전환한다. */}
       <button onClick={() => setOpen((o) => (o === "web" ? null : "web"))}
-              title="서버 — Web Server(이 서버) / Live(원격 PACS 직결) 전환·설정 확인"
+              title={tr("서버 — Web Server(이 서버) / Live(원격 PACS 직결) 전환·설정 확인")}
               style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700,
                        background: mode === "live" ? "#22c55e" : mode === "web" ? "var(--accent)" : undefined,
                        color: mode === "live" || mode === "web" ? "#fff" : undefined,
@@ -864,7 +867,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
       </button>
       {onWebPacs && (
         <button onClick={onWebPacs}
-                title="WebPACS — 인계 PACS(webpacs_api)의 검사를 검색해 우리 뷰어로 가져오기(복사) + 접속 설정"
+                title={tr("WebPACS — 인계 PACS(webpacs_api)의 검사를 검색해 우리 뷰어로 가져오기(복사) + 접속 설정")}
                 style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
           WebPACS
         </button>
@@ -877,7 +880,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
         }} onMouseLeave={() => setOpen(null)}>
           {open === "local" ? (
             <>
-              <b>Local Server — 폴더 공유</b>
+              <b>{tr("Local Server — 폴더 공유")}</b>
               {err ? (
                 <div style={{ color: "var(--stat-emergency)", marginTop: 6 }}>{err}</div>
               ) : (
@@ -887,15 +890,15 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
                           title={sub ? `${shareDir}\\${sub.replace(/\//g, "\\")}` : shareDir}>
                       {shareDir}
                     </code>
-                    <MiniBtn onClick={() => navigator.clipboard?.writeText(sub ? `${shareDir}\\${sub.replace(/\//g, "\\")}` : shareDir)}>경로 복사</MiniBtn>
+                    <MiniBtn onClick={() => navigator.clipboard?.writeText(sub ? `${shareDir}\\${sub.replace(/\//g, "\\")}` : shareDir)}>{tr("경로 복사")}</MiniBtn>
                   </div>
                   {/* 브레드크럼 — 루트/하위 폴더 경로 표시, 각 조각 클릭=해당 폴더로 이동, ⬆=상위 */}
                   <div style={{ display: "flex", gap: 3, alignItems: "center", flexWrap: "wrap",
                                 margin: "0 0 5px", fontSize: 11 }}>
                     <MiniBtn onClick={() => openLocal(sub.split("/").slice(0, -1).join("/"))}
-                             disabled={!sub} title="상위 폴더로">⬆ 상위</MiniBtn>
+                             disabled={!sub} title={tr("상위 폴더로")}>{tr("⬆ 상위")}</MiniBtn>
                     <span style={{ cursor: sub ? "pointer" : undefined, fontWeight: sub ? 400 : 700 }}
-                          onClick={() => sub && openLocal("")}>루트</span>
+                          onClick={() => sub && openLocal("")}>{tr("루트")}</span>
                     {sub && sub.split("/").map((seg, i, arr) => (
                       <span key={i} style={{ display: "flex", gap: 3, alignItems: "center" }}>
                         <span style={{ color: "var(--text-secondary)" }}>›</span>
@@ -908,14 +911,14 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
                     ))}
                   </div>
                   <table className="grid-table">
-                    <thead><tr><th>이름</th><th style={{ width: 64 }}>크기</th></tr></thead>
+                    <thead><tr><th>{tr("이름")}</th><th style={{ width: 64 }}>{tr("크기")}</th></tr></thead>
                     <tbody>
                       {files.slice(0, 20).map((f) => {
                         const rel = sub ? `${sub}/${f.name}` : f.name;   // 루트 기준 상대경로
                         const isImg = /\.(jpe?g|png|bmp|gif)$/i.test(f.name);   // 이미지 미리보기 아이콘
                         return (
                           <tr key={f.name} style={{ cursor: "pointer" }}
-                              title={f.is_dir ? "클릭 = 폴더 진입" : "클릭 = 다운로드"}
+                              title={f.is_dir ? tr("클릭 = 폴더 진입") : tr("클릭 = 다운로드")}
                               onClick={() => {
                                 if (f.is_dir) { openLocal(rel); return; }
                                 window.open(`${(import.meta.env.VITE_API_BASE ?? "http://localhost:8000")}/api/share/file?name=${encodeURIComponent(rel)}`, "_blank");
@@ -925,7 +928,7 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
                           </tr>
                         );
                       })}
-                      {files.length === 0 && <tr><td colSpan={2} style={{ color: "var(--text-secondary)" }}>비어 있음</td></tr>}
+                      {files.length === 0 && <tr><td colSpan={2} style={{ color: "var(--text-secondary)" }}>{tr("비어 있음")}</td></tr>}
                     </tbody>
                   </table>
                 </>
@@ -933,35 +936,35 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
             </>
           ) : (
             <>
-              <b>서버 선택</b>
+              <b>{tr("서버 선택")}</b>
               <div style={{ display: "flex", gap: 6, margin: "7px 0 9px" }}>
                 <button onClick={() => onMode("web")} style={{ flex: 1, fontSize: 11.5, fontWeight: 700,
                         background: mode === "web" ? "var(--accent)" : undefined,
                         color: mode === "web" ? "#fff" : undefined }}>
-                  Web Server<br /><span style={{ fontSize: 10, fontWeight: 400 }}>이 서버의 검사</span>
+                  Web Server<br /><span style={{ fontSize: 10, fontWeight: 400 }}>{tr("이 서버의 검사")}</span>
                 </button>
                 <button onClick={() => onMode("live")} disabled={!live.enabled}
-                        title={live.enabled ? "원격 PACS 직결(복사 없음)" : "설정 > 서버 네트워크 > 웹 서버에서 Live 를 먼저 활성화하세요"}
+                        title={live.enabled ? tr("원격 PACS 직결(복사 없음)") : tr("설정 > 서버 네트워크 > 웹 서버에서 Live 를 먼저 활성화하세요")}
                         style={{ flex: 1, fontSize: 11.5, fontWeight: 700,
                         background: mode === "live" ? "#22c55e" : undefined,
                         color: mode === "live" ? "#fff" : live.enabled ? "#22c55e" : undefined,
                         borderColor: "#22c55e" }}>
-                  Live<br /><span style={{ fontSize: 10, fontWeight: 400 }}>원격 PACS 직결</span>
+                  Live<br /><span style={{ fontSize: 10, fontWeight: 400 }}>{tr("원격 PACS 직결")}</span>
                 </button>
               </div>
               <table className="grid-table">
                 <tbody>
-                  <tr><th style={{ width: 84 }}>주소(IP)</th><td>{net.web?.ip || "(미설정)"}</td></tr>
-                  <tr><th>Port</th><td>{net.web?.port || "(미설정)"}</td></tr>
+                  <tr><th style={{ width: 84 }}>{tr("주소(IP)")}</th><td>{net.web?.ip || tr("(미설정)")}</td></tr>
+                  <tr><th>Port</th><td>{net.web?.port || tr("(미설정)")}</td></tr>
                   <tr><th>Name</th><td>{net.web?.name || "-"}</td></tr>
                   <tr><th>AE Title</th><td>{net.web?.ae_title || "-"}</td></tr>
-                  <tr><th style={{ color: "#22c55e" }}>Live 원격</th>
-                      <td>{live.enabled ? (live.base_url || "(주소 미설정)") : "사용 안 함"}</td></tr>
-                  <tr><th style={{ color: "#22c55e" }}>Live 계정</th><td>{live.user_id || "-"}</td></tr>
+                  <tr><th style={{ color: "#22c55e" }}>{tr("Live 원격")}</th>
+                      <td>{live.enabled ? (live.base_url || tr("(주소 미설정)")) : tr("사용 안 함")}</td></tr>
+                  <tr><th style={{ color: "#22c55e" }}>{tr("Live 계정")}</th><td>{live.user_id || "-"}</td></tr>
                 </tbody>
               </table>
               <div style={{ marginTop: 5, color: "var(--text-secondary)", fontSize: 11 }}>
-                설정 변경·Live 접속·Ping/Echo/DB 테스트는 설정 &gt; 서버 네트워크 &gt; 웹 서버에서.
+                {tr("설정 변경·Live 접속·Ping/Echo/DB 테스트는 설정 > 서버 네트워크 > 웹 서버에서.")}
               </div>
             </>
           )}
@@ -988,7 +991,7 @@ function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, ser
       background: "var(--bg-canvas)", borderBottom: "1px solid var(--border)",
     }}>
       {viewerName && (
-        <b title="선택된 뷰어(설정>환경) — 워크리스트·뷰어 스킨" style={{
+        <b title={tr("선택된 뷰어(설정>환경) — 워크리스트·뷰어 스킨")} style={{
           fontSize: 13, letterSpacing: 0.6, color: "var(--accent)", padding: "4px 12px 6px 2px",
           whiteSpace: "nowrap", alignSelf: "center",
         }}>{viewerName}</b>
@@ -1004,13 +1007,13 @@ function WorklistTabsBar({ tabs, activeId, onPick, onAdd, onRemove, actions, ser
              }}>
           {t.label.toUpperCase()}
           {t.id !== "default" && (
-            <span title="페이지 삭제" onClick={(e) => { e.stopPropagation(); onRemove(t.id); }}
+            <span title={tr("페이지 삭제")} onClick={(e) => { e.stopPropagation(); onRemove(t.id); }}
                   style={{ fontSize: 10, opacity: 0.75 }}>✕</span>
           )}
         </div>
       ))}
       {extraTab}
-      <button onClick={onAdd} title="현재 검색조건을 새 페이지로 등록 (최대 10 — UBPACS-Z)"
+      <button onClick={onAdd} title={tr("현재 검색조건을 새 페이지로 등록 (최대 10 — UBPACS-Z)")}
               style={{ padding: "1px 9px", fontSize: 13, marginLeft: 4, marginBottom: 3 }}>＋</button>
       {/* 우측 그룹: 액션 버튼(요청 — Local Server 왼쪽) + 서버 버튼 */}
       <span style={{ marginLeft: "auto", display: "flex", gap: 3, alignItems: "center", alignSelf: "center" }}>
@@ -1069,11 +1072,11 @@ function SeriesTreeRows({ studyId, tree, expSeries, toggleSeries, colSpan, lead,
   const pad = Array.from({ length: lead }, (_, i) => <td key={`p${i}`} />);
   if (tree === null) {
     return <tr>{pad}<td colSpan={colSpan}
-      style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>시리즈 로딩…</td></tr>;
+      style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("시리즈 로딩…")}</td></tr>;
   }
   if (!tree || tree.length === 0) {
     return <tr>{pad}<td colSpan={colSpan}
-      style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>시리즈 없음</td></tr>;
+      style={{ paddingLeft: 30, fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("시리즈 없음")}</td></tr>;
   }
   return (
     <>
@@ -1085,12 +1088,12 @@ function SeriesTreeRows({ studyId, tree, expSeries, toggleSeries, colSpan, lead,
               {pad}
               <td colSpan={colSpan} style={{ paddingLeft: 26, fontSize: 12 }}>
                 <span style={{ ...TREE_MARK, marginRight: 7 }}
-                      title={expSeries.has(key) ? "Image 접기" : "Image 펼치기"}
+                      title={expSeries.has(key) ? tr("Image 접기") : tr("Image 펼치기")}
                       onClick={(e) => { e.stopPropagation(); toggleSeries(key); }}
                       onDoubleClick={(e) => e.stopPropagation()}>
                   {expSeries.has(key) ? "−" : "＋"}
                 </span>
-                📚 Series {s.series_number || si + 1} · {s.modality} · {s.instances.length}장
+                📚 Series {s.series_number || si + 1} · {s.modality} · {s.instances.length}{tr("장")}
                 <span style={{ color: "var(--text-secondary)" }}> {s.series_desc}</span>
               </td>
             </tr>
@@ -1141,7 +1144,7 @@ function StudyGrid({
             <th style={{ width: 30 }}>#</th>
             {columns.map((c) => (
               <th key={c} style={infi && INFI_COL_WIDTH[c] ? { width: INFI_COL_WIDTH[c] } : undefined}>
-                {COLUMN_DEFS[c]?.label ?? c}
+                {tr(COLUMN_DEFS[c]?.label ?? c)}
               </th>
             ))}
           </tr>
@@ -1158,7 +1161,7 @@ function StudyGrid({
                   <td onDoubleClick={(e) => e.stopPropagation()} />
                 ) : (
                   <td style={{ ...markStyle, textAlign: "center" }}
-                      title={expanded.has(row.id) ? "접기" : "Series/Image 펼치기"}
+                      title={expanded.has(row.id) ? tr("접기") : tr("Series/Image 펼치기")}
                       onClick={(e) => { e.stopPropagation(); toggleExam(row.id); }}
                       onDoubleClick={(e) => e.stopPropagation()}>
                     {expanded.has(row.id) ? "−" : "＋"}
@@ -1178,7 +1181,7 @@ function StudyGrid({
           {items.length === 0 && (
             <tr><td colSpan={span}
                     style={{ color: "var(--text-secondary)", textAlign: "center", padding: 24 }}>
-              검사가 없습니다
+              {tr("검사가 없습니다")}
             </td></tr>
           )}
         </tbody>
@@ -1199,12 +1202,12 @@ function PriorStudiesGrid({ detail, onAddCompare, onOpen }: {
   const { expanded, expSeries, trees, toggleExam, toggleSeries } = useSeriesTree();
   const span = 5;   // 토글 + 검사일 + MOD + 검사명 + 상태 (⇄ 는 상태 칸 안)
   return (
-    <PanelBox title={`과거검사 ${detail ? `— ${detail.patient_name}` : ""} (＋ 펼치기 · 더블클릭=열기 · ⇄ 비교세트)`}>
+    <PanelBox title={`${tr("과거검사")} ${detail ? `— ${detail.patient_name}` : ""} ${tr("(＋ 펼치기 · 더블클릭=열기 · ⇄ 비교세트)")}`}>
       <table className="grid-table">
         <thead>
           <tr>
             <th style={{ width: 22 }} />
-            <th>검사일</th><th>MOD</th><th>검사명</th><th>상태</th>
+            <th>{tr("검사일")}</th><th>MOD</th><th>{tr("검사명")}</th><th>{tr("상태")}</th>
           </tr>
         </thead>
         <tbody>
@@ -1212,7 +1215,7 @@ function PriorStudiesGrid({ detail, onAddCompare, onOpen }: {
             <Fragment key={e.id}>
               <tr onDoubleClick={() => onOpen(e.id)} style={{ userSelect: "none" }}>
                 <td style={{ ...TREE_MARK, textAlign: "center" }}
-                    title={expanded.has(e.id) ? "접기" : "Series/Image 펼치기"}
+                    title={expanded.has(e.id) ? tr("접기") : tr("Series/Image 펼치기")}
                     onClick={(ev) => { ev.stopPropagation(); toggleExam(e.id); }}
                     onDoubleClick={(ev) => ev.stopPropagation()}>
                   {expanded.has(e.id) ? "−" : "＋"}
@@ -1221,7 +1224,7 @@ function PriorStudiesGrid({ detail, onAddCompare, onOpen }: {
                 <td title={e.study_desc}>{e.study_desc}</td>
                 <td style={{ whiteSpace: "nowrap" }}>
                   <StatusBadge status={e.status} />
-                  <button title="비교세트에 추가" style={{ padding: "0 6px", fontSize: 11, marginLeft: 6 }}
+                  <button title={tr("비교세트에 추가")} style={{ padding: "0 6px", fontSize: 11, marginLeft: 6 }}
                           onClick={(ev) => { ev.stopPropagation(); onAddCompare(e); }}
                           onDoubleClick={(ev) => ev.stopPropagation()}>⇄</button>
                 </td>
@@ -1235,7 +1238,7 @@ function PriorStudiesGrid({ detail, onAddCompare, onOpen }: {
           ))}
           {(!detail || detail.related_exams.length === 0) && (
             <tr><td colSpan={span} style={{ color: "var(--text-secondary)" }}>
-              {detail ? "과거 검사 없음" : "검사를 선택하세요"}
+              {detail ? tr("과거 검사 없음") : tr("검사를 선택하세요")}
             </td></tr>
           )}
         </tbody>
@@ -1254,21 +1257,21 @@ function ComparisonSetGrid({ items, current, onRemove, onOpenCompare, onMerge }:
   onMerge: () => void;
 }) {
   return (
-    <PanelBox title="비교세트 (Complementary set)" right={
+    <PanelBox title={tr("비교세트 (Complementary set)")} right={
       <span style={{ display: "flex", gap: 4 }}>
         <button disabled={!current || items.length === 0} onClick={onMerge}
-                title="묶음판독(report_merge) — 비교세트 검사들을 현재 검사 판독 하나로 병합"
+                title={tr("묶음판독(report_merge) — 비교세트 검사들을 현재 검사 판독 하나로 병합")}
                 style={{ padding: "2px 10px", fontSize: 11.5 }}>
-          묶음판독
+          {tr("묶음판독")}
         </button>
         <button className="primary" disabled={!current || items.length === 0} onClick={onOpenCompare}
                 style={{ padding: "2px 10px", fontSize: 11.5 }}>
-          비교 열기 ({items.length + (current ? 1 : 0)})
+          {tr("비교 열기")} ({items.length + (current ? 1 : 0)})
         </button>
       </span>
     }>
       <table className="grid-table">
-        <thead><tr><th>검사일</th><th>MOD</th><th>검사명</th><th></th></tr></thead>
+        <thead><tr><th>{tr("검사일")}</th><th>MOD</th><th>{tr("검사명")}</th><th></th></tr></thead>
         <tbody>
           {items.map((e) => (
             <tr key={e.study_uid}>
@@ -1279,7 +1282,7 @@ function ComparisonSetGrid({ items, current, onRemove, onOpenCompare, onMerge }:
           ))}
           {items.length === 0 && (
             <tr><td colSpan={4} style={{ color: "var(--text-secondary)" }}>
-              과거검사를 더블클릭해 추가 → 현재 검사와 함께 뷰어에서 비교
+              {tr("과거검사를 더블클릭해 추가 → 현재 검사와 함께 뷰어에서 비교")}
             </td></tr>
           )}
         </tbody>
@@ -1295,6 +1298,7 @@ export function PhraseEditModal({ init, defaults, onSave, onClose }: {
   onSave: (body: Partial<PhraseRow>) => Promise<void>;
   onClose: () => void;
 }) {
+  useLang();   // 언어 변경 시 재렌더 (tr 사용 — export 컴포넌트)
   const [name, setName] = useState(init?.name ?? "");
   const [text, setText] = useState(init?.text ?? "");
   const [modality, setModality] = useState(init?.modality ?? defaults?.modality ?? "");
@@ -1312,28 +1316,28 @@ export function PhraseEditModal({ init, defaults, onSave, onClose }: {
          onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
                     width: 460, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
-        <b style={{ fontSize: 13 }}>{init ? `상용구 수정 — ${init.name}` : "새 상용구 등록"}</b>
-        <Row label="이름 *"><input autoFocus value={name} onChange={(e) => setName(e.target.value)} style={{ flex: 1 }} /></Row>
+        <b style={{ fontSize: 13 }}>{init ? `${tr("상용구 수정")} — ${init.name}` : tr("새 상용구 등록")}</b>
+        <Row label={tr("이름 *")}><input autoFocus value={name} onChange={(e) => setName(e.target.value)} style={{ flex: 1 }} /></Row>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <Row label="장비(MOD)">
+          <Row label={tr("장비(MOD)")}>
             <select value={modality} onChange={(e) => setModality(e.target.value)} style={{ flex: 1 }}>
-              <option value="">공통</option>
+              <option value="">{tr("공통")}</option>
               {["CR", "DX", "CT", "MR", "US", "MG", "XA", "NM", "ES", "RF"].map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
           </Row>
-          <Row label="부위">
-            <input value={bodyPart} onChange={(e) => setBodyPart(e.target.value)} placeholder="CHEST… (빈칸=공통)"
+          <Row label={tr("부위")}>
+            <input value={bodyPart} onChange={(e) => setBodyPart(e.target.value)} placeholder={tr("CHEST… (빈칸=공통)")}
                    style={{ flex: 1, minWidth: 0 }} />
           </Row>
         </div>
-        <Row label="단축키">
+        <Row label={tr("단축키")}>
           <input value={shortcut} maxLength={1} onChange={(e) => setShortcut(e.target.value.toUpperCase())}
-                 placeholder="영문/숫자 1글자" style={{ width: 90 }} />
-          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>리포트에서 Alt+키로 즉시 삽입</span>
+                 placeholder={tr("영문/숫자 1글자")} style={{ width: 90 }} />
+          <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>{tr("리포트에서 Alt+키로 즉시 삽입")}</span>
         </Row>
-        <Row label="본문 *">
+        <Row label={tr("본문 *")}>
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5}
                     style={{ flex: 1, background: "var(--bg-canvas)", color: "var(--text-primary)",
                              border: "1px solid var(--border)", borderRadius: 3, padding: 5,
@@ -1346,9 +1350,9 @@ export function PhraseEditModal({ init, defaults, onSave, onClose }: {
                     try {
                       await onSave({ name, text, modality, body_part: bodyPart, shortcut });
                       onClose();
-                    } catch (e) { setErr(e instanceof Error ? e.message : "저장 실패"); }
-                  }}>저장</button>
-          <button onClick={onClose}>취소</button>
+                    } catch (e) { setErr(e instanceof Error ? e.message : tr("저장 실패")); }
+                  }}>{tr("저장")}</button>
+          <button onClick={onClose}>{tr("취소")}</button>
         </div>
       </div>
     </div>
@@ -1379,19 +1383,19 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
   useEffect(load, [load]);
 
   const del = async () => {
-    if (!sel || !window.confirm(`상용구 '${sel.name}'을 삭제할까요?`)) return;
+    if (!sel || !window.confirm(`${tr("상용구")} '${sel.name}'${tr("을 삭제할까요?")}`)) return;
     await api.deletePhrase(sel.id);
     setSel(null);
     load();
   };
 
   return (
-    <PanelBox title="상용구 (Std)" right={
+    <PanelBox title={tr("상용구 (Std)")} right={
       <span style={{ display: "flex", gap: 3, alignItems: "center" }}>
         <label style={{ fontSize: 10, display: "flex", gap: 2, alignItems: "center", textTransform: "none" }}>
-          <input type="checkbox" checked={fitOnly} onChange={(e) => setFitOnly(e.target.checked)} />맞춤
+          <input type="checkbox" checked={fitOnly} onChange={(e) => setFitOnly(e.target.checked)} />{tr("맞춤")}
         </label>
-        <MiniBtn onClick={() => sel && onInsert(sel.text)} disabled={!sel}>삽입</MiniBtn>
+        <MiniBtn onClick={() => sel && onInsert(sel.text)} disabled={!sel}>{tr("삽입")}</MiniBtn>
         <MiniBtn onClick={() => setModal("new")}>New</MiniBtn>
         <MiniBtn onClick={() => setModal("edit")} disabled={!sel}>Edit</MiniBtn>
         <MiniBtn onClick={del} disabled={!sel}>Del</MiniBtn>
@@ -1400,7 +1404,7 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
       <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
         <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
           <table className="grid-table">
-            <thead><tr><th>분류</th><th>NAME</th><th style={{ width: 34 }}>키</th></tr></thead>
+            <thead><tr><th>{tr("분류")}</th><th>NAME</th><th style={{ width: 34 }}>{tr("키")}</th></tr></thead>
             <tbody>
               {visible.map((p) => (
                 <tr key={p.id} className={sel?.id === p.id ? "selected" : ""}
@@ -1411,7 +1415,7 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
               ))}
               {visible.length === 0 && (
                 <tr><td colSpan={3} style={{ color: "var(--text-secondary)" }}>
-                  {items.length ? "맞춤 해제 시 전체 표시" : "New로 상용구 등록"}
+                  {items.length ? tr("맞춤 해제 시 전체 표시") : tr("New로 상용구 등록")}
                 </td></tr>
               )}
             </tbody>
@@ -1471,15 +1475,15 @@ function KeyImageStrip({ studyId }: { studyId: number }) {
     setBusy(true);
     try {
       await api.setKeyImages(studyId, [...selected.values()]);
-      if (kos && selected.size > 0) { await api.sendKos(studyId); setMsg("KOS 전송됨"); }
-      else setMsg("저장됨");
-    } catch (e) { setMsg(e instanceof Error ? e.message : "실패"); }
+      if (kos && selected.size > 0) { await api.sendKos(studyId); setMsg(tr("KOS 전송됨")); }
+      else setMsg(tr("저장됨"));
+    } catch (e) { setMsg(e instanceof Error ? e.message : tr("실패")); }
     finally { setBusy(false); }
   };
   return (
     <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "3px 0" }}>
       <span style={{ fontSize: 10.5, color: "var(--text-secondary)", width: 56, flexShrink: 0 }}>
-        KEY IMG<br />({selected.size}장)
+        KEY IMG<br />({selected.size}{tr("장")})
       </span>
       <div style={{ display: "flex", gap: 3, overflowX: "auto" }}>
         {items.slice(0, 16).map((it) => (
@@ -1491,9 +1495,9 @@ function KeyImageStrip({ studyId }: { studyId: number }) {
         ))}
       </div>
       <MiniBtn onClick={() => save(false)} disabled={busy || !canRegister}
-               title={canRegister ? undefined : PERM_DENIED_TIP}>저장</MiniBtn>
+               title={canRegister ? undefined : tr(PERM_DENIED_TIP)}>{tr("저장")}</MiniBtn>
       <MiniBtn onClick={() => save(true)} disabled={busy || selected.size === 0 || !canRegister}
-               title={canRegister ? undefined : PERM_DENIED_TIP}>KOS</MiniBtn>
+               title={canRegister ? undefined : tr(PERM_DENIED_TIP)}>KOS</MiniBtn>
       {msg && <span style={{ fontSize: 10.5, color: "var(--stat-final)" }}>{msg}</span>}
     </div>
   );
@@ -1570,12 +1574,12 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
           try {
             const r = await sttTranscribe(new Blob(chunks, { type: "audio/webm" }));
             if (r.text) insertText(r.text);
-          } catch (e) { alert(e instanceof Error ? e.message : "STT 실패"); }
+          } catch (e) { alert(e instanceof Error ? e.message : tr("STT 실패")); }
         };
         recRef.current = rec;
         rec.start();
         setStt(true);
-      }).catch(() => alert("마이크 권한이 필요합니다"));
+      }).catch(() => alert(tr("마이크 권한이 필요합니다")));
       return;
     }
     const w = window as unknown as Record<string, unknown>;
@@ -1585,7 +1589,7 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
         onresult: (ev: { resultIndex: number; results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void;
         onend: () => void; onerror: () => void; start: () => void; stop: () => void;
       }) | undefined;
-    if (!SR) { alert("이 브라우저는 음성 인식을 지원하지 않습니다 (Chrome 권장 — 또는 설정>AI 정책에서 Whisper 선택)"); return; }
+    if (!SR) { alert(tr("이 브라우저는 음성 인식을 지원하지 않습니다 (Chrome 권장 — 또는 설정>AI 정책에서 Whisper 선택)")); return; }
     const rec = new SR();
     rec.lang = "ko-KR";
     rec.continuous = true;
@@ -1633,7 +1637,7 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
   }, [insertRef]);
 
   if (!detail) {
-    return <PanelBox title="REPORT"><Empty>검사를 선택하세요</Empty></PanelBox>;
+    return <PanelBox title="REPORT"><Empty>{tr("검사를 선택하세요")}</Empty></PanelBox>;
   }
 
   const finalized = current?.status === "finalized";
@@ -1642,7 +1646,7 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
   const signature = (current?.diff_metrics as {
     signature?: { name: string; license_no: string; signed_at: string };
   })?.signature;
-  const age = detail.birth_date ? `${new Date().getFullYear() - parseInt(detail.birth_date.slice(0, 4), 10)}세` : "-";
+  const age = detail.birth_date ? `${new Date().getFullYear() - parseInt(detail.birth_date.slice(0, 4), 10)}${tr("세")}` : "-";
 
   const save = async () => {
     if (!current || !draft) return;
@@ -1664,7 +1668,7 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
   const openAiPopup = () => {
     if (!aiDraft) return;
     const w = window.open("", "sv_ai_report", "width=620,height=780");
-    if (!w) { alert("팝업이 차단되었습니다"); return; }
+    if (!w) { alert(tr("팝업이 차단되었습니다")); return; }
     const sr = aiDraft.sr_json;
     const rows = [
       ...(sr.comparison.summary ? [`<div class="sec">COMPARISON</div><div>${escHtml(sr.comparison.summary)}</div>`] : []),
@@ -1685,7 +1689,7 @@ h2{color:#a78bfa;font-size:16px;margin:0 0 4px}.meta{color:#9aa3ad;font-size:12p
 <h2>AI STRUCTURED REPORT</h2>
 <div class="meta">${escHtml(detail.patient_name)} (${escHtml(detail.patient_key)}) · ${detail.modality} · ${detail.study_date} · ${escHtml(detail.study_desc)} · v${aiDraft.version} ${escHtml(aiDraft.ai_model)}</div>
 ${rows}
-<div class="foot">⚠ AI 생성 초안 — 확정 아님. 최종 판독은 의료인이 합니다.</div>
+<div class="foot">${tr("⚠ AI 생성 초안 — 확정 아님. 최종 판독은 의료인이 합니다.")}</div>
 </body></html>`);
     w.document.close();
   };
@@ -1696,11 +1700,11 @@ ${rows}
     <PanelBox title="REPORT" right={
       <span style={{ display: "flex", gap: 3, alignItems: "center" }}>
         {onNav && (<>
-          <MiniBtn title="이전 환자(검사)로 이동" onClick={() => onNav(-1)}>◀</MiniBtn>
-          <MiniBtn title="다음 환자(검사)로 이동" onClick={() => onNav(1)}>▶</MiniBtn>
+          <MiniBtn title={tr("이전 환자(검사)로 이동")} onClick={() => onNav(-1)}>◀</MiniBtn>
+          <MiniBtn title={tr("다음 환자(검사)로 이동")} onClick={() => onNav(1)}>▶</MiniBtn>
         </>)}
         {current && (<>
-          {current.created_by === "ai" && <span className="badge ai">AI 초안 — 검토 필수</span>}
+          {current.created_by === "ai" && <span className="badge ai">{tr("AI 초안 — 검토 필수")}</span>}
           <StatusBadge status={current.status === "draft" ? "draft_ready" : current.status} />
         </>)}
       </span>
@@ -1717,8 +1721,8 @@ ${rows}
             </tr>
             <tr>
               <th>Acc No</th><td>{detail.accession_no}</td>
-              <th>검사명</th><td colSpan={3} title={detail.study_desc}>{detail.study_desc}</td>
-              <th>검사일</th><td>{detail.study_date}</td>
+              <th>{tr("검사명")}</th><td colSpan={3} title={detail.study_desc}>{detail.study_desc}</td>
+              <th>{tr("검사일")}</th><td>{detail.study_date}</td>
             </tr>
             <tr>
               <th>Reporter</th>
@@ -1727,7 +1731,7 @@ ${rows}
                 Reader: {current?.reviewed_by || "-"} · Conf1: {finalized ? current?.reviewed_by : "-"} ·
                 Conf2: {(current?.diff_metrics as { confirm2?: { by: string } })?.confirm2?.by ?? "-"}
               </td>
-              <th>확정일</th>
+              <th>{tr("확정일")}</th>
               <td>{current?.finalized_at ? current.finalized_at.slice(0, 10) : "-"}</td>
             </tr>
           </tbody>
@@ -1737,13 +1741,13 @@ ${rows}
 
         {!current || !draft ? (
           <Empty>
-            리포트 없음
+            {tr("리포트 없음")}
             <div style={{ marginTop: 6 }}>
-              <MiniBtn disabled={!canWrite} title={canWrite ? undefined : PERM_DENIED_TIP}
+              <MiniBtn disabled={!canWrite} title={canWrite ? undefined : tr(PERM_DENIED_TIP)}
                        onClick={async () => {
                          try { await api.analyze(detail.id); onChanged(); }
                          catch (e) { alert((e as Error).message); }   // AI 판독 보류(409) 등 안내
-                       }}>AI 초안 생성</MiniBtn>
+                       }}>{tr("AI 초안 생성")}</MiniBtn>
             </div>
           </Empty>
         ) : (
@@ -1757,19 +1761,19 @@ ${rows}
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--ai)", display: "flex", gap: 6, alignItems: "center" }}>
                   AI STRUCTURED REPORT {aiDraft && `(v${aiDraft.version} · ${aiDraft.ai_model})`}
                   <span style={{ flex: 1 }} />
-                  <button title="별도 창(모니터)으로 AI 리포트 보기" disabled={!aiDraft} onClick={openAiPopup}
+                  <button title={tr("별도 창(모니터)으로 AI 리포트 보기")} disabled={!aiDraft} onClick={openAiPopup}
                           style={{ padding: "1px 7px", fontSize: 11 }}>↗</button>
                   <button className="primary" disabled={!aiDraft || finalized || !canWrite}
-                          title={canWrite ? "AI 초안을 우측 Report로 복사 — 검토 후 의료인이 확정(서명)" : PERM_DENIED_TIP}
+                          title={canWrite ? tr("AI 초안을 우측 Report로 복사 — 검토 후 의료인이 확정(서명)") : tr(PERM_DENIED_TIP)}
                           onClick={() => aiDraft && setDraft(structuredClone(aiDraft.sr_json))}
-                          style={{ padding: "1px 10px", fontSize: 11 }}>적용 ▶</button>
+                          style={{ padding: "1px 10px", fontSize: 11 }}>{tr("적용 ▶")}</button>
                 </div>
                 {!aiDraft ? (
-                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>AI 초안 없음 — 초안 재생성으로 생성</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("AI 초안 없음 — 초안 재생성으로 생성")}</div>
                 ) : (
                   <div style={{ fontSize: 11.5 }}>
                     {aiDraft.sr_json.comparison.summary && (
-                      <div style={{ color: "var(--text-secondary)", marginBottom: 3 }}>[비교] {aiDraft.sr_json.comparison.summary}</div>
+                      <div style={{ color: "var(--text-secondary)", marginBottom: 3 }}>{tr("[비교]")} {aiDraft.sr_json.comparison.summary}</div>
                     )}
                     {aiDraft.sr_json.findings.map((f, i) => (
                       <div key={i}>
@@ -1794,15 +1798,15 @@ ${rows}
                             border: "1px solid var(--border)", borderRadius: 4, padding: 6, overflow: "auto" }}>
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)",
                               display: "flex", gap: 6, alignItems: "center" }}>
-                  REPORT (판독)
+                  {tr("REPORT (판독)")}
                   <span style={{ flex: 1 }} />
-                  <select title="판독 이력 — 과거 버전 보기" value={histId ?? "cur"}
+                  <select title={tr("판독 이력 — 과거 버전 보기")} value={histId ?? "cur"}
                           style={{ fontSize: 10.5 }}
                           onChange={(e) => setHistId(e.target.value === "cur" ? null : Number(e.target.value))}>
-                    <option value="cur">현재 (v{current.version})</option>
+                    <option value="cur">{tr("현재")} (v{current.version})</option>
                     {reports.slice(1).map((r) => (
                       <option key={r.id} value={r.id}>
-                        v{r.version} · {STATUS_LABEL[r.status] ?? r.status} · {r.created_by === "ai" ? "AI" : r.created_by}
+                        v{r.version} · {tr(STATUS_LABEL[r.status] ?? r.status)} · {r.created_by === "ai" ? "AI" : r.created_by}
                       </option>
                     ))}
                   </select>
@@ -1810,16 +1814,16 @@ ${rows}
                 {histReport ? (
                   <div style={{ fontSize: 12, whiteSpace: "pre-wrap", color: "var(--text-secondary)", overflow: "auto" }}>
                     <div style={{ color: "var(--accent)", fontSize: 10.5, marginBottom: 4 }}>
-                      [이력 보기 — v{histReport.version} · {histReport.created_by === "ai" ? `AI(${histReport.ai_model})` : histReport.created_by}
-                      {histReport.finalized_at && ` · 확정 ${histReport.finalized_at.slice(0, 10)}`}] 읽기 전용
+                      [{tr("이력 보기")} — v{histReport.version} · {histReport.created_by === "ai" ? `AI(${histReport.ai_model})` : histReport.created_by}
+                      {histReport.finalized_at && ` · ${tr("확정")} ${histReport.finalized_at.slice(0, 10)}`}] {tr("읽기 전용")}
                     </div>
-                    {histReport.narrative_text || "(내용 없음)"}
+                    {histReport.narrative_text || tr("(내용 없음)")}
                   </div>
                 ) : (<>
                 <SectionTitle>READING</SectionTitle>
                 <div style={{ fontSize: 12 }}>
                   {draft.comparison?.summary && (
-                    <div style={{ color: "var(--text-secondary)", marginBottom: 3 }}>[비교] {draft.comparison?.summary}</div>
+                    <div style={{ color: "var(--text-secondary)", marginBottom: 3 }}>{tr("[비교]")} {draft.comparison?.summary}</div>
                   )}
                   {(draft.findings ?? []).map((f, i) => (
                     <div key={i}>
@@ -1831,7 +1835,7 @@ ${rows}
                 <SectionTitle>CONCLUSION</SectionTitle>
                 {(draft.impression ?? []).map((imp, i) => (
                   <textarea key={i} value={imp.statement} disabled={finalized} readOnly={!canWrite}
-                            title={canWrite ? undefined : PERM_DENIED_TIP}
+                            title={canWrite ? undefined : tr(PERM_DENIED_TIP)}
                             onChange={(e) => setDraft((d) => {
                               const n = structuredClone(d!); n.impression[i].statement = e.target.value; return n;
                             })}
@@ -1854,7 +1858,7 @@ ${rows}
                     marginTop: "auto", borderTop: "1px solid var(--border)", paddingTop: 4,
                     fontSize: 11.5, color: "var(--stat-final)",
                   }}>
-                    ✍ 서명: {signature.name}{signature.license_no && ` (면허 제${signature.license_no}호)`} ·
+                    {tr("✍ 서명:")} {signature.name}{signature.license_no && ` (${tr("면허 제")}${signature.license_no}${tr("호")})`} ·
                     {" "}{signature.signed_at?.slice(0, 16).replace("T", " ")}
                   </div>
                 )}
@@ -1863,46 +1867,46 @@ ${rows}
             </div>
             <div style={{ display: "flex", gap: 5, marginTop: "auto", paddingTop: 4 }}>
               {/* 판독 작성·변경(report.write)/판독 출력(report.print) 게이트 — 서버 403 이 최종 방어선 */}
-              <MiniBtn disabled={!canWrite} title={canWrite ? undefined : PERM_DENIED_TIP}
+              <MiniBtn disabled={!canWrite} title={canWrite ? undefined : tr(PERM_DENIED_TIP)}
                        onClick={async () => {
                          try { await api.analyze(detail.id); onChanged(); }
                          catch (e) { alert((e as Error).message); }   // AI 판독 보류(409) 등 안내
-                       }}>초안 재생성</MiniBtn>
-              <MiniBtn disabled={!canPrint} title={canPrint ? undefined : PERM_DENIED_TIP}
+                       }}>{tr("초안 재생성")}</MiniBtn>
+              <MiniBtn disabled={!canPrint} title={canPrint ? undefined : tr(PERM_DENIED_TIP)}
                        onClick={() => downloadReportPdf(current.id)}>PDF</MiniBtn>
               {!finalized && (
                 <MiniBtn onClick={toggleStt} disabled={!canWrite}
-                         title={!canWrite ? PERM_DENIED_TIP
-                              : `음성 판독(STT) — 엔진: ${sttEngine === "whisper_local" ? "Whisper 로컬(오픈소스)"
-                              : sttEngine === "openai_api" ? "OpenAI API" : "브라우저 내장"} (설정>AI 정책)`}
+                         title={!canWrite ? tr(PERM_DENIED_TIP)
+                              : `${tr("음성 판독(STT) — 엔진:")} ${sttEngine === "whisper_local" ? tr("Whisper 로컬(오픈소스)")
+                              : sttEngine === "openai_api" ? "OpenAI API" : tr("브라우저 내장")} ${tr("(설정>AI 정책)")}`}
                          style={stt ? { background: "var(--stat-emergency)", color: "#fff" } : undefined}>
-                  {stt ? "🎤 녹음중" : `🎤 음성${sttEngine !== "browser" ? "·W" : ""}`}
+                  {stt ? tr("🎤 녹음중") : `${tr("🎤 음성")}${sttEngine !== "browser" ? "·W" : ""}`}
                 </MiniBtn>
               )}
               {!finalized && (
-                <MiniBtn disabled={!canWrite} title={canWrite ? "판독 보류(Suspend) — 토글" : PERM_DENIED_TIP}
+                <MiniBtn disabled={!canWrite} title={canWrite ? tr("판독 보류(Suspend) — 토글") : tr(PERM_DENIED_TIP)}
                          onClick={async () => {
                   await api.suspendReport(current.id); onChanged();
-                }}>{current.status === "suspended" ? "보류 해제" : "보류"}</MiniBtn>
+                }}>{current.status === "suspended" ? tr("보류 해제") : tr("보류")}</MiniBtn>
               )}
               {finalized && !(current.diff_metrics as { confirm2?: unknown })?.confirm2 && (
-                <MiniBtn disabled={!canWrite} title={canWrite ? "2차 승인(Conf2) — 1차와 다른 판독의 권장" : PERM_DENIED_TIP}
+                <MiniBtn disabled={!canWrite} title={canWrite ? tr("2차 승인(Conf2) — 1차와 다른 판독의 권장") : tr(PERM_DENIED_TIP)}
                          onClick={async () => {
                   await api.confirm2Report(current.id); onChanged();
                 }}>2nd Approve</MiniBtn>
               )}
               {finalized && (
-                <MiniBtn onClick={async () => { setBusy(true); try { await api.sendSr(current.id); alert("DICOM SR 전송 완료"); } finally { setBusy(false); } }}>
-                  SR 전송
+                <MiniBtn onClick={async () => { setBusy(true); try { await api.sendSr(current.id); alert(tr("DICOM SR 전송 완료")); } finally { setBusy(false); } }}>
+                  {tr("SR 전송")}
                 </MiniBtn>
               )}
               <div style={{ flex: 1 }} />
               <MiniBtn onClick={save} disabled={busy || finalized || !canWrite}
-                       title={canWrite ? undefined : PERM_DENIED_TIP}>Save</MiniBtn>
+                       title={canWrite ? undefined : tr(PERM_DENIED_TIP)}>Save</MiniBtn>
               <button className="primary" style={{ padding: "2px 12px", fontSize: 12 }}
                       onClick={finalize} disabled={busy || finalized || !canWrite}
-                      title={canWrite ? undefined : PERM_DENIED_TIP}>
-                {finalized ? "확정됨" : "확정 (서명)"}
+                      title={canWrite ? undefined : tr(PERM_DENIED_TIP)}>
+                {finalized ? tr("확정됨") : tr("확정 (서명)")}
               </button>
             </div>
           </>
@@ -1930,9 +1934,9 @@ function OrderEditModal({ onSaved, onClose }: {
                     width: 1050, maxWidth: "95vw", maxHeight: "92vh", overflow: "auto",
                     padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <b style={{ fontSize: 13 }}>새 오더 등록 — MWL로 장비에 전달됩니다</b>
+          <b style={{ fontSize: 13 }}>{tr("새 오더 등록 — MWL로 장비에 전달됩니다")}</b>
           <div style={{ flex: 1 }} />
-          <button onClick={onClose} title="닫기" style={{ padding: "1px 8px" }}>✕</button>
+          <button onClick={onClose} title={tr("닫기")} style={{ padding: "1px 8px" }}>✕</button>
         </div>
         <OrderEntryRis
           genPid={genPid}
@@ -1958,7 +1962,7 @@ function OrderEditModal({ onSaved, onClose }: {
               });
             }
             onSaved();  // 목록 즉시 갱신 (모달은 열어둠 — 연속 등록 가능)
-            return `오더 ${exams.length}건 등록`;
+            return `${tr("오더")} ${exams.length}${tr("건 등록")}`;
           }} />
       </div>
     </div>
@@ -1980,30 +1984,30 @@ function OrdersPanel({ refreshKey }: { refreshKey: number }) {
 
   const setSt = async (id: number, status: string) => {
     try { await api.setOrderStatus(id, status); load(); }
-    catch (e) { alert(e instanceof Error ? e.message : "상태 변경 실패"); }
+    catch (e) { alert(e instanceof Error ? e.message : tr("상태 변경 실패")); }
   };
   const exportMwl = async () => {
     try {
       const r = await api.exportMwl();
-      setMsg(`MWL ${r.count}건 내보냄 → 장비 C-FIND 응답`);
-    } catch (e) { setMsg(e instanceof Error ? e.message : "MWL 실패"); }
+      setMsg(`MWL ${r.count}${tr("건 내보냄 → 장비 C-FIND 응답")}`);
+    } catch (e) { setMsg(e instanceof Error ? e.message : tr("MWL 실패")); }
   };
   // 오더 삭제 — confirm 후 DELETE, 실패 사유는 사용자에게 그대로 노출 (삼킴 금지)
   const del = async (o: OrderRow) => {
-    if (!confirm(`오더 삭제 — ${o.patient_name || o.patient_key} / ${o.accession_no || "(Accession 없음)"}\n삭제하면 되돌릴 수 없습니다.`)) return;
+    if (!confirm(`${tr("오더 삭제 —")} ${o.patient_name || o.patient_key} / ${o.accession_no || tr("(Accession 없음)")}\n${tr("삭제하면 되돌릴 수 없습니다.")}`)) return;
     try { await api.deleteOrder(o.id); load(); }
-    catch (e) { alert(e instanceof Error ? e.message : "오더 삭제 실패"); }
+    catch (e) { alert(e instanceof Error ? e.message : tr("오더 삭제 실패")); }
   };
 
   return (
-    <PanelBox title="오더/예약 (RIS·MWL)" right={
+    <PanelBox title={tr("오더/예약 (RIS·MWL)")} right={
       <span style={{ display: "flex", gap: 3 }}>
         <MiniBtn onClick={() => setModalOpen(true)}>New</MiniBtn>
-        <MiniBtn onClick={exportMwl} title="scheduled 오더를 MWL(.wl)로 내보내기 — Orthanc worklists">MWL</MiniBtn>
+        <MiniBtn onClick={exportMwl} title={tr("scheduled 오더를 MWL(.wl)로 내보내기 — Orthanc worklists")}>MWL</MiniBtn>
       </span>
     }>
       <table className="grid-table">
-        <thead><tr><th>환자</th><th>오더명</th><th>MOD</th><th>예약일</th><th>상태</th><th>가져감</th><th></th></tr></thead>
+        <thead><tr><th>{tr("환자")}</th><th>{tr("오더명")}</th><th>MOD</th><th>{tr("예약일")}</th><th>{tr("상태")}</th><th>{tr("가져감")}</th><th></th></tr></thead>
         <tbody>
           {items.map((o) => (
             <tr key={o.id}>
@@ -2011,28 +2015,28 @@ function OrdersPanel({ refreshKey }: { refreshKey: number }) {
               <td title={o.procedure_desc}>{o.procedure_desc}</td>
               <td>{o.modality}</td>
               <td>{o.scheduled_date}</td>
-              <td>{ORDER_STATUS[o.status] ?? o.status}</td>
+              <td>{tr(ORDER_STATUS[o.status] ?? o.status)}</td>
               {/* 장비가 MWL C-FIND 로 가져간 관찰 기록 — AET 표시, 시각은 title 툴팁 */}
               <td>{o.taken_aet
-                ? <span title={o.taken_at ? `가져간 시각: ${o.taken_at.slice(0, 19).replace("T", " ")}` : undefined}>🏷 {o.taken_aet}</span>
+                ? <span title={o.taken_at ? `${tr("가져간 시각:")} ${o.taken_at.slice(0, 19).replace("T", " ")}` : undefined}>🏷 {o.taken_aet}</span>
                 : "—"}</td>
               <td style={{ whiteSpace: "nowrap" }}>
                 {o.status === "scheduled" && (
-                  <MiniBtn title="검사 시작 (MPPS IN PROGRESS)" onClick={() => setSt(o.id, "in_progress")}>시작</MiniBtn>
+                  <MiniBtn title={tr("검사 시작 (MPPS IN PROGRESS)")} onClick={() => setSt(o.id, "in_progress")}>{tr("시작")}</MiniBtn>
                 )}
                 {o.status === "in_progress" && (
-                  <MiniBtn title="검사 완료 (MPPS COMPLETED)" onClick={() => setSt(o.id, "completed")}>완료</MiniBtn>
+                  <MiniBtn title={tr("검사 완료 (MPPS COMPLETED)")} onClick={() => setSt(o.id, "completed")}>{tr("완료")}</MiniBtn>
                 )}
                 {(o.status === "scheduled" || o.status === "in_progress") && (
-                  <MiniBtn title="취소 (MPPS DISCONTINUED)" onClick={() => setSt(o.id, "cancelled")}>✕</MiniBtn>
+                  <MiniBtn title={tr("취소 (MPPS DISCONTINUED)")} onClick={() => setSt(o.id, "cancelled")}>✕</MiniBtn>
                 )}
-                <MiniBtn title="오더 삭제 (DB에서 제거 — 되돌릴 수 없음)" onClick={() => del(o)}
+                <MiniBtn title={tr("오더 삭제 (DB에서 제거 — 되돌릴 수 없음)")} onClick={() => del(o)}
                          style={{ color: "var(--stat-emergency)" }}>✕</MiniBtn>
               </td>
             </tr>
           ))}
           {items.length === 0 && (
-            <tr><td colSpan={7} style={{ color: "var(--text-secondary)" }}>오더 없음 — New로 등록, MWL로 장비 전달</td></tr>
+            <tr><td colSpan={7} style={{ color: "var(--text-secondary)" }}>{tr("오더 없음 — New로 등록, MWL로 장비 전달")}</td></tr>
           )}
         </tbody>
       </table>
@@ -2078,11 +2082,11 @@ function InfiReport({ detail }: { detail: StudyDetail | null }) {
       <div style={{ padding: "8px 12px", fontSize: 12, lineHeight: 1.7, overflow: "auto", fontFamily: "monospace" }}>
         <L k="Accession No" v={detail.accession_no} />
         <L k="Patient Name / ID" v={`${detail.patient_name} / ${detail.patient_key}`} />
-        <L k="Exam Date" v={`${detail.study_date} ${detail.study_time ?? ""} [ ${STATUS_LABEL[detail.status] ?? detail.status} ]`} />
+        <L k="Exam Date" v={`${detail.study_date} ${detail.study_time ?? ""} [ ${tr(STATUS_LABEL[detail.status] ?? detail.status)} ]`} />
         <L k="Study Comment" v={detail.clinical_info} />
         <L k="Sex / Age" v={`${detail.sex} / ${age}`} />
         <div style={{ height: 8 }} />
-        <L k="Creator" v={rep?.created_by === "ai" ? "AI (초안)" : rep?.created_by} />
+        <L k="Creator" v={rep?.created_by === "ai" ? tr("AI (초안)") : rep?.created_by} />
         <L k="Dictator" v={rep?.created_by === "ai" ? "AI(claude-opus-4-8)" : rep?.created_by} />
         <L k="Transcriber" v={rep?.reviewed_by} />
         <L k="Approver" v={sig?.signature?.name} />
@@ -2129,14 +2133,14 @@ function ThumbnailPanel({ detail, onOpen }: { detail: StudyDetail | null; onOpen
   const sel = tree.find((s) => s.series_uid === selSeries) ?? null;
 
   return (
-    <PanelBox title="Thumbnail (더블클릭=뷰어)" right={
+    <PanelBox title={tr("Thumbnail (더블클릭=뷰어)")} right={
       <span style={{ display: "flex", gap: 3 }}>
         <GridPicker label="Srs" value={sLay} onPick={(v) => { setSLay(v); persist(v, iLay); }} />
         <GridPicker label="Img" value={iLay} onPick={(v) => { setILay(v); persist(sLay, v); }} />
       </span>
     }>
-      {!detail ? <Empty>검사를 선택하세요</Empty> : tree.length === 0 ? (
-        <Empty>영상 없음 (Orthanc 미연결?)</Empty>
+      {!detail ? <Empty>{tr("검사를 선택하세요")}</Empty> : tree.length === 0 ? (
+        <Empty>{tr("영상 없음 (Orthanc 미연결?)")}</Empty>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 5, height: "100%", minHeight: 0 }}
              onDoubleClick={onOpen}>
@@ -2162,7 +2166,7 @@ function ThumbnailPanel({ detail, onOpen }: { detail: StudyDetail | null; onOpen
           </div>
           {tree.length > sLay.r * sLay.c && (
             <div style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-              +{tree.length - sLay.r * sLay.c} 시리즈 — Srs 레이아웃 확장
+              +{tree.length - sLay.r * sLay.c} {tr("시리즈 — Srs 레이아웃 확장")}
             </div>
           )}
           {/* Image Layout — 선택 시리즈의 이미지 N×M 그리드 */}
@@ -2192,23 +2196,23 @@ function CommentMemoPanel({ detail, onChanged }: { detail: StudyDetail | null; o
       detail && (
         <MiniBtn onClick={async () => {
           await api.setMemo(detail.id, memo);
-          setSaved("저장됨");
+          setSaved(tr("저장됨"));
           onChanged();
           setTimeout(() => setSaved(""), 2000);
-        }}>저장</MiniBtn>
+        }}>{tr("저장")}</MiniBtn>
       )
     }>
-      {!detail ? <Empty>검사를 선택하세요</Empty> : (
+      {!detail ? <Empty>{tr("검사를 선택하세요")}</Empty> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 6, height: "100%" }}>
-          <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}>COMMENT (임상정보)</div>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}>{tr("COMMENT (임상정보)")}</div>
           <div style={{ fontSize: 12, color: "var(--text-primary)", maxHeight: 56, overflow: "auto" }}>
-            {detail.clinical_info || <span style={{ color: "var(--text-secondary)" }}>(없음)</span>}
+            {detail.clinical_info || <span style={{ color: "var(--text-secondary)" }}>{tr("(없음)")}</span>}
           </div>
           <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)", display: "flex", gap: 6 }}>
             MEMO {saved && <span style={{ color: "var(--stat-final)" }}>{saved}</span>}
           </div>
           <textarea value={memo} onChange={(e) => setMemo(e.target.value)}
-                    placeholder="검사 메모 — 워크리스트 메모 컬럼에 표시됩니다"
+                    placeholder={tr("검사 메모 — 워크리스트 메모 컬럼에 표시됩니다")}
                     style={{ flex: 1, minHeight: 40, background: "var(--bg-canvas)", color: "var(--text-primary)",
                              border: "1px solid var(--border)", borderRadius: 3, padding: 5,
                              fontFamily: "inherit", fontSize: 12, resize: "none" }} />
@@ -2234,7 +2238,7 @@ function ContextMenu({ x, y, row, onAction, onClose, ohifOn = false, allowed }: 
     const ok = allowed ? allowed(a) : true;   // 권한 없음 → 회색 비활성 + 안내 툴팁 (UX 목적)
     return (
       <div onClick={ok ? () => { onAction(a); onClose(); } : (e) => e.stopPropagation()}
-           title={ok ? undefined : PERM_DENIED_TIP}
+           title={ok ? undefined : tr(PERM_DENIED_TIP)}
            style={{ padding: "5px 14px", cursor: ok ? "pointer" : "not-allowed", fontSize: 12.5,
                     opacity: ok ? 1 : 0.45,
                     color: !ok ? "var(--text-secondary)" : danger ? "var(--stat-emergency)" : undefined }}
@@ -2251,27 +2255,27 @@ function ContextMenu({ x, y, row, onAction, onClose, ohifOn = false, allowed }: 
       background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 5,
       boxShadow: "0 6px 20px rgba(0,0,0,0.5)", padding: "4px 0",
     }}>
-      <Item a="viewdraft" label="View&Draft (자체 뷰어)" />
-      <Item a="ub_add" label="Add View — 기존 유지+추가" />
-      <Item a="ub_stack" label="Stack View — 기존 유지+중첩" />
+      <Item a="viewdraft" label={tr("View&Draft (자체 뷰어)")} />
+      <Item a="ub_add" label={tr("Add View — 기존 유지+추가")} />
+      <Item a="ub_stack" label={tr("Stack View — 기존 유지+중첩")} />
       {ohifOn && <Item a="ub_adv" label="Advance View (OHIF)" />}
-      <Item a="ub_key" label="Key Image View — 키 이미지만" />
-      <Item a="3d" label="3D 뷰어 (MPR/MIP)" />
-      <Item a="compare" label="비교세트에 추가" />
+      <Item a="ub_key" label={tr("Key Image View — 키 이미지만")} />
+      <Item a="3d" label={tr("3D 뷰어 (MPR/MIP)")} />
+      <Item a="compare" label={tr("비교세트에 추가")} />
       <Sep />
-      <Item a="pdf" label="PDF 내보내기" />
-      <Item a="copyreport" label="과거 판독 복사 (Copy Report)" />
-      <Item a="regen" label="AI 초안 재생성" />
+      <Item a="pdf" label={tr("PDF 내보내기")} />
+      <Item a="copyreport" label={tr("과거 판독 복사 (Copy Report)")} />
+      <Item a="regen" label={tr("AI 초안 재생성")} />
       <Sep />
-      <Item a="bookmark" label={row.bookmark ? "★ 북마크 해제" : "☆ 북마크"} />
-      <Item a="emergency" label={row.emergency ? "Emergency 해제" : "⚠ Emergency 지정"} danger={!row.emergency} />
+      <Item a="bookmark" label={row.bookmark ? tr("★ 북마크 해제") : tr("☆ 북마크")} />
+      <Item a="emergency" label={row.emergency ? tr("Emergency 해제") : tr("⚠ Emergency 지정")} danger={!row.emergency} />
       <Sep />
       {/* 검사 관리(admin-action) — 등급별 유효 권한으로 게이트, 서버도 403 강제 */}
-      <Item a="adm_match" label="오더 매칭 (Match)" />
-      <Item a="adm_unmatch" label="오더 언매칭 (Unmatch)" />
-      <Item a="adm_move" label="검사 이동 — 병원 재귀속" />
-      <Item a="adm_copy" label="검사 복제 (Copy)" />
-      <Item a="adm_delete" label="검사 삭제" danger />
+      <Item a="adm_match" label={tr("오더 매칭 (Match)")} />
+      <Item a="adm_unmatch" label={tr("오더 언매칭 (Unmatch)")} />
+      <Item a="adm_move" label={tr("검사 이동 — 병원 재귀속")} />
+      <Item a="adm_copy" label={tr("검사 복제 (Copy)")} />
+      <Item a="adm_delete" label={tr("검사 삭제")} danger />
     </div>
   );
 }
@@ -2299,14 +2303,14 @@ function DraggablePanel({ zone, k, onDrop, onHide, style, children }: {
       <div style={{ width: 12, flexShrink: 0, display: "flex", flexDirection: "column",
                     background: "var(--bg-elevated)", borderRadius: "4px 0 0 4px",
                     border: "1px solid var(--border)", borderRight: "none" }}>
-        <div draggable title="패널 이동 — 드래그해서 자리 교환"
+        <div draggable title={tr("패널 이동 — 드래그해서 자리 교환")}
              onDragStart={(e) => e.dataTransfer.setData(`text/sv-panel-${zone}`, k)}
              style={{ flex: 1, cursor: "grab", display: "flex", alignItems: "center",
                       justifyContent: "center", color: "var(--text-secondary)", fontSize: 9 }}>
           ⋮
         </div>
         {onHide && (
-          <div title="이 패널 숨기기 (Setting>워크리스트에서 다시 표시)" onClick={onHide}
+          <div title={tr("이 패널 숨기기 (Setting>워크리스트에서 다시 표시)")} onClick={onHide}
                style={{ flexShrink: 0, cursor: "pointer", textAlign: "center", fontSize: 9, lineHeight: "14px",
                         color: "var(--text-secondary)", borderTop: "1px solid var(--border)" }}>
             ✕
@@ -2368,22 +2372,22 @@ function BatchReviewModal({ onClose, onDone }: { onClose: () => void; onDone: ()
   });
   const confirm = async () => {
     // 03b 가드레일: 대량 확정 = 파괴적 액션 — 대상·건수 명시 후 사용자 확인 강제
-    if (!window.confirm(`AI 초안 ${checked.size}건을 일괄 확정(서명)합니다.\n확정 후에는 수정할 수 없습니다. 진행할까요?`)) return;
+    if (!window.confirm(`${tr("AI 초안")} ${checked.size}${tr("건을 일괄 확정(서명)합니다.")}\n${tr("확정 후에는 수정할 수 없습니다. 진행할까요?")}`)) return;
     setBusy(true);
-    try { const r = await api.batchFinalize([...checked]); setResult(`${r.finalized}/${r.total}건 확정`); onDone(); }
+    try { const r = await api.batchFinalize([...checked]); setResult(`${r.finalized}/${r.total}${tr("건 확정")}`); onDone(); }
     finally { setBusy(false); }
   };
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "grid", placeItems: "center", zIndex: 100 }}>
       <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8, width: 760, maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
         <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center" }}>
-          <b>AI 초안 일괄 검토 (F-22)</b>
-          <span style={{ color: "var(--text-secondary)", fontSize: 12, marginLeft: 8 }}>critical 초안은 자동 제외 — 개별 검토 필요</span>
-          <button style={{ marginLeft: "auto" }} onClick={onClose}>닫기</button>
+          <b>{tr("AI 초안 일괄 검토 (F-22)")}</b>
+          <span style={{ color: "var(--text-secondary)", fontSize: 12, marginLeft: 8 }}>{tr("critical 초안은 자동 제외 — 개별 검토 필요")}</span>
+          <button style={{ marginLeft: "auto" }} onClick={onClose}>{tr("닫기")}</button>
         </div>
         <div style={{ overflow: "auto", flex: 1 }}>
           <table className="grid-table">
-            <thead><tr><th></th><th>환자</th><th>검사일</th><th>MOD</th><th>검사명</th><th>AI 임프레션</th><th>신뢰도</th></tr></thead>
+            <thead><tr><th></th><th>{tr("환자")}</th><th>{tr("검사일")}</th><th>MOD</th><th>{tr("검사명")}</th><th>{tr("AI 임프레션")}</th><th>{tr("신뢰도")}</th></tr></thead>
             <tbody>
               {items.map((c) => (
                 <tr key={c.report_id} onClick={() => toggle(c.report_id)}>
@@ -2396,7 +2400,7 @@ function BatchReviewModal({ onClose, onDone }: { onClose: () => void; onDone: ()
                 </tr>
               ))}
               {items.length === 0 && (
-                <tr><td colSpan={7} style={{ textAlign: "center", color: "var(--text-secondary)", padding: 20 }}>대상 초안 없음</td></tr>
+                <tr><td colSpan={7} style={{ textAlign: "center", color: "var(--text-secondary)", padding: 20 }}>{tr("대상 초안 없음")}</td></tr>
               )}
             </tbody>
           </table>
@@ -2405,7 +2409,7 @@ function BatchReviewModal({ onClose, onDone }: { onClose: () => void; onDone: ()
           {result && <span style={{ color: "var(--stat-final)" }}>{result}</span>}
           <div style={{ flex: 1 }} />
           <button className="primary" disabled={busy || checked.size === 0} onClick={confirm}>
-            선택 {checked.size}건 일괄 확정
+            {tr("선택")} {checked.size}{tr("건 일괄 확정")}
           </button>
         </div>
       </div>
@@ -2443,19 +2447,19 @@ function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, page
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px",
                   background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
-      <b style={{ fontSize: 14, marginRight: 6 }}>워크리스트</b>
+      <b style={{ fontSize: 14, marginRight: 6 }}>{tr("워크리스트")}</b>
       {chips.map((ch) => (
-        <button key={ch.label} onClick={ch.onClick} title={`${ch.label} 상태로 필터`}
+        <button key={ch.label} onClick={ch.onClick} title={`${tr(ch.label)} ${tr("상태로 필터")}`}
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px", borderRadius: 16,
                          background: "var(--bg-elevated)", border: "1px solid var(--border)", cursor: "pointer", fontSize: 12 }}>
-          <span style={{ color: ch.color, fontWeight: 700 }}>{ch.label}</span>
+          <span style={{ color: ch.color, fontWeight: 700 }}>{tr(ch.label)}</span>
           <span style={{ fontWeight: 700 }}>{(ch.n ?? ch.fb).toLocaleString()}</span>
         </button>
       ))}
       {!c && (
-        <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--text-secondary)" }}>현재 페이지 집계 (서버 집계 대기…)</span>
+        <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--text-secondary)" }}>{tr("현재 페이지 집계 (서버 집계 대기…)")}</span>
       )}
-      <button title="새로고침" onClick={onRefresh} style={{ padding: "3px 10px", marginLeft: c ? "auto" : 8 }}>⟳</button>
+      <button title={tr("새로고침")} onClick={onRefresh} style={{ padding: "3px 10px", marginLeft: c ? "auto" : 8 }}>⟳</button>
     </div>
   );
 }
@@ -2492,9 +2496,9 @@ function SvPerfCard({ mods }: { mods: Record<string, number> }) {
   const max = Math.max(1, ...entries.map(([, n]) => n));
   return (
     <div style={{ padding: "10px 14px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
-      <b style={{ fontSize: 13 }}>Performance — 모달리티 분포 (현재 검색 범위)</b>
+      <b style={{ fontSize: 13 }}>{tr("Performance — 모달리티 분포 (현재 검색 범위)")}</b>
       <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 8, maxWidth: 560 }}>
-        {entries.length === 0 && <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>데이터 없음</span>}
+        {entries.length === 0 && <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{tr("데이터 없음")}</span>}
         {entries.map(([m, nn]) => (
           <div key={m} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
             <span style={{ width: 44, color: "var(--text-secondary)" }}>{m || "-"}</span>
@@ -2510,6 +2514,7 @@ function SvPerfCard({ mods }: { mods: Record<string, number> }) {
 }
 
 export function Worklist() {
+  useLang();   // 언어 변경 시 재렌더 (tr 사용 — export 컴포넌트)
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [searchText, setSearchText] = useState("");
   // ── 확정된 질의(committed query) ────────────────────────────────────────────────
@@ -2636,7 +2641,7 @@ export function Worklist() {
     setSelected(null);
     api.localInit()
       .then((r) => { setLocalRoot(r.root); setLocalErr(""); })
-      .catch((e) => { setLocalRoot(""); setLocalErr(e instanceof Error ? e.message : "준비 중"); });
+      .catch((e) => { setLocalRoot(""); setLocalErr(e instanceof Error ? e.message : tr("준비 중")); });
   }, [localMode]);
   // UBPACS-Z Study Open 5종 + Study With Open — 뷰어는 새 창(별도 웹페이지)으로 연다
   const lastViewerRef = useRef<StudyDetail | null>(null);  // "기존 영상" = 마지막으로 연 검사
@@ -2915,13 +2920,13 @@ export function Worklist() {
     window.addEventListener("sv-settings-saved", onSettingsSaved);
     // 07 A.2 SearchShortcut 저장/적용
     const onSave = () => {
-      const label = prompt("바로가기 이름 (예: 오늘 CT 미판독)");
+      const label = prompt(tr("바로가기 이름 (예: 오늘 CT 미판독)"));
       if (!label) return;
       const list = JSON.parse(localStorage.getItem("sv_shortcuts") ?? "[]")
         .filter((s: { label: string }) => s.label !== label);
       list.push({ label, filters: filtersRef.current, searchText: searchRef.current });
       localStorage.setItem("sv_shortcuts", JSON.stringify(list));
-      alert(`'${label}' 저장됨`);
+      alert(`'${label}' ${tr("저장됨")}`);
     };
     // 바로가기 적용은 '사용자가 이 조건으로 보겠다'는 명시적 액션 → 입력 상태 + 커밋을 함께
     const onApply = (e: Event) => {
@@ -3002,7 +3007,7 @@ export function Worklist() {
         })
         .catch((e) => {
           // 폴링 1회 실패는 목록을 비우지 않는다(직전 목록 유지 + 배지만) — 깜빡임 방지
-          setLiveErr(e instanceof Error ? e.message : "원격 조회 실패");
+          setLiveErr(e instanceof Error ? e.message : tr("원격 조회 실패"));
         });
       return;
     }
@@ -3406,7 +3411,7 @@ export function Worklist() {
         const w = window.open(urlFor(ovMon), name, feat);
         applyWindowBounds(w, feat);
         if (w) { openedViewerWindows.set(name, w); noteViewerSlot(name, d0.id); w.focus(); }
-        else showToast("팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요", "error");
+        else showToast(tr("팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요"), "error");
         return;
       }
 
@@ -3479,9 +3484,8 @@ export function Worklist() {
         // Chrome 팝업 차단이 첫 창 외 전부를 막는다. 안내가 없으면 "2·3번이 안 뜬다"는 민원이 된다.
         showToast(
           plan.mode === "bootstrap"
-            ? `팝업 차단으로 ${opened}/${plan.targets.length} 모니터에만 열렸습니다 — 주소창의 팝업 아이콘에서 `
-              + `이 사이트를 '항상 허용'으로 설정한 뒤 다시 여세요`
-            : "팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창의 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요",
+            ? `${tr("팝업 차단으로")} ${opened}/${plan.targets.length} ${tr("모니터에만 열렸습니다 — 주소창의 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정한 뒤 다시 여세요")}`
+            : tr("팝업이 차단되어 뷰어 창을 열지 못했습니다 — 주소창의 팝업 아이콘에서 이 사이트를 '항상 허용'으로 설정하세요"),
           "error",
         );
       }
@@ -3492,10 +3496,10 @@ export function Worklist() {
   // 그래야 워크리스트에서 여는 것과 **완전히 같은 경로**(openV2)를 타서 탭 누적·모니터 배치가 일치한다.
   // LOCAL 모드는 서버 상세가 없으므로 막는다(로컬 id 로 서버를 부르면 엉뚱한 검사가 열린다).
   const openPrior = useCallback((id: number) => {
-    if (localMode) { alert("LOCAL 모드에서는 과거검사를 열 수 없습니다"); return; }
+    if (localMode) { alert(tr("LOCAL 모드에서는 과거검사를 열 수 없습니다")); return; }
     void api.study(id)
       .then((d) => openV2({ detail: d }))
-      .catch((e) => alert(`검사를 열 수 없습니다: ${e instanceof Error ? e.message : String(e)}`));
+      .catch((e) => alert(`${tr("검사를 열 수 없습니다:")} ${e instanceof Error ? e.message : String(e)}`));
   }, [openV2, localMode]);
 
   // 선택 + 3창 동기(Viewer·Reading이 같은 환자를 따라감). 포커스만 바뀌는 경로 → 다중선택은 그 행으로 축소(stale 하이라이트/카운트 방지)
@@ -3509,9 +3513,9 @@ export function Worklist() {
 
   const doAction = useCallback(async (a: string, row?: StudyRow) => {
     // LOCAL 모드 — 서버 검사 대상 액션 전면 차단(로컬 id 로 서버 API 오호출 방지). refresh 만 통과
-    if (localMode && a !== "refresh") { alert(LOCAL_DENIED_TIP); return; }
+    if (localMode && a !== "refresh") { alert(tr(LOCAL_DENIED_TIP)); return; }
     // LIVE 모드 — 원격 미지원 기능만 차단(열람·판독·비교는 원격 왕복으로 정상 동작)
-    if (liveMode && !LIVE_OK_ACTIONS.has(a)) { alert(LIVE_DENIED_TIP); return; }
+    if (liveMode && !LIVE_OK_ACTIONS.has(a)) { alert(tr(LIVE_DENIED_TIP)); return; }
     const target = row ?? selected;
     switch (a) {
       // I-View/T-View 의 🔄 새로고침 — SaintView ⟳ / Live 배너와 같은 reloadList 를 쓴다(스킨별 의미 통일)
@@ -3593,7 +3597,7 @@ export function Worklist() {
       }
       case "ub_adv":
         // ④ Advance View: 고급 뷰어(OHIF)로 교체 오픈 — 설정에서 허용 시에만
-        if (!ohifOnRef.current) { alert("OHIF는 설정 > 뷰어 > OHIF에서 활성화할 수 있습니다"); break; }
+        if (!ohifOnRef.current) { alert(tr("OHIF는 설정 > 뷰어 > OHIF에서 활성화할 수 있습니다")); break; }
         if (target) openStudy(target);
         break;
       case "ub_key": {
@@ -3603,14 +3607,20 @@ export function Worklist() {
         selectAndSync(d);
         const inst = await api.instances(target.id);
         if (!inst.key_images.length) {
-          alert("이 검사에 선택된 키 이미지가 없습니다.\nREPORT 패널의 KEY IMG에서 먼저 선택·저장하세요.");
+          alert(tr("이 검사에 선택된 키 이미지가 없습니다.\nREPORT 패널의 KEY IMG에서 먼저 선택·저장하세요."));
           break;
         }
         openV2({ detail: d, keySops: inst.key_images.map((k) => k.sop_uid) });
         break;
       }
       case "viewer": if (target) openStudy(target); break;
-      case "3d": if (target) setViewer3dUid(target.study_uid); break;
+      case "3d":
+        if (target) {
+          // Live 검사 — 3D 가 UID→vid 역참조로 시리즈 트리를 찾도록 등록(뷰어를 안 거친 직행 경로)
+          if (isLiveId(target.id)) registerLiveStudyVid(target.study_uid, target.id);
+          setViewer3dUid(target.study_uid);
+        }
+        break;
       case "compare":
         if (target) setCompareSet((prev) =>
           prev.some((c) => c.study_uid === target.study_uid) ? prev
@@ -3652,7 +3662,7 @@ export function Worklist() {
               `[과거판독 복사 ${rel.study_date}]\n${copied}`;
             await api.updateReport(cur.id, sr);
             onChanged();
-            alert(`과거 확정 판독(${rel.study_date})을 Conclusion에 복사했습니다.`);
+            alert(`${tr("과거 확정 판독")}(${rel.study_date})${tr("을 Conclusion에 복사했습니다.")}`);
           }
           break;
         }
@@ -3670,26 +3680,26 @@ export function Worklist() {
         if (!target) break;
         // 파괴 작업 2단계 확인(병원별 관리 탭과 동일 기준)
         if (!window.confirm(
-          `[1/2] 검사 삭제 — ${target.patient_name} · ${target.modality} · ${target.study_date}\n` +
-          `영상·판독이 함께 삭제되며 되돌릴 수 없습니다. 진행할까요?`)) break;
-        if (!window.confirm("[2/2] 최종 확인 — 영구 삭제됩니다. 정말 삭제할까요?")) break;
+          `${tr("[1/2] 검사 삭제 —")} ${target.patient_name} · ${target.modality} · ${target.study_date}\n` +
+          tr("영상·판독이 함께 삭제되며 되돌릴 수 없습니다. 진행할까요?"))) break;
+        if (!window.confirm(tr("[2/2] 최종 확인 — 영구 삭제됩니다. 정말 삭제할까요?"))) break;
         try {
           await api.studyAdminAction(target.id, { action: "delete" });
           if (selected?.id === target.id) setSelected(null);
           setRefreshKey((k) => k + 1);
-        } catch (e) { alert(e instanceof Error ? e.message : "삭제 실패"); }
+        } catch (e) { alert(e instanceof Error ? e.message : tr("삭제 실패")); }
         break;
       case "adm_move": case "adm_copy": {
         if (!target) break;
         const isMove = a === "adm_move";
         const verb = isMove ? "이동(재귀속)" : "복제";
         const raw = prompt(isMove
-          ? "검사를 이동(재귀속)할 대상 병원 ID(숫자)를 입력하세요"
-          : "복제 대상 병원 ID(숫자) — 비우면 같은 병원에 사본을 만듭니다");
+          ? tr("검사를 이동(재귀속)할 대상 병원 ID(숫자)를 입력하세요")
+          : tr("복제 대상 병원 ID(숫자) — 비우면 같은 병원에 사본을 만듭니다"));
         if (raw === null) break;              // 취소
         const hid = raw.trim();
         if (isMove && !hid) break;            // 이동은 대상 필수
-        if (hid && !/^\d+$/.test(hid)) { alert("병원 ID는 숫자여야 합니다"); break; }
+        if (hid && !/^\d+$/.test(hid)) { alert(tr("병원 ID는 숫자여야 합니다")); break; }
         try {
           await api.studyAdminAction(target.id, {
             action: isMove ? "move" : "copy",
@@ -3698,28 +3708,28 @@ export function Worklist() {
           // 이동 시 검사가 현재 병원 스코프에서 빠질 수 있어 선택 해제 후 목록 갱신
           if (a === "adm_move" && selected?.id === target.id) setSelected(null);
           setRefreshKey((k) => k + 1);
-          alert(`검사 ${verb} 완료`);
-        } catch (e) { alert(e instanceof Error ? e.message : `${verb} 실패`); }
+          alert(`${tr("검사")} ${tr(verb)} ${tr("완료")}`);
+        } catch (e) { alert(e instanceof Error ? e.message : `${tr(verb)} ${tr("실패")}`); }
         break;
       }
       case "adm_match": {
         if (!target) break;
-        const oid = prompt("매칭할 오더 ID를 입력하세요 (오더/예약 패널의 오더)")?.trim();
+        const oid = prompt(tr("매칭할 오더 ID를 입력하세요 (오더/예약 패널의 오더)"))?.trim();
         if (!oid) break;
         try {
           await api.studyAdminAction(target.id, { action: "match", order_id: oid });
           onChanged();
-          alert("오더 매칭 완료");
-        } catch (e) { alert(e instanceof Error ? e.message : "매칭 실패"); }
+          alert(tr("오더 매칭 완료"));
+        } catch (e) { alert(e instanceof Error ? e.message : tr("매칭 실패")); }
         break;
       }
       case "adm_unmatch":
         if (!target) break;
-        if (!window.confirm("이 검사의 오더 매칭을 해제(언매칭)할까요?")) break;
+        if (!window.confirm(tr("이 검사의 오더 매칭을 해제(언매칭)할까요?"))) break;
         try {
           await api.studyAdminAction(target.id, { action: "unmatch" });
           onChanged();
-        } catch (e) { alert(e instanceof Error ? e.message : "언매칭 실패"); }
+        } catch (e) { alert(e instanceof Error ? e.message : tr("언매칭 실패")); }
         break;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3743,15 +3753,15 @@ export function Worklist() {
   const doMerge = useCallback(async () => {
     if (!selected || compareSet.length === 0) return;
     if (!window.confirm(
-      `현재 검사 + 비교세트 ${compareSet.length}건을 하나의 판독으로 병합(묶음판독)합니다.\n` +
-      `부속 검사 소견은 [MOD 검사일] 태그로 합쳐집니다. 진행할까요?`)) return;
+      `${tr("현재 검사 + 비교세트")} ${compareSet.length}${tr("건을 하나의 판독으로 병합(묶음판독)합니다.")}\n` +
+      tr("부속 검사 소견은 [MOD 검사일] 태그로 합쳐집니다. 진행할까요?"))) return;
     try {
       await api.mergeReports([selected.id, ...compareSet.map((c) => c.id)]);
       setCompareSet([]);
       onChanged();
-      alert("묶음판독 초안이 생성되었습니다 — REPORT 패널에서 검토하세요.");
+      alert(tr("묶음판독 초안이 생성되었습니다 — REPORT 패널에서 검토하세요."));
     } catch (e) {
-      alert(e instanceof Error ? e.message : "묶음판독 실패");
+      alert(e instanceof Error ? e.message : tr("묶음판독 실패"));
     }
   }, [selected, compareSet, onChanged]);
 
@@ -3759,7 +3769,7 @@ export function Worklist() {
   const onNlSearch = useCallback(async (text: string) => {
     setNlBusy(true);
     try { setNlPreview(await api.nlQuery(text)); }
-    catch (e) { alert(e instanceof Error ? e.message : "자연어 검색 실패"); }
+    catch (e) { alert(e instanceof Error ? e.message : tr("자연어 검색 실패")); }
     finally { setNlBusy(false); }
   }, []);
 
@@ -3791,8 +3801,8 @@ export function Worklist() {
   // 새 페이지 등록 (최대 10) — 새 탭은 빈 검색으로 시작해 독립적으로 조건을 설정한다.
   // (검색 폴더에서 만들면 그 폴더 조건으로 시작)
   const addTab = useCallback(async (treeFilter?: { label: string; filter: WorklistTab["filter"] }) => {
-    if (tabs.length >= 10) { alert("워크리스트 페이지는 최대 10개입니다 (UBPACS-Z 규격)"); return; }
-    const label = prompt("새 페이지 이름 — 새 검색으로 시작합니다 (예: CR, 응급실)",
+    if (tabs.length >= 10) { alert(tr("워크리스트 페이지는 최대 10개입니다 (UBPACS-Z 규격)")); return; }
+    const label = prompt(tr("새 페이지 이름 — 새 검색으로 시작합니다 (예: CR, 응급실)"),
                          treeFilter?.label ?? `WORKLIST ${tabs.length + 1}`);
     if (!label) return;
     // 현재 탭 상태 보존 후 새 탭으로
@@ -3806,13 +3816,13 @@ export function Worklist() {
     setSelNodeId(null);
     setDatePreset(tab.filter.date ?? "all");
     applyAndSearch({ filters: folderToFilters(tab.filter), searchText: "" });
-    try { await saveTabs(next); } catch (e) { alert(e instanceof Error ? e.message : "페이지 저장 실패"); }
+    try { await saveTabs(next); } catch (e) { alert(e instanceof Error ? e.message : tr("페이지 저장 실패")); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs, datePreset, activeTabId, selNodeId, applyAndSearch]);
 
   const removeTab = useCallback(async (id: string) => {
     const t = tabs.find((x) => x.id === id);
-    if (!t || !window.confirm(`'${t.label}' 페이지를 삭제할까요?`)) return;
+    if (!t || !window.confirm(`'${t.label}' ${tr("페이지를 삭제할까요?")}`)) return;
     const next = tabs.filter((x) => x.id !== id);
     const fixed = next.length ? next : [DEFAULT_TAB];
     setTabs(fixed);
@@ -3831,7 +3841,7 @@ export function Worklist() {
 
   const onTreeChange = useCallback((next: TreeNode[]) => {
     setTreeNodes(next);
-    saveTree(next).catch((e) => alert(e instanceof Error ? e.message : "검색 폴더 저장 실패"));
+    saveTree(next).catch((e) => alert(e instanceof Error ? e.message : tr("검색 폴더 저장 실패")));
   }, []);
 
   // 패널 자리 교환 + 서버 저장(로밍)
@@ -3954,13 +3964,13 @@ export function Worklist() {
   // In 모드 ① 상단 아이콘 툴바 (INFINITT 원본 13종) — 기존 doAction + 특수 동작 매핑
   const infiTool = (act: string) => {
     // LOCAL 모드 — Import/Export/Print/Refresh/Logout 만 허용, 나머지 서버 액션 차단
-    if (localMode && !LOCAL_OK_ACTIONS.has(act) && act !== "refresh") { alert(LOCAL_DENIED_TIP); return; }
+    if (localMode && !LOCAL_OK_ACTIONS.has(act) && act !== "refresh") { alert(tr(LOCAL_DENIED_TIP)); return; }
     // LIVE 모드 — 원격 미지원 기능 차단(열람·판독·Reading 은 허용)
-    if (liveMode && !LIVE_OK_ACTIONS.has(act) && act !== "refresh") { alert(LIVE_DENIED_TIP); return; }
+    if (liveMode && !LIVE_OK_ACTIONS.has(act) && act !== "refresh") { alert(tr(LIVE_DENIED_TIP)); return; }
     switch (act) {
       case "import": setImportOpen(true); break;  // Import DICOM — USB/CD .dcm 등록
       case "reading": {   // Report 창 — 판독 작성 (모니터 설정 반영, 선택 연동은 sync)
-        if (!selected) { alert("검사를 먼저 선택하세요"); break; }
+        if (!selected) { alert(tr("검사를 먼저 선택하세요")); break; }
         void (async () => {
           const r = await api.getSetting("viewer.prefs").catch(() => ({ value: {} }));
           const mon = (r.value as { monitor?: { report?: number | null } }).monitor?.report;
@@ -3978,7 +3988,7 @@ export function Worklist() {
         const chosen = selectedIds.size
           ? items.filter((r) => selectedIds.has(r.id))
           : selected ? [selected] : [];
-        if (!chosen.length) { alert("내보낼 검사를 선택하세요 (Shift·Ctrl 로 여러 건 선택)"); break; }
+        if (!chosen.length) { alert(tr("내보낼 검사를 선택하세요 (Shift·Ctrl 로 여러 건 선택)")); break; }
         setExportRows(chosen);
         break;
       }
@@ -4055,7 +4065,7 @@ export function Worklist() {
                        extraTab={isAdminRole && (
                          /* 관리자 전용 EXAM CONTROL 탭 — 기존 탭과 동일 스타일 + 보라 포인트 */
                          <div onClick={() => setExamCtl(true)}
-                              title="Exam Control — 관리자 검사 QC (삭제·복구·Unassign·Assign)"
+                              title={tr("Exam Control — 관리자 검사 QC (삭제·복구·Unassign·Assign)")}
                               style={{
                                 display: "flex", alignItems: "center", gap: 6, padding: "4px 11px",
                                 borderRadius: "4px 4px 0 0", cursor: "pointer", fontSize: 11.5, fontWeight: 700,
@@ -4085,11 +4095,11 @@ export function Worklist() {
                              const ok = allowedAction(a) && !localBlocked && !liveBlockedBtn;
                              return (
                                <button key={a} disabled={!ok}
-                                       title={ok ? title : localBlocked ? LOCAL_DENIED_TIP
-                                              : liveBlockedBtn ? LIVE_DENIED_TIP : PERM_DENIED_TIP}
+                                       title={ok ? tr(title) : localBlocked ? tr(LOCAL_DENIED_TIP)
+                                              : liveBlockedBtn ? tr(LIVE_DENIED_TIP) : tr(PERM_DENIED_TIP)}
                                        onClick={() => infiTool(a)}
                                        style={{ padding: "2px 8px", fontSize: 11, whiteSpace: "nowrap" }}>
-                                 {label}
+                                 {tr(label)}
                                </button>
                              );
                            })}
@@ -4098,7 +4108,7 @@ export function Worklist() {
       {/* EXAM CONTROL 본문 (레인 F) — 관리자 검사 QC. 선택 시 워크리스트 본문 전체를 대체.
           source: Local Server 모드(sv_server_mode=local)면 로컬 PACS(/api/local/examctl), 아니면 서버(/api/examctl) */}
       {examCtl ? (
-        <Suspense fallback={<div style={{ padding: 20, color: "var(--text-secondary)" }}>Exam Control 로딩…</div>}>
+        <Suspense fallback={<div style={{ padding: 20, color: "var(--text-secondary)" }}>{tr("Exam Control 로딩…")}</div>}>
           <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 8, display: "flex", flexDirection: "column" }}>
             <ExamControl source={serverMode === "local" ? "local" : "server"} />
           </div>
@@ -4109,13 +4119,13 @@ export function Worklist() {
       {liveMode && (
         <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 10px",
                       background: "rgba(34,197,94,0.10)", borderBottom: "1px solid #22c55e", fontSize: 12 }}>
-          <b style={{ color: "#22c55e" }}>LIVE 모드</b>
+          <b style={{ color: "#22c55e" }}>{tr("LIVE 모드")}</b>
           <span>
-            원격 PACS 직결(복사 없음) — 판독·주석은 원격 DB 에 저장, 5초 실시간 동기
+            {tr("원격 PACS 직결(복사 없음) — 판독·주석은 원격 DB 에 저장, 5초 실시간 동기")}
             {liveErr && <span style={{ color: "var(--stat-emergency)" }}> · ⚠ {liveErr}</span>}
           </span>
           <span style={{ marginLeft: "auto", color: "var(--text-secondary)", fontSize: 11 }}>
-            접속 설정: [WebPACS] 버튼 — 해제: Web Server
+            {tr("접속 설정: [WebPACS] 버튼 — 해제: Web Server")}
           </span>
         </div>
       )}
@@ -4123,11 +4133,11 @@ export function Worklist() {
       {localMode && (
         <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 10px",
                       background: "rgba(245,158,11,0.12)", borderBottom: "1px solid #f59e0b", fontSize: 12 }}>
-          <b style={{ color: "#f59e0b" }}>LOCAL 모드</b>
-          <span>서버 데이터 숨김 · 데이터: <code style={{ fontSize: 11 }}>
-            {localRoot || (localErr ? `⚠ 준비 중 (${localErr})` : "확인 중…")}</code></span>
+          <b style={{ color: "#f59e0b" }}>{tr("LOCAL 모드")}</b>
+          <span>{tr("서버 데이터 숨김 · 데이터:")} <code style={{ fontSize: 11 }}>
+            {localRoot || (localErr ? `${tr("⚠ 준비 중")} (${localErr})` : tr("확인 중…"))}</code></span>
           <span style={{ marginLeft: "auto", color: "var(--text-secondary)", fontSize: 11 }}>
-            Import·새로고침·로컬 뷰어(더블클릭)만 사용 가능 — 해제: Web Server
+            {tr("Import·새로고침·로컬 뷰어(더블클릭)만 사용 가능 — 해제: Web Server")}
           </span>
         </div>
       )}
@@ -4144,8 +4154,8 @@ export function Worklist() {
               const ok = allowedAction(t.a) && !localBlocked && !liveBlockedBtn;
               return (
                 <button key={t.a} disabled={!ok}
-                        title={ok ? t.l : `${t.l} — ${localBlocked ? LOCAL_DENIED_TIP
-                                : liveBlockedBtn ? LIVE_DENIED_TIP : PERM_DENIED_TIP}`}
+                        title={ok ? tr(t.l) : `${tr(t.l)} — ${localBlocked ? tr(LOCAL_DENIED_TIP)
+                                : liveBlockedBtn ? tr(LIVE_DENIED_TIP) : tr(PERM_DENIED_TIP)}`}
                         onClick={() => infiTool(t.a)}
                         style={{ width: 46, height: 40, fontSize: 22, padding: 0, border: "none",
                                  display: "flex", alignItems: "center", justifyContent: "center",
@@ -4190,15 +4200,15 @@ export function Worklist() {
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 12px",
                       background: "rgba(250,204,21,0.14)", borderBottom: "1px solid var(--border)",
                       fontSize: 12 }}>
-          <b>원격 워크리스트에 변경이 있습니다</b>
+          <b>{tr("원격 워크리스트에 변경이 있습니다")}</b>
           <span style={{ color: "var(--text-secondary)" }}>
-            수동 갱신 모드라 목록을 그대로 두었습니다 — 설정 &gt; 환경에서 자동으로 바꿀 수 있습니다.
+            {tr("수동 갱신 모드라 목록을 그대로 두었습니다 — 설정 > 환경에서 자동으로 바꿀 수 있습니다.")}
           </span>
           {/* 원격 변경만 반영한다 — 사용자가 타이핑해 둔 미커밋 필터까지 함께 적용하면
               '새로고침을 눌렀는데 조건이 바뀐다' 가 되어 SEARCH 와 구분이 사라진다. */}
           <button className="primary" style={{ marginLeft: "auto", padding: "2px 12px" }}
-                  onClick={reloadList}>지금 갱신</button>
-          <button style={{ padding: "2px 10px" }} onClick={() => setPendingChange(false)}>닫기</button>
+                  onClick={reloadList}>{tr("지금 갱신")}</button>
+          <button style={{ padding: "2px 10px" }} onClick={() => setPendingChange(false)}>{tr("닫기")}</button>
         </div>
       )}
 
@@ -4206,15 +4216,15 @@ export function Worklist() {
       {selectedIds.size > 1 && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 12px",
                       background: "var(--accent-subtle, rgba(96,165,250,0.12))", borderBottom: "1px solid var(--border)", fontSize: 12 }}>
-          <b>{selectedIds.size}개 Exam 선택됨</b>
-          <button style={{ padding: "2px 10px" }} onClick={() => { setSelectedIds(new Set(items.map((r) => r.id))); selAnchorRef.current = items[0]?.id ?? null; }}>모두 선택</button>
-          <button style={{ padding: "2px 10px" }} onClick={() => { setSelectedIds(new Set(selected ? [selected.id] : [])); selAnchorRef.current = selected?.id ?? null; }}>선택 해제</button>
+          <b>{selectedIds.size}{tr("개 Exam 선택됨")}</b>
+          <button style={{ padding: "2px 10px" }} onClick={() => { setSelectedIds(new Set(items.map((r) => r.id))); selAnchorRef.current = items[0]?.id ?? null; }}>{tr("모두 선택")}</button>
+          <button style={{ padding: "2px 10px" }} onClick={() => { setSelectedIds(new Set(selected ? [selected.id] : [])); selAnchorRef.current = selected?.id ?? null; }}>{tr("선택 해제")}</button>
           <button className="primary" style={{ padding: "2px 10px" }}
                   onClick={() => setExportRows(items.filter((r) => selectedIds.has(r.id)))}>
-            📤 DICOM 내보내기
+            {tr("📤 DICOM 내보내기")}
           </button>
           <span style={{ marginLeft: "auto", color: "var(--text-secondary)", fontSize: 11 }}>
-            Shift+클릭 = 범위 · Ctrl/Cmd+클릭 = 개별 토글
+            {tr("Shift+클릭 = 범위 · Ctrl/Cmd+클릭 = 개별 토글")}
           </span>
         </div>
       )}
@@ -4225,19 +4235,19 @@ export function Worklist() {
           display: "flex", gap: 8, alignItems: "center", padding: "5px 10px",
           background: "var(--bg-panel)", borderBottom: "1px solid var(--ai)", fontSize: 12.5,
         }}>
-          <span className="badge ai">AI 검색</span>
+          <span className="badge ai">{tr("AI 검색")}</span>
           {nlBusy ? (
-            <span style={{ color: "var(--text-secondary)" }}>변환 중…</span>
+            <span style={{ color: "var(--text-secondary)" }}>{tr("변환 중…")}</span>
           ) : nlPreview && (
             <>
-              <span>해석: <b>{nlPreview.explanation}</b></span>
+              <span>{tr("해석:")} <b>{nlPreview.explanation}</b></span>
               {nlPreview.source !== "live" && (
                 <span style={{ color: "var(--text-secondary)", fontSize: 11 }}>
-                  ({nlPreview.source === "mock" ? "규칙 기반" : "AI 실패 — 규칙 기반 폴백"})
+                  ({nlPreview.source === "mock" ? tr("규칙 기반") : tr("AI 실패 — 규칙 기반 폴백")})
                 </span>
               )}
-              <button className="primary" style={{ padding: "1px 12px", fontSize: 12 }} onClick={applyNlPreview}>적용</button>
-              <button style={{ padding: "1px 10px", fontSize: 12 }} onClick={() => setNlPreview(null)}>취소</button>
+              <button className="primary" style={{ padding: "1px 12px", fontSize: 12 }} onClick={applyNlPreview}>{tr("적용")}</button>
+              <button style={{ padding: "1px 10px", fontSize: 12 }} onClick={() => setNlPreview(null)}>{tr("취소")}</button>
             </>
           )}
         </div>
@@ -4274,7 +4284,7 @@ export function Worklist() {
                 </div>
               </>
             ) : (
-              <ReopenBar label={SVINFI_PANEL_LABEL.preview} onExpand={() => setPanelShown("preview", true)} />
+              <ReopenBar label={tr(SVINFI_PANEL_LABEL.preview)} onExpand={() => setPanelShown("preview", true)} />
             )}
           </div>
           {/* 좌|우 세로 스플리터 (railW) */}
@@ -4301,7 +4311,7 @@ export function Worklist() {
                 </div>
               </>
             ) : (
-              <ReopenBar label={SVINFI_PANEL_LABEL.related} onExpand={() => setPanelShown("related", true)} />
+              <ReopenBar label={tr(SVINFI_PANEL_LABEL.related)} onExpand={() => setPanelShown("related", true)} />
             )}
             {panelsOn.report ? (
               <>
@@ -4312,7 +4322,7 @@ export function Worklist() {
                 </div>
               </>
             ) : (
-              <ReopenBar label={SVINFI_PANEL_LABEL.report} onExpand={() => setPanelShown("report", true)} />
+              <ReopenBar label={tr(SVINFI_PANEL_LABEL.report)} onExpand={() => setPanelShown("report", true)} />
             )}
           </div>
         </div>
@@ -4412,7 +4422,7 @@ export function Worklist() {
         {/* 8000 은 본체 포트다 — 스위트는 8010. 실제 나가는 곳을 그대로 표시한다. */}
         <span>[Q][H] Server: {import.meta.env.VITE_API_BASE || window.location.origin}</span>
         <span>{total} results {selected ? "1 selected" : "0 selected"}</span>
-        {emergencyCount > 0 && <span style={{ color: "var(--stat-emergency)" }}>⚠ Emergency {emergencyCount}건</span>}
+        {emergencyCount > 0 && <span style={{ color: "var(--stat-emergency)" }}>⚠ Emergency {emergencyCount}{tr("건")}</span>}
         <span style={{ marginLeft: "auto" }}>{new Date().toLocaleString("ko-KR")}</span>
       </footer>
 
@@ -4458,7 +4468,7 @@ export function Worklist() {
                               selectAndSync(d);
                               localStorage.setItem("sv_infi_exams", "[]");   // View 교체 시맨틱
                               void openV2({ detail: d });
-                            } catch { alert("검사 열기에 실패했습니다 — 워크리스트에서 다시 시도하세요"); }
+                            } catch { alert(tr("검사 열기에 실패했습니다 — 워크리스트에서 다시 시도하세요")); }
                           }}
                           onClose={() => setWebPacsOpen(false)} />
         </Suspense>
@@ -4477,7 +4487,7 @@ export function Worklist() {
       {viewer3dUid && (
         <Suspense fallback={
           <div style={{ position: "fixed", inset: 0, background: "var(--bg-canvas)", zIndex: 200, display: "grid", placeItems: "center", color: "var(--text-secondary)" }}>
-            3D 뷰어 로딩…
+            {tr("3D 뷰어 로딩…")}
           </div>
         }>
           <Viewer3D studyUid={viewer3dUid} onClose={() => setViewer3dUid(null)} />
@@ -4491,7 +4501,7 @@ export function Worklist() {
              onMouseLeave={() => setCtx(null)}>
           <div className="sv-fav-row" style={{ padding: "5px 10px", borderRadius: 4, cursor: "pointer" }}
                onClick={() => { setLocalViewerRow(ctx.row); setCtx(null); }}>
-            🗔 로컬 뷰어 열기
+            {tr("🗔 로컬 뷰어 열기")}
           </div>
           <div className="sv-fav-row" style={{ padding: "5px 10px", borderRadius: 4, cursor: "pointer",
                                                color: "var(--stat-emergency)" }}
@@ -4499,13 +4509,13 @@ export function Worklist() {
                  const r = ctx.row;
                  setCtx(null);
                  if (!window.confirm(
-                   `로컬 검사 삭제 — ${r.patient_name || r.patient_key} · ${r.modality} · ${r.study_date}\n` +
-                   `로컬 Image 파일과 local.db 등록이 함께 삭제됩니다. 진행할까요?`)) return;
+                   `${tr("로컬 검사 삭제 —")} ${r.patient_name || r.patient_key} · ${r.modality} · ${r.study_date}\n` +
+                   tr("로컬 Image 파일과 local.db 등록이 함께 삭제됩니다. 진행할까요?"))) return;
                  api.localDelete(r.id)
                    .then(() => setRefreshKey((k) => k + 1))
-                   .catch((e) => alert(e instanceof Error ? e.message : "삭제 실패 — ⚠ 준비 중"));
+                   .catch((e) => alert(e instanceof Error ? e.message : tr("삭제 실패 — ⚠ 준비 중")));
                }}>
-            🗑 검사 삭제 (로컬)
+            {tr("🗑 검사 삭제 (로컬)")}
           </div>
         </div>
       ) : ctx && (

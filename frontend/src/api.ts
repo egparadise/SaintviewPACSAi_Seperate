@@ -1,5 +1,5 @@
 // API 클라이언트 — 백엔드 FastAPI
-import { registerLiveStudyUid } from "./lib/liveUids";
+import { registerLiveStudyUid, registerLiveStudyVid } from "./lib/liveUids";
 import { opfsWipe } from "./lib/opfsStore";
 import { dlResetCache } from "./lib/dlCache";
 
@@ -484,7 +484,7 @@ export const api = {
     return req<StudyDetail>(
       isLiveId(id) ? `${LIVE}/studies/${id}${skip ? "?related=0" : ""}` : `/api/studies/${id}`,
     ).then((d) => {
-      if (isLiveId(id)) registerLiveStudyUid(d.study_uid);   // rendered 루트 스위칭용
+      if (isLiveId(id)) registerLiveStudyVid(d.study_uid, id);   // rendered 루트 + 3D vid 역참조
       return d;
     });
   },
@@ -609,7 +609,7 @@ export const api = {
                         : `/api/studies/${studyId}/series-tree`)
       .then((tree) => {
         if (isLiveId(studyId)) {
-          registerLiveStudyUid(tree.study_uid);
+          registerLiveStudyVid(tree.study_uid, studyId);
           for (const s of tree.series) {
             for (const i of s.instances) registerLiveStudyUid(i.study_uid);
           }

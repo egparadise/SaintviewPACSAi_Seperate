@@ -314,7 +314,7 @@ function buildCombined(list: { s: SeriesNode; studyUid: string }[]): SeriesNode 
   return {
     series_uid: `combined:${origin.join("+")}`,
     modality: list[0]?.s.modality ?? "",
-    series_desc: `Combined · ${origin.length}개 시리즈 · ${instances.length}장`,
+    series_desc: `Combined · ${origin.length}${tr("개 시리즈")} · ${instances.length}${tr("장")}`,
     series_number: list[0]?.s.series_number ?? 0,
     instances,
   };
@@ -419,14 +419,14 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
                                : { borderBottom: "1px solid var(--border)" }) }}
          onMouseLeave={() => { if (!vertical) setOpenSet(new Set()); }}>
       {/* 위치 그립 — 드래그해서 좌/우/상/하 도킹(설정 툴 팔레트 위치와 동일 저장) */}
-      <div title="드래그로 툴 파레트(메뉴바) 위치 이동 — 화면 가장자리로 끌어 놓으세요"
+      <div title={tr("드래그로 툴 파레트(메뉴바) 위치 이동 — 화면 가장자리로 끌어 놓으세요")}
            onPointerDown={onGripDown}
            style={{ cursor: "grab", fontSize: 10, color: "var(--text-secondary)", userSelect: "none",
                     textAlign: "center", padding: vertical ? "0 0 2px" : "0 4px", flexShrink: 0,
                     ...(vertical ? {} : { display: "inline-block" }) }}>⠿</div>
       {/* Tools 감추기 — SaintView 에는 이 버튼이 없어서 메뉴바를 접을 방법이 아예 없었다 */}
       {onHide && (
-        <button title={railSpec(side).hideTitle} onClick={onHide}
+        <button title={tr(railSpec(side).hideTitle)} onClick={onHide}
                 style={{ fontSize: 11, padding: vertical ? "3px 0" : "3px 7px", flexShrink: 0,
                          ...(vertical ? { width: "100%" } : {}) }}>
           {railSpec(side).hideArrow} Hide
@@ -434,9 +434,9 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
       )}
       {/* 환자 ◀▶ 이동 — 한 줄 */}
       <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
-        <button title="◀ 이전 검사" disabled={navPrevDisabled} onClick={() => onNav(-1)}
+        <button title={tr("◀ 이전 검사")} disabled={navPrevDisabled} onClick={() => onNav(-1)}
                 style={{ flex: 1, padding: "4px 9px", fontSize: 13, fontWeight: 700, opacity: navPrevDisabled ? 0.35 : 1 }}>◀</button>
-        <button title="▶ 다음 검사" disabled={navNextDisabled} onClick={() => onNav(1)}
+        <button title={tr("▶ 다음 검사")} disabled={navNextDisabled} onClick={() => onNav(1)}
                 style={{ flex: 1, padding: "4px 9px", fontSize: 13, fontWeight: 700, opacity: navNextDisabled ? 0.35 : 1 }}>▶</button>
       </div>
       {vertical && quick && quick.length > 0 ? (
@@ -456,7 +456,7 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
         </div>
       ) : (
         /* 활성 마우스모드/툴 칩 (상/하 가로 모드) */
-        <span title="현재 활성 도구" style={{ margin: "0 8px 0 4px", padding: "3px 10px", fontSize: 11, fontWeight: 700,
+        <span title={tr("현재 활성 도구")} style={{ margin: "0 8px 0 4px", padding: "3px 10px", fontSize: 11, fontWeight: 700,
                       borderRadius: 12, background: "var(--accent)", color: "#fff", whiteSpace: "nowrap",
                       ...(vertical ? { textAlign: "center", margin: "2px 0" } : {}) }}>
           ● {activeLabel}
@@ -513,7 +513,7 @@ function SaintMenuBar({ menus, activeId, onNav, navPrevDisabled, navNextDisabled
       {vertical && (() => {
         const rep = menus.flatMap((m) => m.items).find((it) => it.id === "report");
         return rep ? (
-          <button onClick={rep.run} title="Report — 판독창 열기 (항상 하단 고정)"
+          <button onClick={rep.run} title={tr("Report — 판독창 열기 (항상 하단 고정)")}
                   style={{ position: "sticky", bottom: 0, marginTop: "auto", zIndex: 5, flexShrink: 0,
                            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
                            padding: "9px 0", fontWeight: 700, fontSize: 12.5, borderRadius: 6, cursor: "pointer",
@@ -686,7 +686,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const navPatient = async (visual: 1 | -1) => {
     const target = navTarget(visual);
     if (target === undefined) {
-      setStatus(visual === -1 ? "이전 검사가 없습니다 (목록 끝)" : "다음 검사가 없습니다 (목록 끝)");
+      setStatus(visual === -1 ? tr("이전 검사가 없습니다 (목록 끝)") : tr("다음 검사가 없습니다 (목록 끝)"));
       return;
     }
     postStudySync(target, "viewer");  // Worklist·Reading 연동
@@ -700,7 +700,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       setStudyMeta((m) => ({ ...m, [d.study_uid]: metaOf(d) }));
       addOpenTab(target, d.study_uid, `${d.modality} ${d.patient_name} ${d.study_date} #${d.id}`);
       await loadIntoActive(target);
-    } catch { setStatus("검사 이동 실패"); }
+    } catch { setStatus(tr("검사 이동 실패")); }
   };
   // 다른 창(Worklist/Reading)에서 환자가 바뀌면 — 열린 탭이면 그 탭으로 전환
   const loadIntoActiveRef = useRef<(id: number) => Promise<void>>(async () => {});
@@ -806,10 +806,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // 드롭된 series_uid 로 시리즈 객체를 찾아 해당 페인에 로드
   const dropSeriesToPane = (pid: string, seriesUid: string) => {
     const s = thumbSeries.find((x) => x.series_uid === seriesUid) ?? series.find((x) => x.series_uid === seriesUid);
-    if (!s) { setStatus("드롭 실패 — 시리즈를 찾을 수 없습니다"); return; }
+    if (!s) { setStatus(tr("드롭 실패 — 시리즈를 찾을 수 없습니다")); return; }
     patch(pid, { ...initPane(uidOfSeries(s.series_uid)), series: s, index: Math.floor(s.instances.length / 2) });
     setActivePane(pid);
-    setStatus(`시리즈 S${s.series_number}(${s.series_desc || s.modality}) → 페인 로드 (드래그앤드롭)`);
+    setStatus(`${tr("시리즈")} S${s.series_number}(${s.series_desc || s.modality}) → ${tr("페인 로드 (드래그앤드롭)")}`);
   };
   // TY-3(7): 로컬 미디어(jpg/png/bmp/avi/mp4) 파일 선택
   const mediaInputRef = useRef<HTMLInputElement>(null);
@@ -1105,7 +1105,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, q]) => [k, { ...q, shutter: null }])));
     histIdx.current = 0;
     setHistTick((t) => t + 1);
-    setStatus("초기 상태로 되돌렸습니다 (셔터·주석 해제)");
+    setStatus(tr("초기 상태로 되돌렸습니다 (셔터·주석 해제)"));
   };
   // 히스토리에 기록할 원샷 조작(act) — 방향 전환/반전/필터/초기화 등 (In HIST_OPS 동일 취지)
   const HIST_OPS = useMemo(() => new Set(
@@ -1452,7 +1452,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         imgSeries = imgSeries
           .map((s) => ({ ...s, instances: s.instances.filter((i) => keep.has(i.sop_uid)) }))
           .filter((s) => s.instances.length > 0);
-        setStatus(`Key Image View — 키 이미지 ${keySops.length}장만 표시`);
+        setStatus(`Key Image View — ${tr("키 이미지")} ${keySops.length}${tr("장만 표시")}`);
       }
       // HP 자동 매칭이 기다리는 표식 — '지금 series 는 이 검사 것' (series_descs 를 채워 매칭한다)
       seriesForRef.current = { id: detail.id, ok: true };
@@ -1496,7 +1496,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           });
           return next;
         });
-        if (ai) setStatus(`AI 추천 W/L 적용: ${ai.label} (2D 섹션에서 변경 가능)`);
+        if (ai) setStatus(`${tr("AI 추천 W/L 적용:")} ${tr(ai.label)} ${tr("(2D 섹션에서 변경 가능)")}`);
       }
       // ② Add View / ③ Stack View — 기본 로드 완료 후 추가 검사 로드 (UBPACS-Z Study Open)
       if (addDetail) void loadPrior(addDetail.id);
@@ -1508,7 +1508,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       }
       window.setTimeout(pushHist, 300);   // TY-3(1): 로드 완료 후 초기 스냅샷
     }).catch(() => {
-      setStatus("시리즈 조회 실패");
+      setStatus(tr("시리즈 조회 실패"));
       // 시리즈가 없어도 HP(레이아웃·링크 옵션)는 건다 — 아래 매칭 effect 를 깨운다(series 는 안 바뀐다).
       seriesForRef.current = { id: detail.id, ok: false };
       setHpLoadTick((n) => n + 1);
@@ -1562,7 +1562,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (rel) return `${rel.modality} ${rel.study_date}`;
     if (addDetail?.id === id) return `${addDetail.modality} ${addDetail.study_date}`;
     if (stackDetail?.id === id) return `${stackDetail.modality} ${stackDetail.study_date}`;
-    return `검사 #${id}`;
+    return `${tr("검사")} #${id}`;
   };
   const addOpenTab = (id: number, uid: string, label?: string) =>
     setOpenTabs((prev) => prev.some((t) => t.id === id) ? prev : [...prev, { id, uid, label: label ?? tabLabel(id) }]);
@@ -1635,7 +1635,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const isMain = id === detail.id;
     try {
       const tree = isMain ? { uid: detail.study_uid, series } : await getTree(id);
-      if (!tree.series[0]) { setStatus("이 검사에 표시할 영상 시리즈가 없습니다"); return; }
+      if (!tree.series[0]) { setStatus(tr("이 검사에 표시할 영상 시리즈가 없습니다")); return; }
       // 대상 검사의 환자·모달리티 확인 — **둘 다** 필요하다.
       // 환자: 탭 전환은 암묵 동선이라 환자 혼합을 막아야 한다.
       // 모달리티: 분할은 이 값으로 다시 계산한다. 못 읽으면 규정을 적용할 수 없으므로
@@ -1714,10 +1714,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       }
       hangAll(tree.uid, list, count);
       setStatus(mixed
-        ? `검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다${targetMod ? ` (${targetMod} 분할)` : ""}`
-        : `검사 전환${targetMod ? ` — ${targetMod} 분할로 배치했습니다` : ""}`);
+        ? `${tr("검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다")}${targetMod ? ` (${targetMod} ${tr("분할")})` : ""}`
+        : `${tr("검사 전환")}${targetMod ? ` — ${targetMod} ${tr("분할로 배치했습니다")}` : ""}`);
       focusExam(id);
-    } catch { setStatus("검사 전환 실패"); }
+    } catch { setStatus(tr("검사 전환 실패")); }
   };
   loadIntoActiveRef.current = loadIntoActive;  // 동기 리스너에서 최신 클로저 사용
 
@@ -1758,23 +1758,23 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       patch(activePane, { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
     }
     setXlink((x) => ({ ...x, crosslink: true, auto_sync: true, sync_other: true }));
-    setStatus("비교 모드: 과거검사 로드 + 동기 스크롤 ON (SyncOther)");
+    setStatus(tr("비교 모드: 과거검사 로드 + 동기 스크롤 ON (SyncOther)"));
   };
 
   /* ③ Stack View (UBPACS-Z): 기존 시리즈는 썸네일에 유지 + 선택 검사를 활성 페인에 중첩 로드 */
   const loadStack = async (examId: number) => {
     try {
       const r = await getTree(examId);
-      const imgSeries = r.series.map((s) => ({ ...s, series_desc: `[중첩] ${s.series_desc || s.modality}` }));
-      if (!imgSeries.length) { setStatus("Stack View: 추가 검사에 영상 시리즈 없음"); return; }
+      const imgSeries = r.series.map((s) => ({ ...s, series_desc: `${tr("[중첩]")} ${s.series_desc || s.modality}` }));
+      if (!imgSeries.length) { setStatus(tr("Stack View: 추가 검사에 영상 시리즈 없음")); return; }
       addOpenTab(examId, r.uid);
       setSeries((prev) => [...prev, ...imgSeries.filter((s) => !prev.some((p) => p.series_uid === s.series_uid))]);
       const s = imgSeries[0];
       patch(activePane, {
         ...initPane(r.uid), series: s, index: Math.floor(s.instances.length / 2),
       });
-      setStatus("Stack View: 선택 검사 중첩 — 기존 영상은 썸네일·다른 페인에 유지");
-    } catch { setStatus("Stack View 로드 실패"); }
+      setStatus(tr("Stack View: 선택 검사 중첩 — 기존 영상은 썸네일·다른 페인에 유지"));
+    } catch { setStatus(tr("Stack View 로드 실패")); }
   };
 
   /* ══════════ 사양 6 — HP '직접설정' 읽기 / screens 되돌리기 ══════════
@@ -1872,9 +1872,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // 후보 목록이 아직 비어 있어서 접힌 것이라면 재시도 대상이다(진짜 과거검사가 없는 것과 구분).
     priorRetryHpRef.current = none.length && !hpPriors().length ? rule : null;
     if (none.length || d3.length) {
-      setStatus([`HP ${rule.name} 적용`,
-                 none.length ? `${none.join("·")}번 칸: 조건에 맞는 과거검사 없음` : "",
-                 d3.length ? `${d3.join("·")}번 칸: 3D 영상은 뷰어가 복원하지 않습니다` : ""]
+      setStatus([`HP ${rule.name} ${tr("적용")}`,
+                 none.length ? `${none.join("·")}${tr("번 칸: 조건에 맞는 과거검사 없음")}` : "",
+                 d3.length ? `${d3.join("·")}${tr("번 칸: 3D 영상은 뷰어가 복원하지 않습니다")}` : ""]
                 .filter(Boolean).join(" — "));
     }
   };
@@ -1918,8 +1918,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         setAnnos((prev) => prev.filter((a) => isSavedAnno(a)));
         schedHist();
       }
-      setStatus(`Refresh Exam — 시리즈 재조회${unsaved ? ` · 미저장 작업 ${unsaved}건 삭제(◀ 이전으로 복원)` : ""}`);
-    } catch { setStatus("Refresh Exam 실패"); }
+      setStatus(`${tr("Refresh Exam — 시리즈 재조회")}${unsaved ? ` · ${tr("미저장 작업")} ${unsaved}${tr("건 삭제(◀ 이전으로 복원)")}` : ""}`);
+    } catch { setStatus(tr("Refresh Exam 실패")); }
   };
 
   refreshExamRef.current = refreshExam;   // 휴대폰 촬영 폴링에서 최신 참조
@@ -1941,26 +1941,26 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (snap) patch(pid, { series: snap.series, index: snap.index, studyUid: snap.studyUid });
     else patch(pid, { series: series[0] ?? null, index: 0, studyUid: detail.study_uid });
     setActivePane(pid);
-    setStatus("Combine 해제 — 원래 시리즈로 복원");
+    setStatus(tr("Combine 해제 — 원래 시리즈로 복원"));
   };
   // 툴바 Combine — 토글: 활성 페인이 결합 상태면 해제(원복), 아니면 검사 전체 결합
   const combineSeries = () => { if (isCombined(panes[activePane])) uncombine(activePane); else combineAllInto(activePane); };
   const combineAllInto = (pid: string) => {
     const src = series.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
-    if (!src.length) { setStatus("Combine 취소 — 결합할 영상 시리즈가 없습니다"); return; }
-    if (src.length === 1) { setStatus("Combine 취소 — 시리즈가 1개뿐입니다(결합할 대상 없음)"); return; }
+    if (!src.length) { setStatus(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return; }
+    if (src.length === 1) { setStatus(tr("Combine 취소 — 시리즈가 1개뿐입니다(결합할 대상 없음)")); return; }
     snapCombine(pid);
     const merged = buildCombined(
       [...src].sort((a, b) => a.series_number - b.series_number).map((s) => ({ s, studyUid: detail.study_uid })));
     patch(pid, { series: merged, index: 0, studyUid: detail.study_uid });
     setActivePane(pid);
-    setStatus(`Combine all — ${src.length}개 시리즈 ${merged.instances.length}장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)`);
+    setStatus(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}`);
   };
   // Combine(추가) — 드롭/선택한 한 시리즈를 대상 페인의 현재 시리즈에 이어붙임(이미 결합본이면 계속 누적).
   const combineInto = (pid: string, seriesUid: string) => {
     const dropped = thumbSeries.find((x) => x.series_uid === seriesUid) ?? series.find((x) => x.series_uid === seriesUid);
-    if (!dropped) { setStatus("Combine 실패 — 시리즈를 찾을 수 없습니다"); return; }
-    if (["SR", "KO", "PR", "SEG"].includes(dropped.modality)) { setStatus("Combine 불가 — 비영상 시리즈(SR/KO/PR/SEG)"); return; }
+    if (!dropped) { setStatus(tr("Combine 실패 — 시리즈를 찾을 수 없습니다")); return; }
+    if (["SR", "KO", "PR", "SEG"].includes(dropped.modality)) { setStatus(tr("Combine 불가 — 비영상 시리즈(SR/KO/PR/SEG)")); return; }
     snapCombine(pid);
     const base = panes[pid]?.series ?? null;
     const merged = buildCombined(
@@ -1968,7 +1968,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
            : [{ s: dropped, studyUid: uidOfSeries(dropped.series_uid) }]);
     patch(pid, { series: merged, index: 0 });
     setActivePane(pid);
-    setStatus(`Combine — S${dropped.series_number} ${dropped.instances.length}장 추가 · 총 ${merged.instances.length}장(연속 스크롤)`);
+    setStatus(`Combine — S${dropped.series_number} ${dropped.instances.length}${tr("장 추가")} · ${tr("총")} ${merged.instances.length}${tr("장(연속 스크롤)")}`);
   };
 
   /* Study With Open — ADD: Related 최대 3건을 p1~p3 분할 오픈 / STACK: 순차 중첩 */
@@ -1985,11 +1985,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       } catch { /* 개별 실패 무시 */ }
     }
     setXlink((x) => ({ ...x, crosslink: true, auto_sync: true, sync_other: true }));
-    setStatus(`Study With Open (ADD VIEW): Related ${take.length}건 함께 오픈`);
+    setStatus(`Study With Open (ADD VIEW): Related ${take.length}${tr("건 함께 오픈")}`);
   };
   const loadStackMany = async (ids: number[]) => {
     for (const id of ids) await loadStack(id);
-    setStatus(`Study With Open (STACK VIEW): Related ${ids.length}건 중첩 오픈`);
+    setStatus(`Study With Open (STACK VIEW): Related ${ids.length}${tr("건 중첩 오픈")}`);
   };
 
   const step = useCallback((pid: string, dir: number) => {
@@ -2084,11 +2084,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const wheelRaf = useRef<{ pid: string; net: number; raf: number } | null>(null);
   /** Shift+휠 한 칸 — 페이지가 하나뿐이면 아무 일도 하지 않는다(끝에서 순환하지 않음) */
   const srsPageStep = useCallback((dir: number) => {
-    if (srsPageMax <= 0) { setStatus("표시할 다음 시리즈가 없습니다"); return; }
+    if (srsPageMax <= 0) { setStatus(tr("표시할 다음 시리즈가 없습니다")); return; }
     const pg = Math.max(0, Math.min(srsPageMax, srsPage + dir));
     if (pg === srsPage) return;
     applySrsPage(pg, srsSlots);
-    setStatus(`시리즈 ${pageLabel(pg, series.length, srsPageSize)}`);
+    setStatus(`${tr("시리즈")} ${pageLabel(pg, series.length, srsPageSize)}`);
   }, [srsPage, srsPageMax, applySrsPage, srsSlots, srsPageSize, series.length]);
 
   const wheelStep = useCallback((pid: string, dir: number) => {
@@ -2328,16 +2328,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
       const a = screenToImage(Math.min(r.sx, r.cx), Math.min(r.sy, r.cy), r.rect, mgAt(p, r.rect), aspect);
       const b = screenToImage(Math.max(r.sx, r.cx), Math.max(r.sy, r.cy), r.rect, mgAt(p, r.rect), aspect);
-      if (!a || !b) { setStatus("영역 W/L — 이미지 안에서 박스를 지정하세요"); return; }
+      if (!a || !b) { setStatus(tr("영역 W/L — 이미지 안에서 박스를 지정하세요")); return; }
       const exId = openTabsRef.current.find((t) => t.uid === p.studyUid)?.id ?? detail.id;
       void api.roiStats(exId, { sop_uid: inst.sop_uid, kind: "rect", points: [a, b] }).then((st) => {
-        if (st.min == null || st.max == null) { setStatus("영역 W/L — 픽셀 통계를 얻지 못했습니다"); return; }
+        if (st.min == null || st.max == null) { setStatus(tr("영역 W/L — 픽셀 통계를 얻지 못했습니다")); return; }
         const ww = Math.max(1, Math.round(st.max - st.min));
         const wc = Math.round((st.max + st.min) / 2);
         patch(r.pid, { wl: `${wc},${ww}` });
         schedHist();
-        setStatus(`영역 W/L 적용 — C ${wc} / W ${ww} (박스 픽셀 ${st.min}~${st.max})`);
-      }).catch(() => setStatus("영역 W/L 실패"));
+        setStatus(`${tr("영역 W/L 적용")} — C ${wc} / W ${ww} (${tr("박스 픽셀")} ${st.min}~${st.max})`);
+      }).catch(() => setStatus(tr("영역 W/L 실패")));
     };
     window.addEventListener("pointerdown", cap, true);   // capture 단계(확장 무력화)
     window.addEventListener("pointermove", regionMove);
@@ -2385,7 +2385,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setSelAnnos(null); setSelAnno(null);
     setTool(null); setDraft(null);   // 삭제 시 기능 툴 Off (◀ 이전으로 복원 가능)
     schedHist();
-    setStatus(`선택한 ${sel.length}개 주석을 지웠습니다`);
+    setStatus(`${tr("선택한")} ${sel.length}${tr("개 주석을 지웠습니다")}`);
     return true;
   };
 
@@ -2512,7 +2512,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       case "shutRect": case "shutEl": case "shutPoly": {
         const kind = tk === "shutRect" ? "rect" : tk === "shutEl" ? "ellipse" : "poly";
         patch(pid, { shutter: { kind, pts: points } });
-        setStatus("셔터 적용 — Clr(주석 전체 삭제) 또는 Reset 으로 해제");
+        setStatus(tr("셔터 적용 — Clr(주석 전체 삭제) 또는 Reset 으로 해제"));
         schedHist();
         return;
       }
@@ -2568,26 +2568,26 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             }
             return next;
           });
-          setStatus("3D Cursor — 기하 정보 없음: index 비율 근사 동기");
+          setStatus(tr("3D Cursor — 기하 정보 없음: index 비율 근사 동기"));
         }
         setCross3d(markers);
         return;
       }
       // ── 텍스트 계열 — 입력 프롬프트 ──
       case "text": {
-        const text = window.prompt("주석 텍스트") ?? "";
+        const text = window.prompt(tr("주석 텍스트")) ?? "";
         if (!text) return;
         pushAnno(d, "text", points, null, text);
         return;
       }
       case "box": {
-        const text = window.prompt("메모 제목");
+        const text = window.prompt(tr("메모 제목"));
         if (text === null) return;
         pushAnno(d, "box", points, null, text || "");
         return;
       }
       case "marking": {
-        const text = window.prompt("Marking (짧은 표기, 예: ①, R, ✓)");
+        const text = window.prompt(tr("Marking (짧은 표기, 예: ①, R, ✓)"));
         if (!text) return;
         pushAnno(d, "marking", points, null, text);
         return;
@@ -2595,7 +2595,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       case "spine": {
         // 첫 클릭에 시작 라벨 입력(예: C1/T1/L1) → 이후 클릭마다 연번 증가
         if (spineSeq.current.n === 1) {
-          const base = window.prompt("시작 라벨 (예: C1, T1, L1)", "L1");
+          const base = window.prompt(tr("시작 라벨 (예: C1, T1, L1)"), "L1");
           if (!base) return;
           const m = base.match(/^([A-Za-z]+)(\d+)$/);
           spineSeq.current = m ? { base: m[1].toUpperCase(), n: Number(m[2]) } : { base: base.toUpperCase(), n: 1 };
@@ -2610,7 +2610,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const cols = inst.cols || 1000, rows = inst.rows || 1000;
         if (!url) return;
         void samplePixels(url, cols, rows).then((data) => {
-          if (!data) { setStatus("픽셀 샘플 실패(CORS)"); return; }
+          if (!data) { setStatus(tr("픽셀 샘플 실패(CORS)")); return; }
           const v = rawAt(data, points[0][0] * cols, points[0][1] * rows, p.wl);
           pushAnno(d, "lens", points, null, `≈${v.toFixed(0)}`);
         });
@@ -2621,7 +2621,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const cols = inst.cols || 1000, rows = inst.rows || 1000;
         if (!url) return;
         void samplePixels(url, cols, rows).then((data) => {
-          if (!data) { setStatus("픽셀 샘플 실패(CORS)"); return; }
+          if (!data) { setStatus(tr("픽셀 샘플 실패(CORS)")); return; }
           const N = 80;
           const vals: number[] = [];
           for (let k = 0; k <= N; k++) {
@@ -2630,7 +2630,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               (points[0][1] + (points[1][1] - points[0][1]) * (k / N)) * rows, p.wl));
           }
           const px = (q: number[]) => `(${Math.round(q[0] * cols)},${Math.round(q[1] * rows)})`;
-          setProfileData({ title: `Profile ≈픽셀값 ${px(points[0])}→${px(points[1])}`, vals });
+          setProfileData({ title: `Profile ${tr("≈픽셀값")} ${px(points[0])}→${px(points[1])}`, vals });
         });
         return;
       }
@@ -2639,7 +2639,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const cols = inst.cols || 1000, rows = inst.rows || 1000;
         if (!url) return;
         void samplePixels(url, cols, rows).then((data) => {
-          if (!data) { setStatus("픽셀 샘플 실패(CORS)"); return; }
+          if (!data) { setStatus(tr("픽셀 샘플 실패(CORS)")); return; }
           const x0 = Math.floor(Math.min(points[0][0], points[1][0]) * cols);
           const x1 = Math.ceil(Math.max(points[0][0], points[1][0]) * cols);
           const y0 = Math.floor(Math.min(points[0][1], points[1][1]) * rows);
@@ -2654,7 +2654,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             }
             trows.push(row);
           }
-          setTableData({ title: `2D Table ≈픽셀값 (${x0},${y0})~(${x1},${y1}) step ${step}`, rows: trows });
+          setTableData({ title: `2D Table ${tr("≈픽셀값")} (${x0},${y0})~(${x1},${y1}) step ${step}`, rows: trows });
         });
         return;
       }
@@ -2676,15 +2676,15 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const minPts = tool === "poly" ? 2 : 3;
     if (points.length < minPts) {
       setStatus(tool === "poly"
-        ? "폴리라인: 2점 이상 클릭 후 더블클릭으로 종료하세요"
+        ? tr("폴리라인: 2점 이상 클릭 후 더블클릭으로 종료하세요")
         : tool === "shutPoly"
-          ? "다각 셔터: 3점 이상 클릭 후 더블클릭으로 종료하세요"
-          : "척추 외곡: 3점 이상 클릭 후 더블클릭으로 종료하세요");
+          ? tr("다각 셔터: 3점 이상 클릭 후 더블클릭으로 종료하세요")
+          : tr("척추 외곡: 3점 이상 클릭 후 더블클릭으로 종료하세요"));
       return;
     }
     if (tool === "shutPoly") {
       patch(draft.pid, { shutter: { kind: "poly", pts: points } });
-      setStatus("다각 셔터 적용 — Clr(주석 전체 삭제) 또는 Reset 으로 해제");
+      setStatus(tr("다각 셔터 적용 — Clr(주석 전체 삭제) 또는 Reset 으로 해제"));
       setDraft(null);
       schedHist();
       return;
@@ -2702,16 +2702,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
 
   /* S2 자동계측 CTR — AI 초안 라벨 필수 */
   const doCtr = async () => {
-    setStatus("AI CTR 계측 중…");
+    setStatus(tr("AI CTR 계측 중…"));
     try {
       const r = await api.ctr(detail.id);
       const a = await api.annotations(detail.id);
       setAnnos((prev) => [...prev.filter((x) => x.kind !== "ctr"), ...a.items.filter((x) => x.kind === "ctr")]);
       schedHist();
       setStatus(r.verified && r.ctr != null
-        ? `AI CTR ${r.ctr} · 신뢰도 ${(r.confidence * 100).toFixed(0)}% (초안 — 확정 아님)`
-        : `CTR 검증 실패: ${r.verify_note || r.note}`);
-    } catch (e) { setStatus(e instanceof Error ? e.message : "CTR 실패"); }
+        ? `AI CTR ${r.ctr} · ${tr("신뢰도")} ${(r.confidence * 100).toFixed(0)}% ${tr("(초안 — 확정 아님)")}`
+        : `${tr("CTR 검증 실패:")} ${r.verify_note || r.note}`);
+    } catch (e) { setStatus(e instanceof Error ? e.message : tr("CTR 실패")); }
   };
 
   // ── 저장된 표시상태(pstate: 적용 툴 W/L·방향·필터·셔터) — 재오픈 재현 ──
@@ -2756,15 +2756,15 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       await Promise.all([...pstateByExam].map(([id, s]) => api.savePresentation(id, s).catch(() => {})));
       // 저장 시점 = 새 기준선 — 이후 툴 Off/Rfsh 에도 이 상태는 보존(과거 상태로 되돌려 재저장하면 그때가 새 기준선)
       savedAnnosRef.current = new Set(annos.map((a) => JSON.stringify(a)));
-      setStatus(`주석 ${annos.length}건 + 표시상태 저장됨 (서버) — 재오픈 시 재현`);
-    } catch { setStatus("주석 저장 실패"); }
+      setStatus(`${tr("주석")} ${annos.length}${tr("건 + 표시상태 저장됨 (서버) — 재오픈 시 재현")}`);
+    } catch { setStatus(tr("주석 저장 실패")); }
   };
   // 툴 선택 — 셔터 툴 재클릭 시 적용된 셔터 제거(작업 취소·삭제), 그 외 토글 선택 (In Viewer 동일)
   const pickTool = (tk: ToolKind) => {
     if ((tk === "shutRect" || tk === "shutEl" || tk === "shutPoly") && panes[activePane]?.shutter) {
       patch(activePane, { shutter: null });
       setTool(null); setDraft(null);
-      setStatus("셔터 해제 — 적용된 작업이 제거되었습니다");
+      setStatus(tr("셔터 해제 — 적용된 작업이 제거되었습니다"));
       schedHist();
       return;
     }
@@ -2774,7 +2774,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (dropped > 0) {
         setAnnos((prev) => prev.filter((a) => a.kind !== tk || isSavedAnno(a)));
         schedHist();
-        setStatus(`${tk} Off — 미저장 작업 ${dropped}건 삭제 (◀ 이전으로 복원, Save 시 보존)`);
+        setStatus(`${tk} Off — ${tr("미저장 작업")} ${dropped}${tr("건 삭제 (◀ 이전으로 복원, Save 시 보존)")}`);
       }
       setTool(null); setDraft(null);
       return;
@@ -2810,8 +2810,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const list = annos.map((a) => a.sop_uid ? a : { ...a, sop_uid: inst.sop_uid, series_uid: inst.series_uid ?? p.series!.series_uid });
     try {
       await api.sendGsps(detail.id, { images: [...images.values()], annotations: list, wc, ww });
-      setStatus("GSPS 저장됨 — Orthanc 동일 검사 귀속");
-    } catch (e) { setStatus(e instanceof Error ? e.message : "GSPS 실패"); }
+      setStatus(tr("GSPS 저장됨 — Orthanc 동일 검사 귀속"));
+    } catch (e) { setStatus(e instanceof Error ? e.message : tr("GSPS 실패")); }
   };
   useEffect(() => {
     const move = (e: MouseEvent) => {
@@ -2933,7 +2933,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           });
         }
         setMarquee(null);
-        if (idxs.length) { setSelAnnos(idxs); setSelAnno(null); setStatus(`${idxs.length}개 주석 선택 — Del/휴지통/우클릭으로 삭제`); }
+        if (idxs.length) { setSelAnnos(idxs); setSelAnno(null); setStatus(`${idxs.length}${tr("개 주석 선택 — Del/휴지통/우클릭으로 삭제")}`); }
         else setSelAnnos(null);
         return;
       }
@@ -2978,13 +2978,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         // 현재 모니터의 영상 영역(모든 페인)을 화면 그대로 캡처 — 주석·측정·툴·문자 오버레이 포함.
         const container = vpRef.current;
         if (container) {
-          setStatus("캡처 중…");
+          setStatus(tr("캡처 중…"));
           void import("../lib/capturePane").then(({ capturePaneToPng }) =>
-            capturePaneToPng(container).then(() => setStatus("캡처 저장됨 (PNG)")).catch(() => {
+            capturePaneToPng(container).then(() => setStatus(tr("캡처 저장됨 (PNG)"))).catch(() => {
               // 폴백: 화면 캡처 실패 시 서버 렌더 PNG(주석 미포함)
               const url = renderedUrl(p);
               if (url) { const el = document.createElement("a"); el.href = url; el.download = `saintview_${Date.now()}.png`; el.click(); }
-              setStatus("화면 캡처 실패 — 서버 렌더 이미지로 저장");
+              setStatus(tr("화면 캡처 실패 — 서버 렌더 이미지로 저장"));
             }));
         }
         break;
@@ -3023,10 +3023,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           if (exists) n.delete(inst.sop_uid); else n.add(inst.sop_uid);
           return n;
         });
-        setStatus(exists ? `🔑 키이미지 해제 — 남은 ${next.length}장`
-                         : `🔑 키이미지 등록 (${next.length}장) — 워크리스트 🔑 표시`);
+        setStatus(exists ? `${tr("🔑 키이미지 해제 — 남은")} ${next.length}${tr("장")}`
+                         : `${tr("🔑 키이미지 등록")} (${next.length}${tr("장")}) — ${tr("워크리스트 🔑 표시")}`);
       });
-    }).catch(() => setStatus("키이미지 저장 실패"));
+    }).catch(() => setStatus(tr("키이미지 저장 실패")));
   };
 
   /* ── Calibrate — 기준선(length) 2점 + 실제 길이(mm) 입력 → 활성 페인 시리즈 pixel_spacing 재설정 ── */
@@ -3035,16 +3035,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     calibRef.current = true;
     setTool("length");
     setDraft(null);
-    setStatus("Calibrate — 실제 길이를 아는 기준선을 그으세요 (예: 자·마커). 완료 후 mm 입력");
+    setStatus(tr("Calibrate — 실제 길이를 아는 기준선을 그으세요 (예: 자·마커). 완료 후 mm 입력"));
   };
   const applyCalibration = (pid: string, points: number[][], inst: InstanceNode) => {
     const dx = (points[1][0] - points[0][0]) * (inst.cols || 1);
     const dy = (points[1][1] - points[0][1]) * (inst.rows || 1);
     const pixLen = Math.hypot(dx, dy);
-    if (pixLen < 1) { setStatus("Calibrate 취소 — 기준선이 너무 짧습니다"); return; }
-    const mmStr = window.prompt(`기준선의 실제 길이(mm)를 입력하세요\n(화면상 ${pixLen.toFixed(1)}px)`, "10");
+    if (pixLen < 1) { setStatus(tr("Calibrate 취소 — 기준선이 너무 짧습니다")); return; }
+    const mmStr = window.prompt(`${tr("기준선의 실제 길이(mm)를 입력하세요")}\n(${tr("화면상")} ${pixLen.toFixed(1)}px)`, "10");
     const mm = Number(mmStr);
-    if (!mmStr || !Number.isFinite(mm) || mm <= 0) { setStatus("Calibrate 취소"); return; }
+    if (!mmStr || !Number.isFinite(mm) || mm <= 0) { setStatus(tr("Calibrate 취소")); return; }
     const mmPerPx = mm / pixLen;
     // 활성 페인 시리즈의 모든 인스턴스 pixel_spacing 을 보정값으로 교체 → 이후 측정이 mm 로 계산
     setPanes((prev) => {
@@ -3054,23 +3054,23 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       return { ...prev, [pid]: { ...pane, series } };
     });
     setTool(null);
-    setStatus(`✅ Calibrate 완료 — 1px = ${mmPerPx.toFixed(4)}mm (기준 ${mm}mm / ${pixLen.toFixed(1)}px). 이후 측정은 mm 로 표시`);
+    setStatus(`${tr("✅ Calibrate 완료")} — 1px = ${mmPerPx.toFixed(4)}mm (${tr("기준")} ${mm}mm / ${pixLen.toFixed(1)}px). ${tr("이후 측정은 mm 로 표시")}`);
   };
 
   /* ── TY-3(8): 딕테이션(Rec) — 서버 STT(OpenAI Whisper/로컬/브라우저) 연동. 전사 텍스트를 판독 도크에 삽입 ── */
   const dict = useDictation((text) => {
     // 판독 도크(ReportDock)가 창 이벤트를 받아 포커스 필드에 삽입
     window.dispatchEvent(new CustomEvent("sv-dictation-insert", { detail: { text } }));
-    setStatus(`🎙 음성 판독 → 판독문 삽입: “${text.slice(0, 30)}${text.length > 30 ? "…" : ""}”`);
+    setStatus(`${tr("🎙 음성 판독 → 판독문 삽입:")} “${text.slice(0, 30)}${text.length > 30 ? "…" : ""}”`);
   });
   const toggleDictation = () => {
     dict.toggle();
-    setStatus(dict.recording ? "🎙 녹음 정지 — 전사 중…"
-      : dict.engine === "browser" ? "🎙 음성 인식 중(브라우저)… Rec 를 다시 누르면 정지"
-      : `🎙 녹음 중(${dict.engine === "openai_api" ? "OpenAI" : "Whisper 로컬"})… Rec 를 다시 누르면 전사`);
+    setStatus(dict.recording ? tr("🎙 녹음 정지 — 전사 중…")
+      : dict.engine === "browser" ? tr("🎙 음성 인식 중(브라우저)… Rec 를 다시 누르면 정지")
+      : `${tr("🎙 녹음 중")}(${dict.engine === "openai_api" ? "OpenAI" : tr("Whisper 로컬")})… ${tr("Rec 를 다시 누르면 전사")}`);
   };
   const playDictation = () => {
-    if (!dict.playLast()) setStatus("재생할 녹음이 없습니다 (서버 STT 엔진에서 녹음 후 재생 가능)");
+    if (!dict.playLast()) setStatus(tr("재생할 녹음이 없습니다 (서버 STT 엔진에서 녹음 후 재생 가능)"));
   };
 
   /* ── TY-3(9): Compare — 같은 환자 과거검사 다중 선택 비교 오픈 (In Compare 이식, 페이지 리로드 없이).
@@ -3092,7 +3092,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       } catch { /* 개별 실패 무시 */ }
     }
     setXlink((x) => ({ ...x, crosslink: true, auto_sync: true, sync_other: true }));
-    setStatus(`Compare — 과거검사 ${ids.length}건 비교 오픈 (SyncOther ON)`);
+    setStatus(`Compare — ${tr("과거검사")} ${ids.length}${tr("건 비교 오픈 (SyncOther ON)")}`);
   };
   const openCompare = async () => {
     if ((prefs.compare?.enabled) === false) { setCmpOpen(false); return; }  // 기능 off
@@ -3108,11 +3108,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       // 다른 열린 창 + 이 창(발신자 — BroadcastChannel 미수신)에도 비교검사 Exam 탭 동기
       for (const id of ids) {
         const rx = detail.related_exams.find((q) => q.id === id);
-        const lbl = `${rx?.modality ?? "검사"} ${rx?.study_date ?? ""} #${id}`;
+        const lbl = `${rx?.modality ?? tr("검사")} ${rx?.study_date ?? ""} #${id}`;
         postViewerAddTab(id, rx?.study_uid ?? "", lbl);
         addOpenTab(id, rx?.study_uid ?? "", lbl);
       }
-      setStatus(`Compare — 비교검사 ${ids.length}건을 다음 모니터에 오픈 (기준=M)`);
+      setStatus(`Compare — ${tr("비교검사")} ${ids.length}${tr("건을 다음 모니터에 오픈 (기준=M)")}`);
       return;
     }
     // 단일 모니터(또는 미감지) — 한 뷰어 안에서 분할 비교
@@ -3645,7 +3645,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                         textShadow: "0 0 3px #000", pointerEvents: "none" }}>
             📂 {p.media.name}
           </div>
-          <button title="미디어 닫기 — DICOM 표시로 복귀"
+          <button title={tr("미디어 닫기 — DICOM 표시로 복귀")}
                   onClick={() => { URL.revokeObjectURL(p.media!.url); patch(pid, { media: null }); }}
                   style={{ position: "absolute", top: 3, right: 4, fontSize: 11, padding: "0 6px" }}>✕</button>
         </div>
@@ -3710,7 +3710,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           <div style={{ position: "absolute", inset: 0, zIndex: 6, display: "grid", placeItems: "center",
                         background: "color-mix(in srgb, var(--accent) 18%, transparent)", pointerEvents: "none",
                         color: "var(--accent)", fontSize: 14, fontWeight: 800, textShadow: "0 1px 4px #000" }}>
-            ↓ 이 페인에 시리즈 표시
+            ↓ {tr("이 페인에 시리즈 표시")}
           </div>
         )}
         {url && (() => {
@@ -3769,7 +3769,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                            setImgLay({ r: 1, c: 1 });
                            patch(pid, { il: { r: 1, c: 1 }, index: tIdx, ilPrev: p.il ?? null });
                            setActivePane(pid);
-                           setStatus(`이미지 ${tIdx + 1}/${nInst} — 스크롤로 시리즈 전체 이동 (더블클릭: 분할 복귀)`);
+                           setStatus(`${tr("이미지")} ${tIdx + 1}/${nInst} — ${tr("스크롤로 시리즈 전체 이동 (더블클릭: 분할 복귀)")}`);
                          }}
                          style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0,
                                   cursor: ti ? "zoom-in" : undefined }}>
@@ -3835,7 +3835,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             {/* 페인 상단 근처에서 시작하면 라벨이 overflow:hidden 에 잘리므로 박스 안쪽으로 */}
             <span style={{ position: "absolute", top: wlBox.top < 20 ? 2 : -18, left: wlBox.top < 20 ? 3 : 0,
                            fontSize: 10.5, fontWeight: 700, color: "#f59e0b", textShadow: "0 0 3px #000",
-                           whiteSpace: "nowrap" }}>영역 W/L</span>
+                           whiteSpace: "nowrap" }}>{tr("영역 W/L")}</span>
           </div>
         )}
         {/* 키이미지 마크 — 현재 표시 이미지가 키이미지면 상단 중앙에 🔑 배지 (overlay 토글과 무관) */}
@@ -3874,7 +3874,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               return (
                 <div style={{ ...ov("tl", tyOvFont), top: undefined, marginTop: 0,
                               transform: "translateY(52px)" }}>
-                  <span style={{ color: "#fde047", fontWeight: 700 }}>[비교/과거]{t ? ` ${t}` : ""}</span>
+                  <span style={{ color: "#fde047", fontWeight: 700 }}>{tr("[비교/과거]")}{t ? ` ${t}` : ""}</span>
                 </div>
               );
             })()}
@@ -3888,7 +3888,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                style={{ position: "absolute", bottom: 4, left: "50%", transform: "translateX(-50%)",
                         zIndex: 4, display: "flex", gap: 4, alignItems: "center",
                         background: "rgba(0,0,0,0.72)", borderRadius: 6, padding: "1px 7px" }}>
-            <span title={p.playing ? "Pause — 이 페인 정지 (멀티 선택 시 함께)" : "Play — 이 페인만 재생 (멀티 선택 시 함께)"}
+            <span title={p.playing ? tr("Pause — 이 페인 정지 (멀티 선택 시 함께)") : tr("Play — 이 페인만 재생 (멀티 선택 시 함께)")}
                   style={{ cursor: "pointer", fontSize: 12.5,
                            color: p.playing ? "var(--accent)" : "var(--text-secondary)" }}
                   onClick={() => {
@@ -3899,13 +3899,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               {p.playing ? "⏸" : "▶"}
             </span>
             <input type="number" min={0.05} max={10} step={0.05}
-                   title="이 페인의 넘김 간격(초) — 기본값은 Setting>뷰어 ty_cine_sec"
+                   title={tr("이 페인의 넘김 간격(초) — 기본값은 Setting>뷰어 ty_cine_sec")}
                    value={p.cineSec ?? tyCineSec}
                    onChange={(e) => updMany(targetsOf(pid), () => ({
                      cineSec: Math.min(10, Math.max(0.05, Number(e.target.value) || tyCineSec)),
                    }))}
                    style={{ width: 48, fontSize: 10, padding: "0 2px" }} />
-            <span style={{ fontSize: 9.5, color: "var(--text-secondary)" }}>초</span>
+            <span style={{ fontSize: 9.5, color: "var(--text-secondary)" }}>{tr("초")}</span>
           </div>
         )}
       </div>
@@ -4039,11 +4039,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       mkItem("invert", "Inverse"),
     ] },
     { title: "Additional", items: [
-      mkItem("clr", "Delete All Tools", () => { setAnnos([]); setSelAnno(null); setSelAnnos(null); setTool(null); schedHist(); setStatus("주석 전체 삭제 (◀ 이전으로 복원)"); }),
+      mkItem("clr", "Delete All Tools", () => { setAnnos([]); setSelAnno(null); setSelAnnos(null); setTool(null); schedHist(); setStatus(tr("주석 전체 삭제 (◀ 이전으로 복원)")); }),
       mkItem("del", "Delete Tool", () => { if (selAnnos) deleteSelAnnos(); else if (selAnno) deleteSelAnno(); else { setAnnos((pp) => pp.slice(0, -1)); schedHist(); } }),
       mkItem("save", "Save All Tools", () => { void saveAnnos(); }),
       mkItem("print", "Print"),
-      mkItem("gsps", "Dicom (GSPS 저장)", () => void doGsps()),
+      mkItem("gsps", tr("Dicom (GSPS 저장)"), () => void doGsps()),
       mkItem("report", "Report", () => { void (async () => {
         const r = await api.getSetting("viewer.prefs").catch(() => ({ value: {} }));
         const mon = (r.value as { monitor?: { report?: number | null } }).monitor?.report;
@@ -4082,14 +4082,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                                                     : { borderRight: "1px solid var(--border)" }) }),
     }}>
       {/* 위치 그립 — 드래그해서 화면 가장자리(좌/우/상/하)에 도킹 */}
-      <div title="드래그로 툴 팔레트 위치 이동 — 화면 왼쪽/오른쪽/위/아래로 끌어 놓으세요 (설정>뷰어에서도 지정 가능)"
+      <div title={tr("드래그로 툴 팔레트 위치 이동 — 화면 왼쪽/오른쪽/위/아래로 끌어 놓으세요 (설정>뷰어에서도 지정 가능)")}
            onPointerDown={(e) => { dockDragRef.current = { kind: "palette", sx: e.clientX, sy: e.clientY }; }}
            style={{ cursor: "grab", textAlign: "center", fontSize: 10, color: "var(--text-secondary)",
                     padding: "1px 4px", flexShrink: 0, userSelect: "none" }}>⠿</div>
       {/* ★ Quick — 사용 상위 6개 툴 자동 추천 (ty_quick_row·ty_usage, 팔레트 최상단) */}
       {quickIds.length > 0 && (
         <div style={paletteHoriz ? { display: "flex", gap: 3, alignItems: "center" } : undefined}>
-          <div title="자주 쓰는 툴 자동 추천 — 사용 3회 이상, 상위 6개 (설정>뷰어에서 끌 수 있음)"
+          <div title={tr("자주 쓰는 툴 자동 추천 — 사용 3회 이상, 상위 6개 (설정>뷰어에서 끌 수 있음)")}
                style={{ padding: "4px 6px", fontSize: 11, fontWeight: 700, borderRadius: 3,
                         color: "var(--accent)", background: "var(--bg-elevated)" }}>
             ★ Quick
@@ -4099,7 +4099,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             {quickIds.map((id) => {
               const q = quickDefs[id];
               return (
-                <button key={id} title={`★ ${q.label} — 사용 ${tyUsage[id]}회`}
+                <button key={id} title={`★ ${q.label} — ${tr("사용")} ${tyUsage[id]}${tr("회")}`}
                         onClick={() => { recordUse(id); q.run(); }}
                         style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                  background: tool === id || mouseMode === id ? "var(--accent)" : undefined }}>
@@ -4112,10 +4112,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       )}
       {/* ◀▶ 환자 이동 — 시간대별 한 단계 (방향=Setting>정책, 열려 있으면 그 탭으로 전환) */}
       <div style={{ display: "flex", gap: 3, ...(paletteHoriz ? {} : { width: "100%" }) }}>
-        <button title={`◀ ${navLeft === "past" ? "한 단계 과거" : "한 단계 최신"} 검사 — 열려 있으면 그 Exam 탭으로 (정책에서 변경)`}
+        <button title={`◀ ${navLeft === "past" ? tr("한 단계 과거") : tr("한 단계 최신")} ${tr("검사 — 열려 있으면 그 Exam 탭으로 (정책에서 변경)")}`}
                 onClick={() => navPatient(-1)} disabled={navTarget(-1) === undefined}
                 style={{ flex: 1, padding: "5px 0", fontSize: 13, fontWeight: 700 }}>◀</button>
-        <button title={`▶ ${navLeft === "past" ? "한 단계 최신" : "한 단계 과거"} 검사 — 열려 있으면 그 Exam 탭으로 (정책에서 변경)`}
+        <button title={`▶ ${navLeft === "past" ? tr("한 단계 최신") : tr("한 단계 과거")} ${tr("검사 — 열려 있으면 그 Exam 탭으로 (정책에서 변경)")}`}
                 onClick={() => navPatient(1)} disabled={navTarget(1) === undefined}
                 style={{ flex: 1, padding: "5px 0", fontSize: 13, fontWeight: 700 }}>▶</button>
       </div>
@@ -4132,7 +4132,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                         gap: paletteHoriz ? 8 : 2, fontSize: 10.5,
                         width: paletteHoriz ? undefined : "100%" }}>
             {XLINK_MODES.map((m) => (
-              <label key={m.key} title={m.desc}
+              <label key={m.key} title={tr(m.desc)}
                      style={{ display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap",
                               cursor: "pointer",
                               opacity: m.key === "crosslink" || xlink.crosslink
@@ -4144,7 +4144,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             ))}
           </div>
           {/* 듀얼모드 Stack 동기 방식 (G 키) — Spatial=DICOM 좌표 정합 / Index=1:1 */}
-          <button title="Stack 동기 방식 (G 키) — Spatial: DICOM 좌표로 해부학적 정합(두께·각도·장수 달라도) / Index: 1:1 인덱스(좌표 없는 로컬 데이터·강제 정합)"
+          <button title={tr("Stack 동기 방식 (G 키) — Spatial: DICOM 좌표로 해부학적 정합(두께·각도·장수 달라도) / Index: 1:1 인덱스(좌표 없는 로컬 데이터·강제 정합)")}
                   onClick={() => setSpatialSync((s) => !s)}
                   style={{ fontSize: 10.5, padding: "4px 2px", width: paletteHoriz ? 62 : "100%",
                            background: spatialSync ? "var(--accent)" : undefined, color: spatialSync ? "#fff" : undefined }}>
@@ -4154,17 +4154,17 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       )}
       <button style={{ padding: "6px 6px", fontSize: 12 }} onClick={() => setThumbOpen((t) => !t)}>Thumb</button>
       <button style={{ padding: "6px 6px", fontSize: 12 }}
-              title={railSpec(prefs.paletteSide).hideTitle}
+              title={tr(railSpec(prefs.paletteSide).hideTitle)}
               onClick={() => togglePalette(false)}>
         {railSpec(prefs.paletteSide).hideArrow} Hide
       </button>
       {/* Common 이하만 스크롤 — ★Quick·이동·레이아웃·Sync·Thumb/Hide 상단 블록은 고정 */}
       <div style={paletteHoriz ? { display: "flex", gap: 3, alignItems: "center" }
                                : { flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
-      {([["common", "Common"], ["anno", "Anno"], ["anatomy", "Anatomy(해부)"], ["px", "Pixel"], ["shut", "Shutter"], ["2d", "2D"], ["etc", "ETC"]] as const).map(([k, label]) => (
+      {([["common", "Common"], ["anno", "Anno"], ["anatomy", tr("Anatomy(해부)")], ["px", "Pixel"], ["shut", "Shutter"], ["2d", "2D"], ["etc", "ETC"]] as const).map(([k, label]) => (
         <div key={k} style={paletteHoriz ? { display: "flex", gap: 3, alignItems: "center" } : undefined}>
           <div onClick={() => toggleSec(k)}
-               title="클릭=섹션 접기/펼치기 (기본 전체 펼침)"
+               title={tr("클릭=섹션 접기/펼치기 (기본 전체 펼침)")}
                style={{ padding: "4px 6px", fontSize: 11, fontWeight: 700, cursor: "pointer",
                         color: openSecs.has(k) ? "var(--text-primary)" : "var(--text-secondary)",
                         background: "var(--bg-elevated)", borderRadius: 3, marginTop: 2 }}>
@@ -4176,24 +4176,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               ...(paletteHoriz ? {} : { gridTemplateColumns: `repeat(${tyToolCols}, 1fr)`, padding: "3px 0" }),
             }}>
               {k === "common" && (<>
-                <ModeBtn k="select" label="Select" title="선택 모드 — 주석 클릭 편집 / 빈 공간 드래그=녹색 점선 마퀴 다중선택 → Del 삭제" />
-                {tbOn("zoom") && <ModeBtn k="zoom" label="Zoom" title="좌드래그=확대 (우드래그 항상 Zoom)" />}
-                {tbOn("pan") && <ModeBtn k="pan" label="Pan" title="좌드래그=이동 (중드래그 항상 Pan)" />}
-                {tbOn("fit") && <ActBtn a="fit" label="Fit" title="화면 맞춤" />}
-                {tbOn("inv") && <ActBtn a="invert" label="Inv" title="반전" on={panes[activePane].invert} />}
-                {tbOn("rotL") && <ActBtn a="rotL" label="⟲90" title="좌회전" />}
-                {tbOn("rotR") && <ActBtn a="rotR" label="⟳90" title="우회전" />}
-                {tbOn("rot180") && <ActBtn a="rot180" label="⟳180" title="180도 회전" />}
-                {tbOn("flipH") && <ActBtn a="flipH" label="⇋" title="좌우반전" />}
-                {tbOn("flipV") && <ActBtn a="flipV" label="⇵" title="상하반전" />}
-                {tbOn("cine") && <ActBtn a="cine" label={cine ? "■" : "▶"} title={`시네 재생 — 간격 ${tyCineSec}초 (설정>뷰어에서 변경)`} on={cine} />}
-                {tbOn("cap") && <ActBtn a="capture" label="Cap" title="PNG 저장" />}
-                {tbOn("reset") && <ActBtn a="reset" label="Reset" title="초기화 (W/L·확대·필터 포함)" />}
-                {tbOn("sharpen") && <ActBtn a="sharpen" label="Shrp" title="Sharpen 필터 — 윤곽 선명화 (활성 페인 토글)" on={panes[activePane].fx === "sharpen"} />}
-                {tbOn("average") && <ActBtn a="average" label="Avg" title="Average 필터 — 부드럽게(블러, 활성 페인 토글)" on={panes[activePane].fx === "smooth"} />}
-                {tbOn("pseudo") && <ActBtn a="pseudo" label="Psd" title="Pseudo Color — 의사색 컬러맵 근사 (활성 페인 토글)" on={panes[activePane].fx === "pseudo"} />}
+                <ModeBtn k="select" label="Select" title={tr("선택 모드 — 주석 클릭 편집 / 빈 공간 드래그=녹색 점선 마퀴 다중선택 → Del 삭제")} />
+                {tbOn("zoom") && <ModeBtn k="zoom" label="Zoom" title={tr("좌드래그=확대 (우드래그 항상 Zoom)")} />}
+                {tbOn("pan") && <ModeBtn k="pan" label="Pan" title={tr("좌드래그=이동 (중드래그 항상 Pan)")} />}
+                {tbOn("fit") && <ActBtn a="fit" label="Fit" title={tr("화면 맞춤")} />}
+                {tbOn("inv") && <ActBtn a="invert" label="Inv" title={tr("반전")} on={panes[activePane].invert} />}
+                {tbOn("rotL") && <ActBtn a="rotL" label="⟲90" title={tr("좌회전")} />}
+                {tbOn("rotR") && <ActBtn a="rotR" label="⟳90" title={tr("우회전")} />}
+                {tbOn("rot180") && <ActBtn a="rot180" label="⟳180" title={tr("180도 회전")} />}
+                {tbOn("flipH") && <ActBtn a="flipH" label="⇋" title={tr("좌우반전")} />}
+                {tbOn("flipV") && <ActBtn a="flipV" label="⇵" title={tr("상하반전")} />}
+                {tbOn("cine") && <ActBtn a="cine" label={cine ? "■" : "▶"} title={`${tr("시네 재생 — 간격")} ${tyCineSec}${tr("초 (설정>뷰어에서 변경)")}`} on={cine} />}
+                {tbOn("cap") && <ActBtn a="capture" label="Cap" title={tr("PNG 저장")} />}
+                {tbOn("reset") && <ActBtn a="reset" label="Reset" title={tr("초기화 (W/L·확대·필터 포함)")} />}
+                {tbOn("sharpen") && <ActBtn a="sharpen" label="Shrp" title={tr("Sharpen 필터 — 윤곽 선명화 (활성 페인 토글)")} on={panes[activePane].fx === "sharpen"} />}
+                {tbOn("average") && <ActBtn a="average" label="Avg" title={tr("Average 필터 — 부드럽게(블러, 활성 페인 토글)")} on={panes[activePane].fx === "smooth"} />}
+                {tbOn("pseudo") && <ActBtn a="pseudo" label="Psd" title={tr("Pseudo Color — 의사색 컬러맵 근사 (활성 페인 토글)")} on={panes[activePane].fx === "pseudo"} />}
                 {tbOn("mag") && (
-                  <button title="확대경 — 마우스 위치를 따라다니는 3배 렌즈 (다시 누르면 해제)"
+                  <button title={tr("확대경 — 마우스 위치를 따라다니는 3배 렌즈 (다시 누르면 해제)")}
                           onClick={() => { recordUse("mag"); setMagOn((m) => { if (m) setMagPos(null); return !m; }); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: magOn ? "var(--accent)" : undefined }}>
@@ -4203,7 +4203,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               </>)}
               {k === "anno" && (<>
                 {TOOL_DEFS.filter(([tk]) => tbOn(tk)).map(([tk, label, title]) => (
-                  <button key={tk} title={title}
+                  <button key={tk} title={tr(title)}
                           onClick={() => { recordUse(tk); pickTool(tk); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: tool === tk ? "var(--accent)" : undefined }}>
@@ -4211,7 +4211,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   </button>
                 ))}
                 {tbOn("ref") && (
-                  <button title="Reference line — 활성 페인 평면을 다른 페인에 투영(scout)"
+                  <button title={tr("Reference line — 활성 페인 평면을 다른 페인에 투영(scout)")}
                           onClick={() => { recordUse("ref"); setRefOn((r) => !r); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: refOn ? "var(--accent)" : undefined }}>
@@ -4219,7 +4219,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   </button>
                 )}
                 {tbOn("cursor3d") && (
-                  <button title="3D Cursor — 클릭점을 다른 페인의 동일 3D 위치로 이동+십자 마커 (기하 정보 없으면 index 비율 근사)"
+                  <button title={tr("3D Cursor — 클릭점을 다른 페인의 동일 3D 위치로 이동+십자 마커 (기하 정보 없으면 index 비율 근사)")}
                           onClick={() => { recordUse("cursor3d"); setTool(tool === "cursor3d" ? null : "cursor3d"); setDraft(null); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: tool === "cursor3d" ? "var(--accent)" : undefined }}>
@@ -4227,61 +4227,61 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   </button>
                 )}
                 {tbOn("ctr") && (detail.modality === "CR" || detail.modality === "DX") && (
-                  <button title="AI 심흉비 자동계측 (S2) — 초안, 확정 아님" onClick={doCtr}
+                  <button title={tr("AI 심흉비 자동계측 (S2) — 초안, 확정 아님")} onClick={doCtr}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    color: "var(--ai)", fontWeight: 700 }}>
                     <TyInner id="ctr" label="CTR" />
                   </button>
                 )}
                 {tbOn("save") && (
-                  <button title="주석 서버 저장 (로밍)" onClick={saveAnnos}
+                  <button title={tr("주석 서버 저장 (로밍)")} onClick={saveAnnos}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="save" label="Save" />
                   </button>
                 )}
                 {tbOn("gsps") && (
-                  <button title="GSPS 내보내기 — 주석·W/L 표준 저장(Orthanc)" onClick={doGsps}
+                  <button title={tr("GSPS 내보내기 — 주석·W/L 표준 저장(Orthanc)")} onClick={doGsps}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="gsps" label="GSPS" />
                   </button>
                 )}
                 {tbOn("gsps") && (
-                  <button title="타사 PR(GSPS) 불러오기 — 외부 주석을 녹색으로 표시" onClick={async () => {
+                  <button title={tr("타사 PR(GSPS) 불러오기 — 외부 주석을 녹색으로 표시")} onClick={async () => {
                     try {
                       const r = await api.loadGsps(detail.id);
                       const ext = r.items.flatMap((it) => it.annotations.map((a) => ({ ...a, source: "external" as const })));
-                      if (ext.length === 0) { alert("불러올 GSPS(PR)가 없습니다"); return; }
+                      if (ext.length === 0) { alert(tr("불러올 GSPS(PR)가 없습니다")); return; }
                       // 기존 외부 주석 교체(중복 방지) + 사용자/AI 주석 유지
                       setAnnos((p) => [...p.filter((x) => x.source !== "external"), ...ext]);
                       schedHist();
-                    } catch (e) { alert(e instanceof Error ? e.message : "GSPS 불러오기 실패"); }
+                    } catch (e) { alert(e instanceof Error ? e.message : tr("GSPS 불러오기 실패")); }
                   }} style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="gsps" label="PR↓" />
                   </button>
                 )}
                 {tbOn("rect") && (
-                  <button title="HU ROI 통계 — 마지막 사각형/타원 ROI의 평균·최소·최대 HU" onClick={async () => {
+                  <button title={tr("HU ROI 통계 — 마지막 사각형/타원 ROI의 평균·최소·최대 HU")} onClick={async () => {
                     const roi = [...annos].reverse().find((a) => (a.kind === "rect" || a.kind === "ellipse") && a.sop_uid);
-                    if (!roi) { alert("먼저 사각형 또는 타원 ROI를 그리세요"); return; }
+                    if (!roi) { alert(tr("먼저 사각형 또는 타원 ROI를 그리세요")); return; }
                     try {
                       const s = await api.roiStats(detail.id, { sop_uid: roi.sop_uid, kind: roi.kind, points: roi.points });
                       if (s.error) { alert(s.error); return; }
-                      alert(`HU ROI 통계 (${s.count}px${s.area_mm2 ? `, ${s.area_mm2}mm²` : ""})\n평균 ${s.mean} · 최소 ${s.min} · 최대 ${s.max} · 표준편차 ${s.std} (${s.unit})`);
-                    } catch (e) { alert(e instanceof Error ? e.message : "ROI 통계 실패"); }
+                      alert(`${tr("HU ROI 통계")} (${s.count}px${s.area_mm2 ? `, ${s.area_mm2}mm²` : ""})\n${tr("평균")} ${s.mean} · ${tr("최소")} ${s.min} · ${tr("최대")} ${s.max} · ${tr("표준편차")} ${s.std} (${s.unit})`);
+                    } catch (e) { alert(e instanceof Error ? e.message : tr("ROI 통계 실패")); }
                   }} style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="rect" label="HU" />
                   </button>
                 )}
                 {tbOn("del") && (
-                  <button title="선택 주석 삭제(마퀴 다중선택 우선, 없으면 마지막 주석)"
+                  <button title={tr("선택 주석 삭제(마퀴 다중선택 우선, 없으면 마지막 주석)")}
                           onClick={() => { if (selAnnos) deleteSelAnnos(); else if (selAnno) deleteSelAnno(); else { setAnnos((p) => p.slice(0, -1)); schedHist(); } }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="del" label="Del" />
                   </button>
                 )}
                 {tbOn("clr") && (
-                  <button title="주석·셔터 전체 삭제 (In Viewer 🧹 동일 — 측정/주석/셔터 일괄)" onClick={() => {
-                    if (window.confirm(`주석 ${annos.length}건과 셔터를 모두 삭제할까요? (저장 전이면 복구 불가)`)) {
+                  <button title={tr("주석·셔터 전체 삭제 (In Viewer 🧹 동일 — 측정/주석/셔터 일괄)")} onClick={() => {
+                    if (window.confirm(`${tr("주석")} ${annos.length}${tr("건과 셔터를 모두 삭제할까요? (저장 전이면 복구 불가)")}`)) {
                       setAnnos([]);
                       setDraft(null);
                       setSelAnno(null);
@@ -4297,7 +4297,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               </>)}
               {k === "anatomy" && (<>
                 {ANATOMY_TOOL_DEFS.filter(([tk]) => tbOn(tk)).map(([tk, label, title]) => (
-                  <button key={tk} title={title}
+                  <button key={tk} title={tr(title)}
                           onClick={() => { recordUse(tk); pickTool(tk); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: tool === tk ? "var(--accent)" : undefined }}>
@@ -4307,7 +4307,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               </>)}
               {k === "px" && (<>
                 {PIXEL_TOOL_DEFS.filter(([tk]) => tbOn(tk)).map(([tk, label, title]) => (
-                  <button key={tk} title={title}
+                  <button key={tk} title={tr(title)}
                           onClick={() => { recordUse(tk); pickTool(tk); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: tool === tk ? "var(--accent)" : undefined }}>
@@ -4317,7 +4317,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               </>)}
               {k === "shut" && (<>
                 {SHUTTER_TOOL_DEFS.filter(([tk]) => tbOn(tk)).map(([tk, label, title]) => (
-                  <button key={tk} title={title}
+                  <button key={tk} title={tr(title)}
                           onClick={() => { recordUse(tk); pickTool(tk); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: tool === tk ? "var(--accent)" : undefined }}>
@@ -4326,18 +4326,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 ))}
               </>)}
               {k === "2d" && (<>
-                <button title="All — W/L 프리셋을 모든 페인(전체 이미지)에 적용 (UBPACS All)"
+                <button title={tr("All — W/L 프리셋을 모든 페인(전체 이미지)에 적용 (UBPACS All)")}
                         onClick={() => setWlAll((a) => !a)}
                         style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                  background: wlAll ? "var(--accent)" : undefined, fontWeight: 700 }}>
                   <TyInner id="all" label={`All${wlAll ? "●" : ""}`} />
                 </button>
                 {prefs.wl_presets.map((pr) => (
-                  <button key={pr.key} title={`W/L ${pr.q || "기본"} (Presetting — 설정>뷰어에서 편집)`}
+                  <button key={pr.key} title={`W/L ${pr.q || tr("기본")} (${tr("Presetting — 설정>뷰어에서 편집")})`}
                           onClick={() => applyWl(pr.q)}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: panes[activePane].wl === pr.q ? "var(--accent)" : undefined }}>
-                    <TyInner id="wl" label={pr.label} />
+                    <TyInner id="wl" label={tr(pr.label)} />
                   </button>
                 ))}
               </>)}
@@ -4349,43 +4349,43 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   </button>
                 )}
                 {tbOn("3d") && (
-                  <button title="내장 MPR/MIP — 현재 검사를 Axial/Sagittal/Coronal+MIP로 (새 창 없음)"
+                  <button title={tr("내장 MPR/MIP — 현재 검사를 Axial/Sagittal/Coronal+MIP로 (새 창 없음)")}
                           onClick={() => setMprOn((m) => !m)}
                           style={{ padding: "6px 4px", fontSize: 12, fontWeight: 700, width: paletteHoriz ? 60 : "100%",
                                    background: mprOn ? "var(--accent)" : undefined }}>
                     <TyInner id="mpr" label={`MPR${mprOn ? "●" : ""}`} />
                   </button>
                 )}
-                {tbOn("rfsh") && <ActBtn a="rfsh" label="Rfsh" title="Refresh Exam — 활성 검사 시리즈 재조회" />}
-                {tbOn("comb") && <ActBtn a="comb" label="Comb" on={isCombined(panes[activePane])} title="Combine all — 현재 검사의 전체 영상 시리즈를 한 시리즈처럼 결합해 활성 페인에 연속 스크롤(다시 누르면 해제·원복). 썸네일을 페인에 끌어다 놓으면 Open/Combine/Combine all 선택" />}
-                {tbOn("print") && <ActBtn a="print" label="Print" title="인쇄 — 현재 화면을 브라우저 인쇄(window.print)" />}
-                {tbOn("calib") && <ActBtn a="calib" label="Calib" title="Calibrate — 현재 이미지 Pixel Spacing 정보 안내" />}
+                {tbOn("rfsh") && <ActBtn a="rfsh" label="Rfsh" title={tr("Refresh Exam — 활성 검사 시리즈 재조회")} />}
+                {tbOn("comb") && <ActBtn a="comb" label="Comb" on={isCombined(panes[activePane])} title={tr("Combine all — 현재 검사의 전체 영상 시리즈를 한 시리즈처럼 결합해 활성 페인에 연속 스크롤(다시 누르면 해제·원복). 썸네일을 페인에 끌어다 놓으면 Open/Combine/Combine all 선택")} />}
+                {tbOn("print") && <ActBtn a="print" label="Print" title={tr("인쇄 — 현재 화면을 브라우저 인쇄(window.print)")} />}
+                {tbOn("calib") && <ActBtn a="calib" label="Calib" title={tr("Calibrate — 현재 이미지 Pixel Spacing 정보 안내")} />}
                 {tbOn("key2d") && (
-                  <button title="Key — 현재 이미지를 키이미지로 등록/해제 (워크리스트 🔑·Key Image View 연동)"
+                  <button title={tr("Key — 현재 이미지를 키이미지로 등록/해제 (워크리스트 🔑·Key Image View 연동)")}
                           onClick={() => { recordUse("key2d"); toggleKeyImage(); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="key2d" label="Key" />
                   </button>
                 )}
                 {tbOn("media") && (
-                  <button title="Media — 로컬 이미지(JPG/PNG/BMP)·동영상(AVI/MP4)을 활성 페인에 표시/재생"
+                  <button title={tr("Media — 로컬 이미지(JPG/PNG/BMP)·동영상(AVI/MP4)을 활성 페인에 표시/재생")}
                           onClick={() => { recordUse("media"); mediaInputRef.current?.click(); }}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="media" label="Media" />
                   </button>
                 )}
                 {tbOn("dict") && (
-                  <button title={`음성 판독(STT) — 녹음/정지. 엔진: ${dict.engine === "browser" ? "브라우저" : dict.engine === "openai_api" ? "OpenAI" : "Whisper 로컬"} (설정>AI 기능). 전사 텍스트는 판독문에 삽입`}
+                  <button title={`${tr("음성 판독(STT) — 녹음/정지. 엔진:")} ${dict.engine === "browser" ? tr("브라우저") : dict.engine === "openai_api" ? "OpenAI" : tr("Whisper 로컬")} ${tr("(설정>AI 기능). 전사 텍스트는 판독문에 삽입")}`}
                           onClick={() => { recordUse("dict"); toggleDictation(); }}
                           disabled={dict.busy}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%",
                                    background: dict.recording ? "var(--stat-emergency)" : dict.busy ? "var(--accent)" : undefined,
                                    color: dict.recording ? "#fff" : undefined }}>
-                    <TyInner id="dict" label={dict.busy ? "전사…" : dict.recording ? "Rec●" : "Rec"} />
+                    <TyInner id="dict" label={dict.busy ? tr("전사…") : dict.recording ? "Rec●" : "Rec"} />
                   </button>
                 )}
                 {tbOn("dict") && (
-                  <button title="Play Dictation — 이 검사의 녹음 재생"
+                  <button title={tr("Play Dictation — 이 검사의 녹음 재생")}
                           onClick={playDictation}
                           style={{ padding: "6px 0", fontSize: 12, width: paletteHoriz ? 60 : "100%" }}>
                     <TyInner id="dictplay" label="Play" />
@@ -4472,9 +4472,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   seriesKeyRef.current = {
     sel: (n: number) => {
       const sN = thumbSeries[n];
-      if (!sN) { setStatus(`Series ${n + 1} 없음 (총 ${thumbSeries.length}개)`); return; }
+      if (!sN) { setStatus(`Series ${n + 1} ${tr("없음")} (${tr("총")} ${thumbSeries.length}${tr("개")})`); return; }
       patch(activePane, { ...initPane(uidOfSeries(sN.series_uid)), series: sN, index: 0 });
-      setStatus(`Series ${n + 1} — S${sN.series_number} ${sN.series_desc || ""} (${sN.instances.length}장)`);
+      setStatus(`Series ${n + 1} — S${sN.series_number} ${sN.series_desc || ""} (${sN.instances.length}${tr("장")})`);
     },
     step: (d: 1 | -1) => {
       // 레이아웃 단위 그룹 이동 — 1×2 면 2개, 2×2 면 4개씩 다음/이전 시리즈 묶음을 페인들에 표시
@@ -4494,7 +4494,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         return next;
       });
       const last = Math.min(base + vis.length, thumbSeries.length);
-      setStatus(`Series ${base + 1}${vis.length > 1 ? `~${last}` : ""} 표시 (↑↓ = ${vis.length}개씩 이동)`);
+      setStatus(`Series ${base + 1}${vis.length > 1 ? `~${last}` : ""} ${tr("표시")} (↑↓ = ${vis.length}${tr("개씩 이동")})`);
     },
   };
   // 단축키 디스패처 — 렌더마다 최신 클로저로 갱신(설정>단축키 재바인딩 대상 전체)
@@ -4510,7 +4510,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       case "fit": act("fit"); break;
       case "crosslink": setXlink((x) => ({ ...x, crosslink: !x.crosslink })); break;
       case "spatial":
-        setSpatialSync((s0) => { setStatus(!s0 ? "Stack 동기: Spatial(DICOM 좌표 정합)" : "Stack 동기: Index(1:1)"); return !s0; });
+        setSpatialSync((s0) => { setStatus(!s0 ? tr("Stack 동기: Spatial(DICOM 좌표 정합)") : tr("Stack 동기: Index(1:1)")); return !s0; });
         break;
       case "all_panes": setSelPanes(new Set(PANE_IDS.slice(0, LAYOUTS[layout].count))); break;
       case "del_anno":
@@ -4574,9 +4574,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           clearInterval(iv);
           setQrCap(null);
           void refreshExamRef.current?.();
-          setStatus(`휴대폰 사진 ${st.uploaded}장 — 새 시리즈로 등록됨 (썸네일에서 확인)`);
+          setStatus(`${tr("휴대폰 사진")} ${st.uploaded}${tr("장 — 새 시리즈로 등록됨 (썸네일에서 확인)")}`);
         }
-      }).catch(() => { clearInterval(iv); setQrCap(null); setStatus("촬영 세션 만료"); });
+      }).catch(() => { clearInterval(iv); setQrCap(null); setStatus(tr("촬영 세션 만료")); });
     }, 2500);
     return () => clearInterval(iv);
   }, [qrCap]);
@@ -4588,7 +4588,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setPrefs((p) => ({ ...p, [key]: side }));
     api.getSetting("viewer.prefs").then((r) =>
       api.putSetting("viewer.prefs", { ...r.value, [key]: side }, "user")).catch(() => {});
-    setStatus(`${kind === "palette" ? "툴 팔레트" : "썸네일"} 위치 → ${side === "left" ? "왼쪽" : side === "right" ? "오른쪽" : side === "top" ? "상단" : "하단"} (계정 저장)`);
+    setStatus(`${kind === "palette" ? tr("툴 팔레트") : tr("썸네일")} ${tr("위치")} → ${side === "left" ? tr("왼쪽") : side === "right" ? tr("오른쪽") : side === "top" ? tr("상단") : tr("하단")} ${tr("(계정 저장)")}`);
   };
   useEffect(() => {
     const up = (e: PointerEvent) => {
@@ -4631,7 +4631,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                                            : { borderRight: "1px solid var(--border)" }) }),
     }}>
       {/* 위치 그립 — 드래그해서 화면 가장자리(좌/우/상/하)에 도킹 */}
-      <div title="드래그로 썸네일 위치 이동 — 화면 왼쪽/오른쪽/위/아래로 끌어 놓으세요 (설정>뷰어에서도 지정 가능)"
+      <div title={tr("드래그로 썸네일 위치 이동 — 화면 왼쪽/오른쪽/위/아래로 끌어 놓으세요 (설정>뷰어에서도 지정 가능)")}
            onPointerDown={(e) => { dockDragRef.current = { kind: "thumb", sx: e.clientX, sy: e.clientY }; }}
            style={{ cursor: "grab", textAlign: "center", fontSize: 10, color: "var(--text-secondary)",
                     padding: "1px 4px", flexShrink: 0, userSelect: "none",
@@ -4639,7 +4639,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                     background: "var(--bg-panel)" }}>⠿</div>
       {/* In-View 와 동일 위치 — 썸네일 열 맨 위 Combine 토글(결합 시 파란 강조 + ●) */}
       <button onClick={() => act("comb")}
-              title="Combine all — 현재 검사의 전체 영상 시리즈를 한 시리즈처럼 결합해 활성 페인에 연속 스크롤(다시 누르면 해제·원복). 썸네일을 페인에 끌어다 놓으면 Open/Combine/Combine all 선택"
+              title={tr("Combine all — 현재 검사의 전체 영상 시리즈를 한 시리즈처럼 결합해 활성 페인에 연속 스크롤(다시 누르면 해제·원복). 썸네일을 페인에 끌어다 놓으면 Open/Combine/Combine all 선택")}
               style={{ fontSize: 10.5, flexShrink: 0,
                        // 썸네일 스크롤과 무관하게 항상 상단(세로)/좌측(가로) 고정
                        position: "sticky", ...(thumbHoriz ? { left: 0 } : { top: 0 }), zIndex: 3,
@@ -4680,14 +4680,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                  // 3D(MPR/MIP) 모드 — 클릭한 시리즈로 볼륨 재구성(Axial/Sagittal/Coronal 소스 교체)
                  if (mprOn) {
                    setMprSeries(s.series_uid);
-                   setStatus(`3D 볼륨 시리즈 전환 — S${s.series_number} ${s.series_desc || s.modality} (${s.instances.length}장)`);
+                   setStatus(`${tr("3D 볼륨 시리즈 전환")} — S${s.series_number} ${s.series_desc || s.modality} (${s.instances.length}${tr("장")})`);
                    return;
                  }
                  // 클릭 = 활성 페인에 이 시리즈 표시(교체) — 이미지 목록 펼침은 더블클릭
                  patch(activePane, { ...initPane(uidOfSeries(s.series_uid)), series: s, index: Math.floor(s.instances.length / 2) });
                }}
                onDoubleClick={() => setSelSeries(selSeries === s.series_uid ? null : s.series_uid)}
-               title={`${s.series_desc || s.modality}\n· 클릭: 활성 페인에 표시 · 더블클릭: 이미지 목록 펼침/접기\n· 드래그 → 원하는 페인에 놓기 (Ctrl=페인 선택 토글 · Shift=범위 선택)`}
+               title={`${s.series_desc || s.modality}\n${tr("· 클릭: 활성 페인에 표시 · 더블클릭: 이미지 목록 펼침/접기")}\n${tr("· 드래그 → 원하는 페인에 놓기 (Ctrl=페인 선택 토글 · Shift=범위 선택)")}`}
                style={{ border: selSeries === s.series_uid ? "2px solid var(--accent)"
                           : s.series_uid === curOriginUid ? "2px solid #4ade80"   // 활성 페인 표시 중
                           : shownOriginUids.has(s.series_uid) ? "2px solid #f97316"   // 다른 페인 표시 중
@@ -4699,7 +4699,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             )}
             {/* 키이미지 포함 시리즈 — 우상단 🔑 배지(뷰어 페인 KEY 마크와 동기) */}
             {(() => { const kn = s.instances.filter((i2) => keyMarks.has(i2.sop_uid)).length; return kn > 0 && (
-              <div title={`키 이미지 ${kn}장`}
+              <div title={`${tr("키 이미지")} ${kn}${tr("장")}`}
                    style={{ position: "absolute", top: 2, right: 2, padding: "0 4px", borderRadius: 6,
                             background: "rgba(250,204,21,0.94)", color: "#1a1a1a", fontSize: 8.5, fontWeight: 800 }}>
                 🔑{kn > 1 ? kn : ""}
@@ -4708,7 +4708,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, fontSize: 9,
                           background: "rgba(0,0,0,0.65)", padding: "1px 3px" }}>
               {seriesTag(s) && <div style={{ color: "#4ade80", fontWeight: 700, fontSize: 8.5, lineHeight: 1.1 }}>{seriesTag(s)}</div>}
-              S{s.series_number}·{s.instances.length}장
+              S{s.series_number}·{s.instances.length}{tr("장")}
             </div>
           </div>
           {selSeries === s.series_uid && (
@@ -4755,50 +4755,50 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const pane = panes[pid];
     const presets = prefs.wl_presets?.length ? prefs.wl_presets : WL_PRESETS;
     return [
-      { label: "좌드래그 도구", disabled: true },
+      { label: tr("좌드래그 도구"), disabled: true },
       { label: "  Zoom", checked: mouseMode === "zoom", onClick: () => setMouseMode("zoom") },
       { label: "  Pan", checked: mouseMode === "pan", onClick: () => setMouseMode("pan") },
       { label: "  W-L", checked: mouseMode === "wl", onClick: () => setMouseMode("wl") },
-      { label: "우드래그 도구", icon: "▸", children: [
+      { label: tr("우드래그 도구"), icon: "▸", children: [
         { label: "W/L", checked: rdragTool === "wl", onClick: () => setRdrag("wl") },
         { label: "Zoom", checked: rdragTool === "zoom", onClick: () => setRdrag("zoom") },
         { label: "Pan", checked: rdragTool === "pan", onClick: () => setRdrag("pan") },
       ] },
       { kind: "sep" },
-      { label: "W/L 프리셋", icon: "▸", children: presets.map((p) => ({
-        label: p.label, onClick: () => applyWl(p.q),
-      })).concat([{ label: "반전(Invert)", onClick: () => act("invert") }]) },
-      { label: "방향", icon: "▸", children: [
-        { label: "좌 90°", onClick: () => act("rotL") },
-        { label: "우 90°", onClick: () => act("rotR") },
+      { label: tr("W/L 프리셋"), icon: "▸", children: presets.map((p) => ({
+        label: tr(p.label), onClick: () => applyWl(p.q),
+      })).concat([{ label: tr("반전(Invert)"), onClick: () => act("invert") }]) },
+      { label: tr("방향"), icon: "▸", children: [
+        { label: tr("좌 90°"), onClick: () => act("rotL") },
+        { label: tr("우 90°"), onClick: () => act("rotR") },
         { label: "180°", onClick: () => act("rot180") },
-        { label: "좌우 반전", onClick: () => act("flipH") },
-        { label: "상하 반전", onClick: () => act("flipV") },
+        { label: tr("좌우 반전"), onClick: () => act("flipH") },
+        { label: tr("상하 반전"), onClick: () => act("flipV") },
       ] },
-      { label: "보기", icon: "▸", children: [
+      { label: tr("보기"), icon: "▸", children: [
         { label: "Fit", onClick: () => act("fit") },
         { label: "1:1 (Reset Zoom)", onClick: () => updMany(targetsOf(pid), () => ({ zoom: 1, tx: 0, ty: 0 })) },
-        { label: "Reset (전체)", onClick: () => act("reset") },
-        { label: maximized === pid ? "최대화 해제" : "최대화", onClick: () => setMaximized((m) => (m === pid ? null : pid)) },
+        { label: tr("Reset (전체)"), onClick: () => act("reset") },
+        { label: maximized === pid ? tr("최대화 해제") : tr("최대화"), onClick: () => setMaximized((m) => (m === pid ? null : pid)) },
       ] },
       { kind: "sep" },
-      { label: "Key Image 지정/해제", onClick: () => { setActivePane(pid); toggleKeyImage(); } },
-      { label: "주석 저장", onClick: () => void saveAnnos() },
+      { label: tr("Key Image 지정/해제"), onClick: () => { setActivePane(pid); toggleKeyImage(); } },
+      { label: tr("주석 저장"), onClick: () => void saveAnnos() },
       { kind: "sep" },
       selAnnos
-        ? { label: `선택 ${selAnnos.length}개 주석 지우기`, onClick: () => deleteSelAnnos() }
-        : { label: selAnno ? "선택 주석 지우기" : "마지막 주석 지우기",
+        ? { label: `${tr("선택")} ${selAnnos.length}${tr("개 주석 지우기")}`, onClick: () => deleteSelAnnos() }
+        : { label: selAnno ? tr("선택 주석 지우기") : tr("마지막 주석 지우기"),
             onClick: () => { if (selAnno) deleteSelAnno(); else { setAnnos((pp) => pp.slice(0, -1)); schedHist(); } } },
-      { label: "셔터 해제", onClick: () => patch(pid, { shutter: null }) },
-      { label: "주석 전체 지우기", onClick: () => {
-        if (!window.confirm(`주석 ${annos.length}건과 셔터를 모두 삭제할까요? (저장 전이면 복구 불가)`)) return;
+      { label: tr("셔터 해제"), onClick: () => patch(pid, { shutter: null }) },
+      { label: tr("주석 전체 지우기"), onClick: () => {
+        if (!window.confirm(`${tr("주석")} ${annos.length}${tr("건과 셔터를 모두 삭제할까요? (저장 전이면 복구 불가)")}`)) return;
         setAnnos([]); setDraft(null); setSelAnno(null); setSelAnnos(null); setMarquee(null); setCross3d({});
         setPanes((prev) => Object.fromEntries(Object.entries(prev).map(([k, q]) => [k, { ...q, shutter: null }])));
         schedHist();
       } },
       { kind: "sep" },
-      { label: "마우스 조작", icon: "▸", children: IN_MOUSE_OPS.map((m) => ({
-        label: `${m.key} · ${m.action}`, disabled: true,
+      { label: tr("마우스 조작"), icon: "▸", children: IN_MOUSE_OPS.map((m) => ({
+        label: `${m.key} · ${tr(m.action)}`, disabled: true,
       })) },
       { label: pane?.series ? `— ${pane.series.modality || ""} ${pane.series.series_desc || ""}`.slice(0, 40) : "", disabled: true },
     ];
@@ -4833,11 +4833,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                           width: 190, background: "#0b1220", border: "1px solid #334155", borderRadius: 8,
                           boxShadow: "0 6px 20px rgba(0,0,0,0.6)", overflow: "hidden" }}>
               <div style={{ padding: "5px 12px", fontSize: 10.5, color: "#7dd3fc", borderBottom: "1px solid #1e293b" }}>
-                시리즈 드롭 — 동작 선택
+                {tr("시리즈 드롭 — 동작 선택")}
               </div>
-              {btn("Open", "이 페인에 표시(교체)", () => dropSeriesToPane(c.pid, c.uid), true)}
-              {btn("Combine", "현재 시리즈에 이어붙임", () => combineInto(c.pid, c.uid))}
-              {btn("Combine all", "검사 전체 시리즈 결합", () => combineAllInto(c.pid))}
+              {btn("Open", tr("이 페인에 표시(교체)"), () => dropSeriesToPane(c.pid, c.uid), true)}
+              {btn("Combine", tr("현재 시리즈에 이어붙임"), () => combineInto(c.pid, c.uid))}
+              {btn("Combine all", tr("검사 전체 시리즈 결합"), () => combineAllInto(c.pid))}
             </div>
           </div>
         );
@@ -4869,7 +4869,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                      void loadIntoActive(t.id);
                      postStudySync(t.id, "viewer");  // Worklist·Reading 선택 동기
                    }}
-                   title={t.id === detail.id ? "주 검사" : "클릭=활성 페인에 표시"}
+                   title={t.id === detail.id ? tr("주 검사") : tr("클릭=활성 페인에 표시")}
                    style={{
                      display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
                      background: isActive ? "var(--accent)" : "var(--bg-elevated)",
@@ -4878,7 +4878,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                      fontWeight: 600, cursor: "pointer", border: "1px solid var(--border)", borderBottom: "none",
                    }}>
                 {t.label}
-                <span title={t.id === detail.id ? "주 검사 닫기 = 뷰어 닫기" : "이 Exam 닫기"}
+                <span title={t.id === detail.id ? tr("주 검사 닫기 = 뷰어 닫기") : tr("이 Exam 닫기")}
                       onClick={(e) => {
                         e.stopPropagation();
                         // 주 검사 탭 ✕ = 창이 통째로 닫힌다 → 전 모니터 규약(exitViewer)
@@ -4895,8 +4895,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {/* 협진 — 이 검사를 다른 사용자와 실시간으로 함께 본다(같은 병원·타 병원 모두).
             세션 중에는 우측 패널이 참가자·화상·채팅으로 바뀌므로 토글은 세션이 없을 때만 쓴다. */}
         <button title={cl.session
-                  ? (cl.isHost ? "협진 진행 중 (Master) — 우측 패널에서 관리" : "협진 참여 중 (Slave)")
-                  : "협진 — 친구를 초대해 이 검사를 함께 봅니다"}
+                  ? (cl.isHost ? tr("협진 진행 중 (Master) — 우측 패널에서 관리") : tr("협진 참여 중 (Slave)"))
+                  : tr("협진 — 친구를 초대해 이 검사를 함께 봅니다")}
                 onClick={() => { if (!cl.session) setCollabDockOpen((v) => !v); }}
                 disabled={!!cl.session}
                 style={{ padding: "3px 10px", marginRight: 4, fontWeight: 700,
@@ -4908,7 +4908,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           {tr("collab")}{cl.session ? ` · ${cl.session.participants.filter((p) => p.state === "joined").length}` : ""}
         </button>
         {/* 3D 뷰어(MPR/MIP) — 내장 Axial/Sagittal/Coronal + MIP 로 뷰포트 전환(재클릭 시 2D 복귀) */}
-        <button title="3D 뷰어 — MPR(Axial/Sagittal/Coronal) + MIP 재구성 (CT/MR 볼륨). 다시 누르면 2D 복귀"
+        <button title={tr("3D 뷰어 — MPR(Axial/Sagittal/Coronal) + MIP 재구성 (CT/MR 볼륨). 다시 누르면 2D 복귀")}
                 onClick={() => setMprOn((m) => !m)}
                 style={{ fontWeight: 800, padding: "3px 10px", marginRight: 4,
                          ...(mprOn ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : {}) }}>
@@ -4917,20 +4917,20 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {/* TY-3(1): 작업 히스토리 — ◀ Undo · ◯ 초기 상태 · ▶ Redo (시각조정+주석 스냅샷 최대 50) */}
         {tbOn("hist") && (
           <span style={{ display: "flex", gap: 2, alignItems: "center" }} data-hist-tick={histTick}>
-            <button title="Undo — 이전 작업 상태로 (시각조정·주석 스냅샷)" onClick={() => histGo(-1)}
+            <button title={tr("Undo — 이전 작업 상태로 (시각조정·주석 스냅샷)")} onClick={() => histGo(-1)}
                     disabled={histIdx.current <= 0} style={{ padding: "3px 9px", fontWeight: 700 }}>◀</button>
-            <button title="초기 상태로 되돌리기 — 모든 조정/주석을 처음으로" onClick={histReset}
+            <button title={tr("초기 상태로 되돌리기 — 모든 조정/주석을 처음으로")} onClick={histReset}
                     disabled={histIdx.current < 0}
                     style={{ width: 26, height: 24, borderRadius: "50%", padding: 0,
                              display: "grid", placeItems: "center", fontSize: 11 }}>◯</button>
-            <button title="Redo — 다음 작업 상태로" onClick={() => histGo(1)}
+            <button title={tr("Redo — 다음 작업 상태로")} onClick={() => histGo(1)}
                     disabled={histIdx.current >= histRef.current.length - 1}
                     style={{ padding: "3px 9px", fontWeight: 700 }}>▶</button>
           </span>
         )}
         {/* TY-3(9): Compare — 같은 환자 과거검사 다중 선택 비교 (Related [+Add] 와 별개 진입점) */}
         {tbOn("cmp") && prefs.compare?.enabled !== false && (
-          <button title="Compare — 같은 환자의 과거검사를 골라 나란히 비교 (동기 스크롤 ON)"
+          <button title={tr("Compare — 같은 환자의 과거검사를 골라 나란히 비교 (동기 스크롤 ON)")}
                   onClick={openCompareModal}
                   style={{ fontWeight: 700, padding: "3px 8px" }}>
             <ToolIconTy id="cmp" size={15} flat={!tyIcon3d} />
@@ -4950,13 +4950,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                  patch(activePane, { media: { url: URL.createObjectURL(f), kind, name: f.name } });
                  e.target.value = "";
                }} />
-        <button title="휴대폰 촬영 — QR 을 찍으면 카메라가 열리고, 업로드한 사진이 이 검사의 새 시리즈로 등록됩니다"
+        <button title={tr("휴대폰 촬영 — QR 을 찍으면 카메라가 열리고, 업로드한 사진이 이 검사의 새 시리즈로 등록됩니다")}
                 onClick={() => { void (async () => {
                   try { setQrCap(await api.mobileCapture(detail.id, window.location.origin)); }
-                  catch { setStatus("QR 세션 생성 실패"); }
+                  catch { setStatus(tr("QR 세션 생성 실패")); }
                 })(); }}>📱</button>
-        <button onClick={() => setSettingsOpen(true)} title="설정 — 뷰어에서 바로 Setting 진입">Settings</button>
-        <button title="Reading — 전용 판독 창(새 페이지) 열기 · 모니터 배치는 Setting>모니터"
+        <button onClick={() => setSettingsOpen(true)} title={tr("설정 — 뷰어에서 바로 Setting 진입")}>Settings</button>
+        <button title={tr("Reading — 전용 판독 창(새 페이지) 열기 · 모니터 배치는 Setting>모니터")}
                 onClick={() => {
                   const rm = prefs.monitor?.report;
                   void screenFeatures(rm != null ? [rm] : null, "width=440,height=1020").then((features) => {
@@ -4968,14 +4968,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 }}>
           Reading
         </button>
-        <button onClick={toggleOverlay} title="오버레이 표시 토글 (T+Del) · 글자 크기는 T+마우스스크롤 — 계정 저장">
+        <button onClick={toggleOverlay} title={tr("오버레이 표시 토글 (T+Del) · 글자 크기는 T+마우스스크롤 — 계정 저장")}>
           {overlayOn ? "INFO ●" : "INFO ○"}
         </button>
         <button onClick={closeAllTabs} className="primary"
-                title={`All Close — 모든 Exam 탭을 닫고 뷰어 종료. 저장 동작: ${
-                  prefs.close_mode === "ask" ? "항상 묻기"
-                  : prefs.close_mode === "save_current" ? "현재 화면 저장"
-                  : prefs.close_mode === "save_all" ? "전체 저장" : "저장 안 함"} (Setting>뷰어)`}
+                title={`${tr("All Close — 모든 Exam 탭을 닫고 뷰어 종료. 저장 동작:")} ${
+                  prefs.close_mode === "ask" ? tr("항상 묻기")
+                  : prefs.close_mode === "save_current" ? tr("현재 화면 저장")
+                  : prefs.close_mode === "save_all" ? tr("전체 저장") : tr("저장 안 함")} (Setting>${tr("뷰어")})`}
                 style={{ fontWeight: 700 }}>
           All Close ✕
         </button>
@@ -4987,7 +4987,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)",
         fontSize: 11, color: "var(--text-secondary)", flexShrink: 0,
       }}>
-        <TitleMenu id="opened" icon="▤" title="Opened Study List — 열린 검사 전환 · 항목 ✕=그 Exam 탭만 닫기"
+        <TitleMenu id="opened" icon="▤" title={tr("Opened Study List — 열린 검사 전환 · 항목 ✕=그 Exam 탭만 닫기")}
                    menu={menu} setMenu={setMenu}
                    items={openTabs.map((t) => ({
                      label: t.label,
@@ -4997,7 +4997,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                      // Opened 목록의 ✕ 도 주 검사면 창이 닫힌다 → 같은 규약
                      onClose: () => { if (t.id === detail.id) exitViewer("last_tab"); else closeTab(t.id); },
                    }))} />
-        <TitleMenu id="related" icon="🗂" title="Related Study List — Open=활성 페인 비교 · +Add=현재 유지+중첩 로드"
+        <TitleMenu id="related" icon="🗂" title={tr("Related Study List — Open=활성 페인 비교 · +Add=현재 유지+중첩 로드")}
                    menu={menu} setMenu={setMenu}
                    items={detail.related_exams.map((e) => ({
                      label: `${e.modality} · ${e.study_date} · ${e.study_desc}`,
@@ -5005,13 +5005,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                      chip: STAT_COLOR[e.status] ?? "var(--stat-received)",
                      onClick: () => void loadPrior(e.id),
                      actions: [
-                       { label: "Open", title: "활성 페인에 비교 로드 (1x1이면 자동 1x2)", onClick: () => void loadPrior(e.id) },
-                       { label: "+Add", title: "현재 화면 유지 + 이 검사를 중첩 로드(Stack View)", onClick: () => void loadStack(e.id) },
+                       { label: "Open", title: tr("활성 페인에 비교 로드 (1x1이면 자동 1x2)"), onClick: () => void loadPrior(e.id) },
+                       { label: "+Add", title: tr("현재 화면 유지 + 이 검사를 중첩 로드(Stack View)"), onClick: () => void loadStack(e.id) },
                      ],
                    }))} />
-        <TitleMenu id="series" icon="≣" title="Open Series — 시리즈 전환 (●=현재 시리즈)" menu={menu} setMenu={setMenu}
+        <TitleMenu id="series" icon="≣" title={tr("Open Series — 시리즈 전환 (●=현재 시리즈)")} menu={menu} setMenu={setMenu}
                    items={thumbSeries.map((s) => ({
-                     label: `S${s.series_number} ${s.series_desc || s.modality} (${s.instances.length}장)`,
+                     label: `S${s.series_number} ${s.series_desc || s.modality} (${s.instances.length}${tr("장")})`,
                      active: panes[activePane].series?.series_uid === s.series_uid,
                      onClick: () => patch(activePane, {
                        ...initPane(uidOfSeries(s.series_uid)), series: s, index: Math.floor(s.instances.length / 2),
@@ -5053,7 +5053,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
              상태를 만들지 않기 위해서다(mgSeries 가 mgShared·mgFitFor·mgTiles 를 함께 게이트한다). */}
         {(isMg(detail.modality) || Object.values(panes).some(mgSeries)) && (
           <span style={{ display: "flex", alignItems: "center", gap: 6, marginRight: 14, whiteSpace: "nowrap" }}>
-            <label title="2D-MG — 유방 사이 빈 공간(공기)을 잘라내고 흉벽을 바깥에 붙여 배치. 해제하면 원본 그대로"
+            <label title={tr("2D-MG — 유방 사이 빈 공간(공기)을 잘라내고 흉벽을 바깥에 붙여 배치. 해제하면 원본 그대로")}
                    style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5,
                             color: "#f0abfc", fontWeight: 700, cursor: "pointer" }}>
               <input type="checkbox" checked={mgOn} onChange={(e) => setMgOn(e.target.checked)} />2D-MG
@@ -5063,8 +5063,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                  (내부적으론 적용됐는데) 표시가 1×1 로 "되돌아가는" 것처럼 보였다. */}
             <select value={mgCfg.series_layout ? layout : `${imgLay.r}x${imgLay.c}`}
                     title={mgCfg.series_layout
-                      ? "MG 배치(Series 분할) — 뷰 하나당 페인 하나(계측·W/L 이 뷰별로 독립)"
-                      : "MG 배치(Image 분할) — 페인 하나에 4뷰 타일. 계측이 필요하면 설정에서 Series Layout 체크"}
+                      ? tr("MG 배치(Series 분할) — 뷰 하나당 페인 하나(계측·W/L 이 뷰별로 독립)")
+                      : tr("MG 배치(Image 분할) — 페인 하나에 4뷰 타일. 계측이 필요하면 설정에서 Series Layout 체크")}
                     onChange={(e) => mgHangTo(e.target.value)}
                     style={{ fontSize: 11, padding: "0 2px" }}>
               {MG_LAYOUTS.map((l) => <option key={l} value={l}>{l.replace("x", "×")}</option>)}
@@ -5083,11 +5083,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           const XB: React.CSSProperties = { display: "flex", alignItems: "center", gap: 4, fontSize: 11.5,
                                             whiteSpace: "nowrap", cursor: "pointer" };
           const SAINT_X: { key: keyof XlinkState; label: string; title: string; sub?: boolean }[] = [
-            { key: "crosslink", label: "Crosslink", title: "Crosslink — 페인 간 연동 마스터" },
-            { key: "auto_sync", label: "Auto Sync", title: "같은 검사 페인끼리 스크롤 동기", sub: true },
-            { key: "sync_other", label: "Sync With Other Exams", title: "다른 검사(과거검사 포함) 페인까지 스크롤 동기", sub: true },
-            { key: "scout", label: "Scout Line", title: "Scout Line — 활성 페인 현재 이미지의 교차선을 다른 페인에 표시" },
-            { key: "all_lines", label: "All Lines", title: "All Lines — 기준 뷰와 같은 축의 전체 교차선(현재 이미지는 색이 다르다)" },
+            { key: "crosslink", label: "Crosslink", title: tr("Crosslink — 페인 간 연동 마스터") },
+            { key: "auto_sync", label: "Auto Sync", title: tr("같은 검사 페인끼리 스크롤 동기"), sub: true },
+            { key: "sync_other", label: "Sync With Other Exams", title: tr("다른 검사(과거검사 포함) 페인까지 스크롤 동기"), sub: true },
+            { key: "scout", label: "Scout Line", title: tr("Scout Line — 활성 페인 현재 이미지의 교차선을 다른 페인에 표시") },
+            { key: "all_lines", label: "All Lines", title: tr("All Lines — 기준 뷰와 같은 축의 전체 교차선(현재 이미지는 색이 다르다)") },
           ];
           return (
             <span style={{ display: "flex", alignItems: "center", gap: 14, marginRight: 16 }}>
@@ -5102,11 +5102,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             </span>
           );
         })()}
-        <span>Series {LAYOUTS[layout].rows}×{LAYOUTS[layout].cols} · Image {(panes[activePane]?.il ?? { r: 1, c: 1 }).r}×{(panes[activePane]?.il ?? { r: 1, c: 1 }).c} (활성 페인)</span>
+        <span>Series {LAYOUTS[layout].rows}×{LAYOUTS[layout].cols} · Image {(panes[activePane]?.il ?? { r: 1, c: 1 }).r}×{(panes[activePane]?.il ?? { r: 1, c: 1 }).c} ({tr("활성 페인")})</span>
         {/* 시리즈가 분할보다 많을 때만 — Shift+휠로 넘길 수 있다는 것을 보이게 */}
         {srsPageMax > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 10 }}
-                title="Shift + 마우스 휠 — 분할에 안 들어간 뒤쪽 시리즈 보기">
+                title={tr("Shift + 마우스 휠 — 분할에 안 들어간 뒤쪽 시리즈 보기")}>
             <button onClick={() => srsPageStep(-1)} disabled={srsPage === 0}
                     style={{ padding: "0 5px", fontSize: 11 }}>◀</button>
             <b style={{ fontSize: 11.5 }}>
@@ -5123,7 +5123,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       {prefs.thumbSide === "top" && thumbs}
       {/* 위/아래 도킹일 때의 펴기 띠 — 예전엔 좌/우에만 있어서 위/아래로 접으면 되돌릴 수 없었다 */}
       {!paletteOpen && prefs.paletteSide === "top" && (
-        <button onClick={() => togglePalette(true)} title={railSpec("top").showTitle}
+        <button onClick={() => togglePalette(true)} title={tr(railSpec("top").showTitle)}
                 style={railStyle("top")}>{railSpec("top").showArrow}</button>
       )}
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
@@ -5134,7 +5134,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                     onDrag={(dx) => setPrefs((p) => ({ ...p, paletteW: clampSz(p.paletteW + dx, 64, 240) }))} />
         )}
         {!paletteOpen && prefs.paletteSide === "left" && (
-          <button onClick={() => togglePalette(true)} title={railSpec("left").showTitle}
+          <button onClick={() => togglePalette(true)} title={tr(railSpec("left").showTitle)}
                   style={railStyle("left")}>{railSpec("left").showArrow}</button>
         )}
         {prefs.thumbSide === "left" && thumbs}
@@ -5148,7 +5148,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex" }}>
             <Suspense fallback={
               <div style={{ flex: 1, display: "grid", placeItems: "center", color: "var(--text-secondary)" }}>
-                MPR/MIP 로딩…
+                {tr("MPR/MIP 로딩…")}
               </div>
             }>
               <Viewer3DEmbed studyUid={panes[activePane].studyUid || detail.study_uid}
@@ -5176,7 +5176,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               '가끔 먹는' 반쪽 잠금이 되고, 앞으로 추가되는 조작마다 다시 빠뜨린다.
               위에 한 장 덮으면 지금도 앞으로도 새지 않는다(키보드는 onKey 의 collabRO 가 담당). */}
           {cl.readOnly && (
-            <div data-sv-collab-lock="" title="Master 의 화면을 따라가는 중입니다 — 조작하려면 권한을 요청하세요"
+            <div data-sv-collab-lock="" title={tr("Master 의 화면을 따라가는 중입니다 — 조작하려면 권한을 요청하세요")}
                  onContextMenu={(e) => e.preventDefault()}
                  style={{ position: "absolute", inset: 0, zIndex: 40, cursor: "not-allowed",
                           background: "transparent" }} />
@@ -5245,7 +5245,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {skin === "saint" && prefs.paletteSide === "right" && paletteOpen && saintBar}
         {paletteRight && palette}
         {!paletteOpen && paletteRight && (
-          <button onClick={() => togglePalette(true)} title={railSpec("right").showTitle}
+          <button onClick={() => togglePalette(true)} title={tr(railSpec("right").showTitle)}
                   style={railStyle("right")}>{railSpec("right").showArrow}</button>
         )}
         {prefs.reportDock && !reportCollapsed && (
@@ -5254,7 +5254,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         )}
         {/* 판독창 접기 버튼 — 오른쪽으로 숨김 */}
         {prefs.reportDock && !reportCollapsed && (
-          <button title="판독창 숨기기 (오른쪽으로 접기)" onClick={() => setReportCollapsed(true)}
+          <button title={tr("판독창 숨기기 (오른쪽으로 접기)")} onClick={() => setReportCollapsed(true)}
                   style={{ width: 16, padding: 0, borderRadius: 0, alignSelf: "stretch", fontSize: 12,
                            background: "var(--bg-elevated)", border: "none", borderLeft: "1px solid var(--border)" }}>▸</button>
         )}
@@ -5277,7 +5277,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                           setCmpActive(true);
                           // 다른 열린 창 + 이 창(발신자 — BroadcastChannel 미수신)에도 과거검사 Exam 탭 동기
                           const rx = detail.related_exams.find((q) => q.id === id);
-                          const lbl = `${rx?.modality ?? "검사"} ${rx?.study_date ?? ""} #${id}`;
+                          const lbl = `${rx?.modality ?? tr("검사")} ${rx?.study_date ?? ""} #${id}`;
                           postViewerAddTab(id, rx?.study_uid ?? "", lbl);
                           addOpenTab(id, rx?.study_uid ?? "", lbl);
                           return;
@@ -5293,24 +5293,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
           ? <CollabSessionPanel session={cl.session} isHost={cl.isHost} meId={cl.meId}
                                 onLeave={() => void cl.leaveSession()} />
           : <CollabDock open={collabDockOpen} onClose={() => setCollabDockOpen(false)}
-                        inviteLabel="협진 초대"
+                        inviteLabel={tr("협진 초대")}
                         onInvite={(u) => {
                           const label = `${detail.modality} ${detail.body_part || detail.patient_name} ${detail.study_date}`;
                           void cl.startSession(label).then((s) => s && cl.inviteUser(u, s.code));
                         }} />}
         {/* 접힘 상태 — 우측 세로 탭으로 다시 펼치기 */}
         {prefs.reportDock && reportCollapsed && (
-          <button title="판독창 펼치기" onClick={() => setReportCollapsed(false)}
+          <button title={tr("판독창 펼치기")} onClick={() => setReportCollapsed(false)}
                   style={{ width: 24, padding: "8px 0", borderRadius: 0, alignSelf: "stretch",
                            writingMode: "vertical-rl", fontSize: 12, fontWeight: 700,
-                           background: "var(--bg-elevated)", border: "none", borderLeft: "1px solid var(--border)" }}>◂ 판독</button>
+                           background: "var(--bg-elevated)", border: "none", borderLeft: "1px solid var(--border)" }}>◂ {tr("판독")}</button>
         )}
       </div>
       {prefs.thumbSide === "bottom" && thumbs}
       {prefs.paletteSide === "bottom" && palette}
       {skin === "saint" && prefs.paletteSide === "bottom" && paletteOpen && saintBar}
       {!paletteOpen && prefs.paletteSide === "bottom" && (
-        <button onClick={() => togglePalette(true)} title={railSpec("bottom").showTitle}
+        <button onClick={() => togglePalette(true)} title={tr(railSpec("bottom").showTitle)}
                 style={railStyle("bottom")}>{railSpec("bottom").showArrow}</button>
       )}
       {/* 휴대폰 촬영 QR 다이얼로그 */}
@@ -5319,14 +5319,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
              onMouseDown={(e) => { if (e.target === e.currentTarget) setQrCap(null); }}>
           <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 10,
                         padding: 20, width: 340, textAlign: "center", display: "flex", flexDirection: "column", gap: 10 }}>
-            <b style={{ fontSize: 14 }}>📱 휴대폰으로 사진 촬영</b>
+            <b style={{ fontSize: 14 }}>📱 {tr("휴대폰으로 사진 촬영")}</b>
             <img src={qrCap.qr} alt="QR" style={{ width: 220, height: 220, margin: "0 auto", background: "#fff", borderRadius: 8, padding: 6 }} />
             <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-              휴대폰 카메라로 QR 을 찍으면 촬영 페이지가 열립니다.<br />
-              촬영 → ⬆ 업로드하면 이 검사의 <b>새 시리즈</b>로 등록되고 뷰어에 자동 반영됩니다. (15분 유효)
+              {tr("휴대폰 카메라로 QR 을 찍으면 촬영 페이지가 열립니다.")}<br />
+              {tr("촬영 → ⬆ 업로드하면 이 검사의")} <b>{tr("새 시리즈")}</b>{tr("로 등록되고 뷰어에 자동 반영됩니다. (15분 유효)")}
             </div>
             <code style={{ fontSize: 10, wordBreak: "break-all", color: "var(--text-secondary)" }}>{qrCap.url}</code>
-            <button onClick={() => setQrCap(null)}>닫기</button>
+            <button onClick={() => setQrCap(null)}>{tr("닫기")}</button>
           </div>
         </div>
       )}
@@ -5355,8 +5355,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                     <polyline points={pl} stroke="#facc15" strokeWidth={1.4} fill="none" />
                   </svg>
                   <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 6 }}>
-                    min {mn.toFixed(0)} · max {mx.toFixed(0)} · {vals.length}표본
-                    (≈근사값 — 렌더 8bit + W/L 역변환, 원본 픽셀 아님)
+                    min {mn.toFixed(0)} · max {mx.toFixed(0)} · {vals.length}{tr("표본")}
+                    {tr("(≈근사값 — 렌더 8bit + W/L 역변환, 원본 픽셀 아님)")}
                   </div>
                 </>
               );
@@ -5388,7 +5388,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               </tbody>
             </table>
             <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 6 }}>
-              ≈근사값 — 렌더 8bit + W/L 역변환, 원본 픽셀 아님
+              {tr("≈근사값 — 렌더 8bit + W/L 역변환, 원본 픽셀 아님")}
             </div>
           </div>
         </div>
@@ -5417,9 +5417,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                            }} />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
               <button className="primary" disabled={!cmpSel.size} onClick={() => void openCompare()}>
-                비교 열기 ({cmpSel.size}건)
+                {tr("비교 열기")} ({cmpSel.size}{tr("건")})
               </button>
-              <button onClick={() => setCmpOpen(false)}>취소</button>
+              <button onClick={() => setCmpOpen(false)}>{tr("취소")}</button>
             </div>
           </div>
         </div>
@@ -5456,11 +5456,11 @@ function CloseDialog({ onPick, onCancel }: {
         <b style={{ fontSize: 12.5 }}>{label}</b>
         <div style={{ fontSize: 11, color: primary ? undefined : "var(--text-secondary)", marginTop: 2 }}>{desc}</div>
       </button>
-      <label title="체크하고 닫으면 다음부터 묻지 않고 이 동작으로 닫습니다 (Setting>뷰어>닫기 동작에서 변경)"
+      <label title={tr("체크하고 닫으면 다음부터 묻지 않고 이 동작으로 닫습니다 (Setting>뷰어>닫기 동작에서 변경)")}
              style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 11, color: "var(--text-secondary)", flexShrink: 0 }}>
         <input type="checkbox" checked={!!chk[mode]}
                onChange={(e) => setChk((p) => ({ ...p, [mode]: e.target.checked }))} />
-        기본으로
+        {tr("기본으로")}
       </label>
     </div>
   );
@@ -5469,15 +5469,15 @@ function CloseDialog({ onPick, onCancel }: {
          onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
                     width: 430, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
-        <b style={{ fontSize: 13 }}>뷰어 닫기 — 변경사항을 저장할까요?</b>
-        <Row mode="save_current" primary label="현재 화면 저장하고 닫기"
-             desc="현재 검사의 주석/측정을 서버에 저장합니다" />
-        <Row mode="save_all" label="전체 화면 변경사항 저장하고 닫기"
-             desc="주석/측정 저장 + 표시 상태(W/L·주석)를 GSPS로 Orthanc에 보존합니다" />
-        <Row mode="discard" label="어떤 것도 저장하지 않고 닫기"
-             desc="저장하지 않은 주석/측정은 사라집니다" />
+        <b style={{ fontSize: 13 }}>{tr("뷰어 닫기 — 변경사항을 저장할까요?")}</b>
+        <Row mode="save_current" primary label={tr("현재 화면 저장하고 닫기")}
+             desc={tr("현재 검사의 주석/측정을 서버에 저장합니다")} />
+        <Row mode="save_all" label={tr("전체 화면 변경사항 저장하고 닫기")}
+             desc={tr("주석/측정 저장 + 표시 상태(W/L·주석)를 GSPS로 Orthanc에 보존합니다")} />
+        <Row mode="discard" label={tr("어떤 것도 저장하지 않고 닫기")}
+             desc={tr("저장하지 않은 주석/측정은 사라집니다")} />
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button onClick={onCancel}>취소 (계속 판독)</button>
+          <button onClick={onCancel}>{tr("취소 (계속 판독)")}</button>
         </div>
       </div>
     </div>
@@ -5555,14 +5555,14 @@ function TitleMenu({ id, icon, title, items, menu, setMenu }: {
                 </button>
               ))}
               {it.onClose && (
-                <span title="이 Exam 탭만 닫기"
+                <span title={tr("이 Exam 탭만 닫기")}
                       onClick={(e) => { e.stopPropagation(); it.onClose!(); }}
                       style={{ fontSize: 11, opacity: 0.7, cursor: "pointer", padding: "0 3px", flexShrink: 0 }}>✕</span>
               )}
             </div>
           ))}
           {items.length === 0 && (
-            <div style={{ padding: "6px 12px", fontSize: 11, color: "var(--text-secondary)" }}>항목 없음</div>
+            <div style={{ padding: "6px 12px", fontSize: 11, color: "var(--text-secondary)" }}>{tr("항목 없음")}</div>
           )}
         </div>
       )}

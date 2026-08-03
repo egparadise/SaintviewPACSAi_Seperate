@@ -152,7 +152,8 @@ def test_refresh_means_the_same_thing_in_all_three_skins():
         "새로고침이 미커밋 입력까지 커밋한다 — 그건 SEARCH 의 일이다")
     # 세 경로가 모두 같은 함수를 쓴다
     assert "onRefresh={reloadList}" in src, "SaintView 상태바 ⟳ 가 공용 새로고침을 쓰지 않는다"
-    assert re.search(r'onClick=\{reloadList\}>지금 갱신', src), \
+    # 라벨은 i18n 래핑(tr("지금 갱신"))일 수도, 원문일 수도 있다 — 계약은 reloadList 사용이다
+    assert re.search(r'onClick=\{reloadList\}>(?:\{tr\("지금 갱신"\)\}|지금 갱신)', src), \
         "Live 수동모드 배너의 [지금 갱신] 이 공용 새로고침을 쓰지 않는다"
     assert re.search(r'case "refresh": reloadList\(\);', src), \
         "I-View/T-View 의 🔄(doAction refresh) 가 공용 새로고침을 쓰지 않는다"

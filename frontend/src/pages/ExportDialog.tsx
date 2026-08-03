@@ -10,6 +10,7 @@
 //                  (윈도: ISO 우클릭 → '디스크 이미지 굽기').
 import { useEffect, useState } from "react";
 import { api, type StudyRow } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 
 type Dest = "folder" | "zip" | "iso";
 
@@ -26,6 +27,7 @@ export function ExportDialog({ rows, onClose, onCsv }: {
   /** 예전 Export(워크리스트 목록 CSV) — 영상이 아니라 표가 필요할 때 쓰라고 남겨 둔다 */
   onCsv?: () => void;
 }) {
+  useLang();   // 언어 변경 시 라벨·안내문이 즉시 다시 그려진다
   const [dest, setDest] = useState<Dest>(hasFsAccess() ? "folder" : "zip");
   const [man, setMan] = useState<{ studies: ManifestStudy[]; total_files: number } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -35,10 +37,10 @@ export function ExportDialog({ rows, onClose, onCsv }: {
 
   useEffect(() => {
     if (!ids) return;
-    setMsg("목록 확인 중…");
+    setMsg(tr("목록 확인 중…"));
     api.exportManifest(ids)
       .then((m) => { setMan(m); setMsg(""); })
-      .catch((e) => setMsg(e instanceof Error ? e.message : "목록 조회 실패"));
+      .catch((e) => setMsg(e instanceof Error ? e.message : tr("목록 조회 실패")));
   }, [ids]);
 
   /** 폴더/USB — 한 장씩 받아 그대로 기록. 중간에 실패해도 나머지는 계속 간다. */
@@ -69,13 +71,13 @@ export function ExportDialog({ rows, onClose, onCsv }: {
       }
     }
     setBusy(false);
-    setMsg(fail ? `완료 — ${ok}장 저장, ${fail}장 실패` : `완료 — ${ok}장을 선택한 폴더에 저장했습니다`);
+    setMsg(fail ? `${tr("완료")} — ${ok}${tr("장 저장")}, ${fail}${tr("장 실패")}` : `${tr("완료")} — ${ok}${tr("장을 선택한 폴더에 저장했습니다")}`);
   };
 
   const download = (fmt: "zip" | "iso") => {
     setMsg(fmt === "iso"
-      ? "ISO 생성 중… 영상 수에 따라 시간이 걸립니다(내려받기가 시작되면 완료)"
-      : "ZIP 생성 중… 내려받기가 시작되면 완료입니다");
+      ? tr("ISO 생성 중… 영상 수에 따라 시간이 걸립니다(내려받기가 시작되면 완료)")
+      : tr("ZIP 생성 중… 내려받기가 시작되면 완료입니다"));
     window.location.href = api.exportPackageUrl(ids, fmt);
   };
 
@@ -88,11 +90,11 @@ export function ExportDialog({ rows, onClose, onCsv }: {
       <div onMouseDown={(e) => e.stopPropagation()}
            style={{ width: 520, maxHeight: "82vh", overflow: "auto", background: "var(--bg-panel)",
                     border: "1px solid var(--border)", borderRadius: 8, padding: 16 }}>
-        <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 4 }}>DICOM 내보내기</div>
+        <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 4 }}>{tr("DICOM 내보내기")}</div>
         <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 10 }}>
-          선택한 검사 <b>{rows.length}건</b>
-          {man && <> · 영상 <b>{total}장</b></>}
-          {rows.length > 1 && " (Ctrl·Shift 로 여러 건 선택)"}
+          {tr("선택한 검사")} <b>{rows.length}{tr("건")}</b>
+          {man && <> · {tr("영상")} <b>{total}{tr("장")}</b></>}
+          {rows.length > 1 && ` ${tr("(Ctrl·Shift 로 여러 건 선택)")}`}
         </div>
 
         {man && (
@@ -103,7 +105,7 @@ export function ExportDialog({ rows, onClose, onCsv }: {
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {s.patient_name} ({s.patient_key}) · {s.study_date} · {s.modality} {s.study_desc}
                 </span>
-                <b>{s.count}장</b>
+                <b>{s.count}{tr("장")}</b>
               </div>
             ))}
           </div>
@@ -124,8 +126,8 @@ export function ExportDialog({ rows, onClose, onCsv }: {
               <input type="radio" name="dest" checked={dest === k} disabled={k === "folder" && !hasFsAccess()}
                      onChange={() => setDest(k)} style={{ marginTop: 3 }} />
               <span>
-                <b style={{ fontSize: 12.5 }}>{label}</b>
-                <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>{help}</div>
+                <b style={{ fontSize: 12.5 }}>{tr(label)}</b>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>{tr(help)}</div>
               </span>
             </label>
           ))}
@@ -138,7 +140,7 @@ export function ExportDialog({ rows, onClose, onCsv }: {
                             background: "var(--accent)", transition: "width .15s" }} />
             </div>
             <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 3 }}>
-              {done} / {total} 장
+              {done} / {total} {tr("장")}
             </div>
           </div>
         )}
@@ -147,12 +149,12 @@ export function ExportDialog({ rows, onClose, onCsv }: {
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
           {onCsv && (
             <button style={{ marginRight: "auto", fontSize: 11 }} disabled={busy}
-                    title="영상이 아니라 워크리스트 목록만 표로 내려받습니다"
-                    onClick={onCsv}>목록 CSV</button>
+                    title={tr("영상이 아니라 워크리스트 목록만 표로 내려받습니다")}
+                    onClick={onCsv}>{tr("목록 CSV")}</button>
           )}
-          <button onClick={onClose} disabled={busy}>닫기</button>
+          <button onClick={onClose} disabled={busy}>{tr("닫기")}</button>
           <button className="primary" onClick={run} disabled={busy || !man || total === 0}>
-            {busy ? "내보내는 중…" : "내보내기"}
+            {busy ? tr("내보내는 중…") : tr("내보내기")}
           </button>
         </div>
       </div>

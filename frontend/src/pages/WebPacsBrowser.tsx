@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { WebPacsConfig, WebPacsStudy } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 import { showToast } from "../lib/toast";
 
 type ImportState = { status: string; done?: number; total?: number; error?: string | null };
@@ -16,6 +17,7 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
   onImported: () => void;
   onClose: () => void;
 }) {
+  useLang();   // 언어 변경 시 검색바·표 등이 즉시 다시 그려진다
   const [cfg, setCfg] = useState<WebPacsConfig | null>(null);
   const [cfgOpen, setCfgOpen] = useState(false);
   const [pw, setPw] = useState("");            // 새 비밀번호 입력(빈값=유지)
@@ -59,7 +61,7 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
     } catch (e) {
       setRows([]);
       setTotal(0);
-      setErr(e instanceof Error ? e.message : "원격 조회 실패");
+      setErr(e instanceof Error ? e.message : tr("원격 조회 실패"));
     } finally { setBusy(false); }
   }, [q, pid, pname, modality, dateFrom, dateTo]);
 
@@ -76,16 +78,16 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
       });
       setCfg(r.value);
       setPw("");
-      showToast("WebPACS 접속 설정 저장");
-    } catch (e) { alert(e instanceof Error ? e.message : "저장 실패"); }
+      showToast(tr("WebPACS 접속 설정 저장"));
+    } catch (e) { alert(e instanceof Error ? e.message : tr("저장 실패")); }
   };
 
   const testConn = async () => {
-    setTestMsg("테스트 중…");
+    setTestMsg(tr("테스트 중…"));
     try {
       const r = await api.webpacsTest();
-      setTestMsg(r.ok ? `✅ 연결 성공 — 원격 검사 ${r.study_count ?? "?"}건` : `❌ ${r.detail}`);
-    } catch (e) { setTestMsg(`❌ ${e instanceof Error ? e.message : "실패"}`); }
+      setTestMsg(r.ok ? `✅ ${tr("연결 성공 — 원격 검사")} ${r.study_count ?? "?"}${tr("건")}` : `❌ ${r.detail}`);
+    } catch (e) { setTestMsg(`❌ ${e instanceof Error ? e.message : tr("실패")}`); }
   };
 
   const startImport = async (row: WebPacsStudy, openAfter: boolean) => {
@@ -111,16 +113,16 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
               setRows((prev) => prev.map((x) => x.study_idx === idx
                 ? { ...x, imported_study_id: st.study_id ?? null } : x));
               onImported();
-              showToast(`WebPACS 가져오기 완료 — ${row.patient_name || row.patient_id}`);
+              showToast(`${tr("WebPACS 가져오기 완료")} — ${row.patient_name || row.patient_id}`);
               if (openAfter) onOpenStudy(st.study_id);
             }
           } else if (st.status === "error") {
             window.clearInterval(pollRef.current[idx]);
-            alert(`가져오기 실패: ${st.error ?? "알 수 없는 오류"}`);
+            alert(`${tr("가져오기 실패:")} ${st.error ?? tr("알 수 없는 오류")}`);
           }
         } catch { /* 다음 주기 재시도 */ }
       }, 800);
-    } catch (e) { alert(e instanceof Error ? e.message : "가져오기 시작 실패"); }
+    } catch (e) { alert(e instanceof Error ? e.message : tr("가져오기 시작 실패")); }
   };
 
   const inp = { padding: "3px 6px", fontSize: 12, width: 110 } as const;
@@ -133,17 +135,17 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
                     borderRadius: 8, padding: 14 }}
            onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <b style={{ fontSize: 14 }}>WebPACS — 인계 PACS 검사 가져오기</b>
+          <b style={{ fontSize: 14 }}>{tr("WebPACS — 인계 PACS 검사 가져오기")}</b>
           <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-            원격(webpacs_api) 검사를 우리 저장소로 가져와 자체 뷰어로 표시합니다
+            {tr("원격(webpacs_api) 검사를 우리 저장소로 가져와 자체 뷰어로 표시합니다")}
           </span>
           <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
             {isAdmin && (
               <button onClick={() => setCfgOpen((v) => !v)} style={{ fontSize: 11 }}>
-                ⚙ 접속 설정 {cfgOpen ? "▴" : "▾"}
+                ⚙ {tr("접속 설정")} {cfgOpen ? "▴" : "▾"}
               </button>
             )}
-            <button onClick={onClose} style={{ fontSize: 11 }}>닫기 ✕</button>
+            <button onClick={onClose} style={{ fontSize: 11 }}>{tr("닫기")} ✕</button>
           </span>
         </div>
 
@@ -157,31 +159,30 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
                          borderRadius: 6, display: "flex", flexWrap: "wrap", gap: 8,
                          alignItems: "center", fontSize: 12 }}>
             <label><input type="checkbox" checked={cfg.enabled}
-                          onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} /> 브리지 사용</label>
-            <label>원격 주소 <input style={{ ...inp, width: 240 }} placeholder="https://api.inviz.co.kr"
+                          onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} /> {tr("브리지 사용")}</label>
+            <label>{tr("원격 주소")} <input style={{ ...inp, width: 240 }} placeholder="https://api.inviz.co.kr"
                                  value={cfg.base_url} name="wp-base-url" autoComplete="off"
                                  onChange={(e) => setCfg({ ...cfg, base_url: e.target.value })} /></label>
-            <label>계정 ID <input style={inp} value={cfg.user_id} name="wp-user-id" autoComplete="off"
+            <label>{tr("계정 ID")} <input style={inp} value={cfg.user_id} name="wp-user-id" autoComplete="off"
                                 onChange={(e) => setCfg({ ...cfg, user_id: e.target.value })} /></label>
-            <label>비밀번호 <input style={inp} type="password" name="wp-password" autoComplete="new-password"
-                                placeholder={cfg.has_password ? "(저장됨 — 변경 시 입력)" : ""}
+            <label>{tr("비밀번호")} <input style={inp} type="password" name="wp-password" autoComplete="new-password"
+                                placeholder={cfg.has_password ? tr("(저장됨 — 변경 시 입력)") : ""}
                                 value={pw} onChange={(e) => setPw(e.target.value)} /></label>
-            <label title="자체서명 HTTPS 원격이면 해제">
+            <label title={tr("자체서명 HTTPS 원격이면 해제")}>
               <input type="checkbox" checked={cfg.verify_ssl}
-                     onChange={(e) => setCfg({ ...cfg, verify_ssl: e.target.checked })} /> SSL 검증</label>
-            <label title="워커가 주기적으로 원격 최신 검사를 자동으로 가져옵니다(≈60초)">
+                     onChange={(e) => setCfg({ ...cfg, verify_ssl: e.target.checked })} /> {tr("SSL 검증")}</label>
+            <label title={tr("워커가 주기적으로 원격 최신 검사를 자동으로 가져옵니다(≈60초)")}>
               <input type="checkbox" checked={cfg.auto_sync}
-                     onChange={(e) => setCfg({ ...cfg, auto_sync: e.target.checked })} /> 자동 동기화</label>
-            <label>최신 <input style={{ ...inp, width: 48 }} type="number" min={1} max={200}
+                     onChange={(e) => setCfg({ ...cfg, auto_sync: e.target.checked })} /> {tr("자동 동기화")}</label>
+            <label>{tr("최신")} <input style={{ ...inp, width: 48 }} type="number" min={1} max={200}
                              value={cfg.auto_sync_limit}
-                             onChange={(e) => setCfg({ ...cfg, auto_sync_limit: Number(e.target.value) || 20 })} /> 건</label>
+                             onChange={(e) => setCfg({ ...cfg, auto_sync_limit: Number(e.target.value) || 20 })} /> {tr("건")}</label>
             {/* form 안의 button 은 기본이 submit 이라 페이지가 리로드된다 — 반드시 type="button" */}
-            <button type="button" onClick={saveCfg} style={{ fontSize: 11, fontWeight: 700 }}>저장</button>
-            <button type="button" onClick={testConn} style={{ fontSize: 11 }}>연결 테스트</button>
+            <button type="button" onClick={saveCfg} style={{ fontSize: 11, fontWeight: 700 }}>{tr("저장")}</button>
+            <button type="button" onClick={testConn} style={{ fontSize: 11 }}>{tr("연결 테스트")}</button>
             {testMsg && <span style={{ fontSize: 11 }}>{testMsg}</span>}
             <div style={{ flexBasis: "100%", color: "var(--text-secondary)", fontSize: 11 }}>
-              원격 계정은 인계 PACS 의 PACS 사용자(user_type P)여야 하며, 영상은 원격 서버가
-              복호화한 DICOM(DICOMweb v2)으로 수신합니다 — MinIO 암호화 키 불필요.
+              {tr("원격 계정은 인계 PACS 의 PACS 사용자(user_type P)여야 하며, 영상은 원격 서버가 복호화한 DICOM(DICOMweb v2)으로 수신합니다 — MinIO 암호화 키 불필요.")}
             </div>
           </form>
         )}
@@ -191,34 +192,34 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
                       alignItems: "center" }}>
           {/* 검색 칸에도 name/autoComplete 를 준다 — 이름 없는 텍스트 필드는 크롬 자동완성이
               username 후보로 오인해 저장된 자격증명을 채워 넣는다(SEARCH 칸 오염 사고) */}
-          <input style={{ ...inp, width: 150 }} placeholder="통합 검색" value={q}
+          <input style={{ ...inp, width: 150 }} placeholder={tr("통합 검색")} value={q}
                  name="wp-q" autoComplete="off" spellCheck={false}
                  onChange={(e) => setQ(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && void search()} />
-          <input style={inp} placeholder="환자 ID" value={pid}
+          <input style={inp} placeholder={tr("환자 ID")} value={pid}
                  name="wp-pid" autoComplete="off" spellCheck={false}
                  onChange={(e) => setPid(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && void search()} />
-          <input style={inp} placeholder="환자 이름" value={pname}
+          <input style={inp} placeholder={tr("환자 이름")} value={pname}
                  name="wp-pname" autoComplete="off" spellCheck={false}
                  onChange={(e) => setPname(e.target.value)}
                  onKeyDown={(e) => e.key === "Enter" && void search()} />
           <select style={{ padding: "3px 4px", fontSize: 12 }} value={modality}
                   onChange={(e) => setModality(e.target.value)}>
-            <option value="">전체 모달리티</option>
+            <option value="">{tr("전체 모달리티")}</option>
             {["CR", "DR", "DX", "CT", "MR", "US", "MG", "XA", "NM", "PT", "OT"].map((m) =>
               <option key={m} value={m}>{m}</option>)}
           </select>
           <input style={{ ...inp, width: 120 }} type="date" value={dateFrom}
-                 onChange={(e) => setDateFrom(e.target.value)} title="검사일 시작" />
+                 onChange={(e) => setDateFrom(e.target.value)} title={tr("검사일 시작")} />
           ~
           <input style={{ ...inp, width: 120 }} type="date" value={dateTo}
-                 onChange={(e) => setDateTo(e.target.value)} title="검사일 끝" />
+                 onChange={(e) => setDateTo(e.target.value)} title={tr("검사일 끝")} />
           <button onClick={() => void search()} disabled={busy}
                   style={{ fontSize: 12, fontWeight: 700, padding: "3px 14px" }}>
-            {busy ? "조회 중…" : "검색"}
+            {busy ? tr("조회 중…") : tr("검색")}
           </button>
-          <span style={{ color: "var(--text-secondary)" }}>원격 {total}건</span>
+          <span style={{ color: "var(--text-secondary)" }}>{tr("원격")} {total}{tr("건")}</span>
         </div>
 
         {err && <div style={{ color: "var(--stat-emergency)", fontSize: 12, margin: "6px 0" }}>{err}</div>}
@@ -226,11 +227,11 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
         <table className="grid-table" style={{ width: "100%", fontSize: 12 }}>
           <thead>
             <tr>
-              <th style={{ width: 46 }}>#</th><th>환자 ID</th><th>환자 이름</th>
-              <th style={{ width: 34 }}>성별</th><th>검사일시</th>
-              <th style={{ width: 56 }}>모달리티</th><th>검사명</th>
-              <th style={{ width: 60 }}>영상수</th><th>병원</th>
-              <th style={{ width: 190 }}>가져오기 / 열기</th>
+              <th style={{ width: 46 }}>#</th><th>{tr("환자 ID")}</th><th>{tr("환자 이름")}</th>
+              <th style={{ width: 34 }}>{tr("성별")}</th><th>{tr("검사일시")}</th>
+              <th style={{ width: 56 }}>{tr("모달리티")}</th><th>{tr("검사명")}</th>
+              <th style={{ width: 60 }}>{tr("영상수")}</th><th>{tr("병원")}</th>
+              <th style={{ width: 190 }}>{tr("가져오기 / 열기")}</th>
             </tr>
           </thead>
           <tbody>
@@ -252,17 +253,17 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
                     {r.imported_study_id ? (
                       <button onClick={() => onOpenStudy(r.imported_study_id!)}
                               style={{ fontSize: 11, fontWeight: 700, background: "var(--accent)", color: "#fff" }}>
-                        우리 뷰어로 열기
+                        {tr("우리 뷰어로 열기")}
                       </button>
                     ) : running ? (
                       <span style={{ color: "var(--text-secondary)" }}>
-                        가져오는 중… {im?.done ?? 0}/{im?.total ?? "?"}
+                        {tr("가져오는 중…")} {im?.done ?? 0}/{im?.total ?? "?"}
                       </span>
                     ) : (
                       <span style={{ display: "flex", gap: 4 }}>
-                        <button onClick={() => void startImport(r, false)} style={{ fontSize: 11 }}>가져오기</button>
+                        <button onClick={() => void startImport(r, false)} style={{ fontSize: 11 }}>{tr("가져오기")}</button>
                         <button onClick={() => void startImport(r, true)}
-                                style={{ fontSize: 11, fontWeight: 700 }}>가져와서 열기</button>
+                                style={{ fontSize: 11, fontWeight: 700 }}>{tr("가져와서 열기")}</button>
                       </span>
                     )}
                   </td>
@@ -271,7 +272,7 @@ export function WebPacsBrowser({ isAdmin, onOpenStudy, onImported, onClose }: {
             })}
             {rows.length === 0 && !busy && (
               <tr><td colSpan={10} style={{ color: "var(--text-secondary)", padding: 14 }}>
-                {err ? "원격 조회 실패 — 접속 설정을 확인하세요" : "검색 결과 없음"}
+                {err ? tr("원격 조회 실패 — 접속 설정을 확인하세요") : tr("검색 결과 없음")}
               </td></tr>
             )}
           </tbody>

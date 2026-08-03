@@ -2,6 +2,7 @@
 // 원본 PiViewSTAR 'Import DICOM Files' 다이얼로그 대응 (폴더 선택·확장자 필터·결과표).
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 
 type Row = { filename: string; size: number; status: string };   // size<0 = 표시 생략("-")
 
@@ -13,6 +14,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
   /** 로컬 루트 경로(localInit 결과) — 완료 메시지에 저장 위치 표시 */
   localRoot?: string;
 }) {
+  useLang();   // 언어 변경 시 버튼·안내문이 즉시 다시 그려진다
   const fileRef = useRef<HTMLInputElement>(null);
   const dirRef = useRef<HTMLInputElement>(null);
   const allRef = useRef<File[]>([]);   // 마지막 선택 전체 — 필터 토글 시 재스캔용
@@ -39,7 +41,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
   };
   // 업로드 중 닫기 금지 + 탭 이탈(새로고침/닫기) 경고 — 완료 전 작업 유실 방지
   const guardedClose = () => {
-    if (busy) { setSummary("업로드 진행 중 — 완료 전에는 닫을 수 없습니다 (백그라운드에서 계속 진행됩니다)"); return; }
+    if (busy) { setSummary(tr("업로드 진행 중 — 완료 전에는 닫을 수 없습니다 (백그라운드에서 계속 진행됩니다)")); return; }
     onClose();
   };
   useEffect(() => {
@@ -77,7 +79,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
         for (const f of all) {
           if (await sniffDicom(f)) files.push(f);
           done += 1;
-          if (done % 50 === 0) setSummary(`스캔 중… ${done}/${all.length}`);
+          if (done % 50 === 0) setSummary(`${tr("스캔 중…")} ${done}/${all.length}`);
         }
       }
       setPicked(files);
@@ -90,12 +92,12 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
     const all = Array.from(list);
     allRef.current = all;
     const rel = (all[0] as File & { webkitRelativePath?: string })?.webkitRelativePath;
-    setSource(dir && rel ? `${rel.split("/")[0]}/ … (${all.length}개 파일)` : `${all.length}개 선택`);
+    setSource(dir && rel ? `${rel.split("/")[0]}/ … (${all.length}${tr("개 파일")})` : `${all.length}${tr("개 선택")}`);
     void scan(all);
   };
 
   const start = async () => {
-    if (!picked.length) { alert("DICOM 파일 또는 폴더를 먼저 선택하세요"); return; }
+    if (!picked.length) { alert(tr("DICOM 파일 또는 폴더를 먼저 선택하세요")); return; }
     setBusy(true);
     setRows([]);
     try {
@@ -107,7 +109,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
         const acc: Row[] = [];
         const seen = new Set<number>();   // 배치 간 동일 검사 중복 표시 방지
         for (let i = 0; i < picked.length; i += BATCH) {
-          setSummary(`업로드 중… ${Math.min(i + BATCH, picked.length)}/${picked.length}`);
+          setSummary(`${tr("업로드 중…")} ${Math.min(i + BATCH, picked.length)}/${picked.length}`);
           const r = await api.localImport(picked.slice(i, i + BATCH));
           imported += r.imported; skipped += r.skipped;
           for (const s of r.studies) {
@@ -115,15 +117,15 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
             seen.add(s.id);
             acc.push({
               filename: `${s.patient_name || s.patient_key} · ${s.modality} ${s.study_date}` +
-                        `${s.study_desc ? ` · ${s.study_desc}` : ""} (${s.images}장)`,
+                        `${s.study_desc ? ` · ${s.study_desc}` : ""} (${s.images}${tr("장")})`,
               size: -1, status: "등록",
             });
           }
           setRows([...acc]);
         }
         setSummary(`Total ${imported + skipped} files processed, ${imported} DICOM files imported` +
-                   ` (${skipped} skipped) — 로컬 Image 폴더에 저장됨` +
-                   (localRoot ? `: ${localRoot}\\Image` : "") + ` · 검사 ${seen.size}건`);
+                   ` (${skipped} skipped) — ${tr("로컬 Image 폴더에 저장됨")}` +
+                   (localRoot ? `: ${localRoot}\\Image` : "") + ` · ${tr("검사")} ${seen.size}${tr("건")}`);
         setDone(true);
         onDone();   // 로컬 목록 즉시 갱신
         return;
@@ -131,7 +133,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
       let processed = 0, uploaded = 0, registered = 0, savedDir = "";
       const acc: Row[] = [];
       for (let i = 0; i < picked.length; i += BATCH) {
-        setSummary(`업로드 중… ${Math.min(i + BATCH, picked.length)}/${picked.length}`);
+        setSummary(`${tr("업로드 중…")} ${Math.min(i + BATCH, picked.length)}/${picked.length}`);
         const r = await api.importDicom(picked.slice(i, i + BATCH));
         processed += r.processed; uploaded += r.uploaded; registered += r.registered;
         savedDir = r.saved_dir ?? savedDir;
@@ -139,12 +141,12 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
         setRows([...acc]);
       }
       setSummary(`Total ${processed} files processed, ${uploaded} DICOM files imported` +
-                 ` — 검사 ${registered}건 Local DB 등록` +
-                 (savedDir ? ` · 이미지 폴더: ${savedDir}` : ""));
+                 ` — ${tr("검사")} ${registered}${tr("건")} ${tr("Local DB 등록")}` +
+                 (savedDir ? ` · ${tr("이미지 폴더:")} ${savedDir}` : ""));
       setDone(true);
       onDone();   // 워크리스트 즉시 갱신 — 환자·영상 표시
     } catch (e) {
-      setSummary(e instanceof Error ? `실패: ${e.message}` : "Import 실패");
+      setSummary(e instanceof Error ? `${tr("실패:")} ${e.message}` : tr("Import 실패"));
     } finally { setBusy(false); }
   };
 
@@ -157,16 +159,16 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
                     padding: 16, display: "flex", flexDirection: "column", gap: 12,
                     boxShadow: "0 12px 40px rgba(0,0,0,0.55)" }}>
         <div style={{ display: "flex", alignItems: "center", cursor: "move", userSelect: "none" }}
-             onPointerDown={onHeadDown} title="드래그로 이동 — 업로드는 백그라운드에서 계속됩니다">
+             onPointerDown={onHeadDown} title={tr("드래그로 이동 — 업로드는 백그라운드에서 계속됩니다")}>
           <b style={{ fontSize: 13 }}>📥 Import DICOM Files{localMode ? " — LOCAL" : ""}</b>
-          {busy && <span style={{ marginLeft: 8, fontSize: 11, color: "#4ade80" }}>● 백그라운드 진행 중 — 다른 화면을 사용해도 계속됩니다</span>}
+          {busy && <span style={{ marginLeft: 8, fontSize: 11, color: "#4ade80" }}>{tr("● 백그라운드 진행 중 — 다른 화면을 사용해도 계속됩니다")}</span>}
           {localMode && (
             <span style={{ marginLeft: 8, fontSize: 11, color: "#f59e0b" }}
-                  title={localRoot ? `저장 위치: ${localRoot}\\Image` : undefined}>
-              로컬 Image 폴더에 저장됩니다 (서버 업로드 아님)
+                  title={localRoot ? `${tr("저장 위치:")} ${localRoot}\\Image` : undefined}>
+              {tr("로컬 Image 폴더에 저장됩니다 (서버 업로드 아님)")}
             </span>
           )}
-          <button style={{ marginLeft: "auto" }} onClick={guardedClose} title={busy ? "업로드 완료 후 닫을 수 있습니다" : "닫기"} disabled={busy}>✕</button>
+          <button style={{ marginLeft: "auto" }} onClick={guardedClose} title={busy ? tr("업로드 완료 후 닫을 수 있습니다") : tr("닫기")} disabled={busy}>✕</button>
         </div>
 
         {/* Import Parameters */}
@@ -174,10 +176,10 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
           <legend style={{ fontSize: 12, color: "var(--text-secondary)", padding: "0 6px" }}>Import Parameters</legend>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
             <span style={{ width: 96, fontSize: 12.5, color: "var(--text-secondary)" }}>Search Directory</span>
-            <input readOnly value={source} placeholder="USB/CD 폴더 또는 파일을 선택하세요"
+            <input readOnly value={source} placeholder={tr("USB/CD 폴더 또는 파일을 선택하세요")}
                    style={{ flex: 1, fontSize: 12 }} />
-            <button title="폴더 선택 (USB·CD 전체)" onClick={() => dirRef.current?.click()}>📁 폴더</button>
-            <button title="파일 선택 (.dcm 여러 개)" onClick={() => fileRef.current?.click()}>… 파일</button>
+            <button title={tr("폴더 선택 (USB·CD 전체)")} onClick={() => dirRef.current?.click()}>{tr("📁 폴더")}</button>
+            <button title={tr("파일 선택 (.dcm 여러 개)")} onClick={() => fileRef.current?.click()}>{tr("… 파일")}</button>
           </div>
           <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5 }}>
             <input type="checkbox" checked={dcmOnly}
@@ -186,7 +188,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
                      // 선택돼 있으면 즉시 재스캔 — 기본(해제)은 하위 모든 파일에서 DICM 시그니처 자동 감지
                      if (allRef.current.length) void scan(allRef.current, e.target.checked);
                    }} />
-            Extension *.dcm Files Only (기본 해제 — 폴더 이하 <b>모든 파일</b>에서 DICOM 자동 감지)
+            {tr("Extension *.dcm Files Only (기본 해제 — 폴더 이하")} <b>{tr("모든 파일")}</b>{tr("에서 DICOM 자동 감지)")}
           </label>
           {/* 숨은 파일 입력 — 폴더(webkitdirectory)·다중 파일 */}
           <input ref={dirRef} type="file" multiple hidden
@@ -212,7 +214,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
               <tbody>
                 {rows.length === 0 && (
                   <tr><td colSpan={3} style={{ padding: 10, color: "var(--text-secondary)" }}>
-                    {busy ? "처리 중…" : "선택 후 Start 를 누르세요"}</td></tr>
+                    {busy ? tr("처리 중…") : tr("선택 후 Start 를 누르세요")}</td></tr>
                 )}
                 {rows.map((r, i) => (
                   <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
@@ -220,7 +222,7 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
                     <td style={{ padding: "2px 6px" }}>{r.size < 0 ? "-" : `${(r.size / 1024).toFixed(0)} KB`}</td>
                     <td style={{ padding: "2px 6px",
                                  color: r.status.startsWith("실패") ? "var(--stat-emergency)"
-                                      : r.status === "중복" ? "#eab308" : "#4ade80" }}>{r.status}</td>
+                                      : r.status === "중복" ? "#eab308" : "#4ade80" }}>{tr(r.status)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -235,11 +237,11 @@ export function ImportDialog({ onClose, onDone, localMode, localRoot }: {
           <button className="primary"
                   style={{ ...B, ...(done ? { background: "#16a34a", borderColor: "#16a34a" } : {}) }}
                   disabled={busy || (!done && !picked.length)}
-                  title={done ? "업로드 완료 — 클릭하면 창을 닫습니다" : undefined}
+                  title={done ? tr("업로드 완료 — 클릭하면 창을 닫습니다") : undefined}
                   onClick={() => { if (done) { onDone(); onClose(); } else void start(); }}>
-            {busy ? "진행 중…" : done ? "완료 ✓" : "Start"}
+            {busy ? tr("진행 중…") : done ? tr("완료 ✓") : "Start"}
           </button>
-          <button style={B} disabled={busy} title={busy ? "업로드 완료 후 닫을 수 있습니다" : "닫기"} onClick={() => { if (busy) return; onDone(); onClose(); }}>Close</button>
+          <button style={B} disabled={busy} title={busy ? tr("업로드 완료 후 닫을 수 있습니다") : tr("닫기")} onClick={() => { if (busy) return; onDone(); onClose(); }}>Close</button>
         </div>
       </div>
     </div>

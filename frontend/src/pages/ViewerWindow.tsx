@@ -2,6 +2,7 @@
 // Study Open 옵션(Add/Stack/Key/With Open)을 URL 파라미터로 전달받아 Viewer2D를 전체 화면으로 띄운다.
 import { Suspense, lazy, useEffect, useState } from "react";
 import { api, ensureToken, isLiveId, type StudyDetail } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 import { onViewerCloseAll } from "../lib/sync";
 import { closeAllDelayMs, isViewerClosing, isViewerMounted, shouldForceCloseNow } from "../lib/viewerClose";
 import { DEFAULT_CLIENT_VIEWER } from "../lib/viewerConfig";
@@ -20,6 +21,7 @@ void import("./Viewer2D");
 // 선택 뷰어(설정>뷰어): infi=In Viewer, 그 외(ty/sv)=Viewer2D(엔진 재사용, sv 는 SAINT VIEW 크롬 skin)
 
 export function ViewerWindow() {
+  useLang();
   const params = new URLSearchParams(window.location.search);
   const [studyId, setStudyId] = useState(Number(params.get("study") || 0));
   const addId = Number(params.get("add") || 0);
@@ -91,10 +93,10 @@ export function ViewerWindow() {
   const [viewerId, setViewerId] = useState(DEFAULT_CLIENT_VIEWER);
 
   useEffect(() => {
-    if (!studyId) { setErr("study 파라미터가 없습니다"); return; }
+    if (!studyId) { setErr(tr("study 파라미터가 없습니다")); return; }
     // 타 포트(타 출처) 뷰어: opener에서 토큰 핸드셰이크 후 로드
     void ensureToken().then((ok) => {
-      if (!ok) { setErr("인증 토큰을 받지 못했습니다"); return; }
+      if (!ok) { setErr(tr("인증 토큰을 받지 못했습니다")); return; }
       api.getSetting("viewer.prefs").then((r) => {
         const id = (r.value as { client_viewer?: string }).client_viewer;
         if (id) setViewerId(id);
@@ -109,7 +111,7 @@ export function ViewerWindow() {
         void api.relatedExams(studyId)
           .then((items) => { if (items.length) setDetail((p) => (p ? { ...p, related_exams: items } : p)); })
           .catch(() => {});
-      }).catch((e) => setErr(e instanceof Error ? e.message : "검사 로드 실패"));
+      }).catch((e) => setErr(e instanceof Error ? e.message : tr("검사 로드 실패")));
       if (addId) { if (isLiveId(addId)) void api.livePrefetch(addId); api.study(addId).then(setAddDetail).catch(() => {}); }
       if (stackId) { if (isLiveId(stackId)) void api.livePrefetch(stackId); api.study(stackId).then(setStackDetail).catch(() => {}); }
     });
@@ -118,14 +120,14 @@ export function ViewerWindow() {
   if (err) {
     return (
       <div style={{ display: "grid", placeItems: "center", height: "100%", color: "var(--stat-emergency)" }}>
-        {err} — 워크리스트 창에서 다시 열어주세요. <button onClick={() => window.close()}>닫기</button>
+        {err} — {tr("워크리스트 창에서 다시 열어주세요.")} <button onClick={() => window.close()}>{tr("닫기")}</button>
       </div>
     );
   }
   if (!detail) {
     return (
       <div style={{ display: "grid", placeItems: "center", height: "100%", color: "var(--text-secondary)" }}>
-        뷰어 로딩…
+        {tr("뷰어 로딩…")}
       </div>
     );
   }
@@ -141,7 +143,7 @@ export function ViewerWindow() {
   return (
     <Suspense fallback={
       <div style={{ display: "grid", placeItems: "center", height: "100%", color: "var(--text-secondary)" }}>
-        뷰어 로딩…
+        {tr("뷰어 로딩…")}
       </div>
     }>
       {viewerId === "infi"

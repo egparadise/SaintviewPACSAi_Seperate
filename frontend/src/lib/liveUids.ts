@@ -14,9 +14,20 @@ import { opfsThumbUrl } from "./dlCache";
 export const LIVE_DICOMWEB_ROOT = "/api/webpacs/live/dicom-web";
 
 const uids = new Set<string>();
+// StudyUID → 가상 id(vid) — 3D(MPR/MIP)가 UID 만 들고 Live 시리즈 트리(vid 기반 API)를
+// 되찾아갈 때 쓴다. 등록은 vid·UID 를 동시에 아는 곳(api.study / api.seriesTree)에서 한다.
+const vidByUid = new Map<string, number>();
 
 export function registerLiveStudyUid(uid: string | undefined | null): void {
   if (uid) uids.add(uid);
+}
+
+export function registerLiveStudyVid(uid: string | undefined | null, vid: number): void {
+  if (uid) { uids.add(uid); vidByUid.set(uid, vid); }
+}
+
+export function liveVidOf(uid: string | undefined | null): number | null {
+  return (uid ? vidByUid.get(uid) : undefined) ?? null;
 }
 
 export function isLiveStudyUid(uid: string | undefined | null): boolean {

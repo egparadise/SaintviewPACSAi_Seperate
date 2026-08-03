@@ -9,6 +9,7 @@ import {
   RenderingEngine,
   cache,
   eventTarget,
+  imageLoader,
   init as csInit,
   setVolumesForViewports,
   volumeLoader,
@@ -34,6 +35,9 @@ import {
 } from "@cornerstonejs/tools";
 import { init as dicomImageLoaderInit, wadors } from "@cornerstonejs/dicom-image-loader";
 import { authHeader, framesBase, getWadoTs } from "../lib/imageFormat";
+import { LIVE_DICOMWEB_ROOT, isLiveStudyUid, liveVidOf } from "../lib/liveUids";
+import { api } from "../api";
+import { t as tr, useLang } from "../lib/i18n";
 
 const DICOMWEB_ROOT = import.meta.env.VITE_DICOMWEB_ROOT ?? "http://localhost:3000/dicom-web";
 
@@ -67,6 +71,9 @@ async function ensureInit() {
     // 병원 설정(wado_ts)이 있으면 프레임 요청 Accept 에 해당 전송구문 지정 — Orthanc 가 트랜스코딩해 전달
     beforeSend: (_xhr: XMLHttpRequest, imageId: string) => {
       if (imageId.includes("/api/htj2k/")) return authHeader();   // 백엔드 HTJ2K 프록시 — JWT
+      // Live 원본 DICOM(wadouri) — 같은 출처면 sv_pix 쿠키로 충분하지만, API 를 다른
+      // 호스트에 둔 배치에서는 쿠키가 안 실린다 → Bearer 를 함께 싣는다(pixel_user 겸용).
+      if (imageId.includes("/api/webpacs/live/")) return authHeader();
       const ts = getWadoTs();
       if (ts && imageId.includes("/frames/")) {
         return { Accept: `multipart/related; type="application/octet-stream"; transfer-syntax=${ts}` };
@@ -87,7 +94,7 @@ async function ensureInit() {
   initialized = true;
 }
 
-interface SeriesCand { uid: string; modality: string; count: number; desc: string }
+interface SeriesCand { uid: string; modality: string; count: number; desc: string; sops?: string[] }
 
 /* 비진단 시리즈(보정/로컬라이저/스카우트/선량보고 등) — 슬라이스가 많아도 3D 볼륨 기본 선택에서 후순위 */
 const NON_DIAG_RE = /cal|calib|localizer|3.?plane|scout|screen ?save|dose|report|survey/i;
@@ -95,6 +102,27 @@ const NON_DIAG_RE = /cal|calib|localizer|3.?plane|scout|screen ?save|dose|report
 /** 볼륨 적합 시리즈 후보 목록 (비영상 제외) — 진단 시리즈 우선, 그다음 매트릭스×슬라이스 크기순.
     기존엔 슬라이스 수만으로 정렬해 128×128 보정(Cal) 시리즈가 기본 선택돼 3D 가 뿌옇게 보였다. */
 async function listSeries(studyUid: string): Promise<SeriesCand[]> {
+  // ── Live(원격 PACS 직결) 검사 — 로컬 Orthanc QIDO 는 이 검사를 모른다(빈 배열 200).
+  //    "영상 시리즈가 없습니다" 로 죽던 원인. 이미 받아 둔 Live 시리즈 트리로 목록을 만들고,
+  //    볼륨 픽셀은 원본 DICOM 파일 엔드포인트(wadouri)로 받는다.
+  if (isLiveStudyUid(studyUid)) {
+    const vid = liveVidOf(studyUid);
+    if (vid == null) throw new Error(tr("Live 검사 매핑이 없습니다 — 워크리스트에서 검사를 선택한 뒤 3D 를 실행하세요"));
+    const tree = await api.seriesTree(vid);
+    return tree.series
+      .filter((s) => s.instances.length > 0
+        && !["SR", "KO", "PR", "SEG"].includes(String(s.modality ?? "").toUpperCase()))
+      .map((s) => ({
+        uid: s.series_uid,
+        modality: String(s.modality ?? ""),
+        count: s.instances.length,
+        desc: String(s.series_desc ?? ""),
+        sops: s.instances.map((i) => i.sop_uid),
+      }))
+      // 해상도(QIDO area)는 못 얻는다 — 진단 시리즈 우선 + 슬라이스 수로만 정렬
+      .sort((a, b) => ((NON_DIAG_RE.test(b.desc) ? 0 : 1e6) + b.count)
+                    - ((NON_DIAG_RE.test(a.desc) ? 0 : 1e6) + a.count));
+  }
   const res = await fetch(`${DICOMWEB_ROOT}/studies/${studyUid}/series`);
   if (!res.ok) throw new Error("시리즈 조회 실패");
   const seriesList: Record<string, { Value?: unknown[] }>[] = await res.json();
@@ -155,6 +183,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
   embedded?: boolean;  // Viewer2D 내장 MPR/MIP — 새 창 없이 현재 뷰포트 영역에 표시
   seriesUid?: string;  // 외부(좌측 썸네일 클릭)에서 지정한 볼륨 시리즈 — 변경 시 볼륨 재구성
 }) {
+  useLang();
   const containerRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const gridRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<RenderingEngine | null>(null);
@@ -200,7 +229,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
       window.removeEventListener("pointerup", up);
     };
   }, []);
-  const [status, setStatus] = useState("초기화 중…");
+  const [status, setStatus] = useState(tr("초기화 중…"));
   const [error, setError] = useState("");
   const [slabMm, setSlabMm] = useState(30);
   const [blend, setBlend] = useState<"mip" | "minip" | "avip" | "off">("mip");   // 강도 투영 모드
@@ -209,6 +238,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
   const volumeIdRef = useRef("");
   const [activeVp, setActiveVp] = useState("vp-axial");
   const [seriesList, setSeriesList] = useState<SeriesCand[]>([]);
+  const seriesRef = useRef<SeriesCand[]>([]);   // Live sops 조회용 — 볼륨 효과에서 stale 없이 읽는다
   const [selSeries, setSelSeries] = useState("");
   // 기능 믹스 — 각 도구를 독립 토글로 동시 사용. 무수정자 좌클릭 우선순위: Crosshair > ROI > W/L,
   // 우선순위에 밀린 도구는 자동으로 수정자 바인딩: ROI=Shift+좌, W/L=Ctrl+좌, 채우기=Alt+클릭.
@@ -256,8 +286,8 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
       } catch { /* 뷰포트 미준비 */ }
     }
     if (applied > 0) {
-      setStatus(m === "off" ? "MIP 끄기 — 일반 렌더링 ×" + applied
-        : (m === "mip" ? "MIP" : m === "minip" ? "MinIP" : "AvIP") + " " + mm + "mm 적용 ×" + applied + " (Axial/Sagittal/Coronal)");
+      setStatus(m === "off" ? tr("MIP 끄기 — 일반 렌더링 ×") + applied
+        : (m === "mip" ? "MIP" : m === "minip" ? "MinIP" : "AvIP") + " " + mm + tr("mm 적용 ×") + applied + " (Axial/Sagittal/Coronal)");
     }
   }, []);
 
@@ -327,9 +357,10 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
     setSeriesList([]);
     setSelSeries("");
     listSeries(studyUid).then((list) => {
+      seriesRef.current = list;   // 볼륨 효과가 Live sops 를 stale 없이 읽도록 ref 동기화
       setSeriesList(list);
       const good = list.find((s) => s.count >= 10) ?? list[0];
-      if (!good) { setError("영상 시리즈가 없습니다"); setStatus(""); return; }
+      if (!good) { setError(tr("영상 시리즈가 없습니다")); setStatus(""); return; }
       setSelSeries(good.uid);
     }).catch((e) => { setError(e instanceof Error ? e.message : String(e)); setStatus(""); });
   }, [studyUid]);
@@ -343,8 +374,27 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
       try {
         setError("");
         await ensureInit();
-        setStatus("시리즈 메타데이터 로딩…");
-        const imageIds = await buildImageIds(studyUid, selSeries);
+        setStatus(tr("시리즈 메타데이터 로딩…"));
+        let imageIds: string[];
+        if (isLiveStudyUid(studyUid)) {
+          // Live — 원본 DICOM 파일(wadouri). 파일을 받아야 기하 메타가 생기므로 볼륨 구성 전
+          // 전량 선수신한다(동시성은 브라우저 커넥션 + 백엔드 a_pixel_slot 이 자연히 조인다).
+          const sops = seriesRef.current.find((s) => s.uid === selSeries)?.sops ?? [];
+          imageIds = sops.map((sop) =>
+            `wadouri:${LIVE_DICOMWEB_ROOT}/studies/${studyUid}/series/${selSeries}/instances/${sop}`);
+          if (imageIds.length >= 3) {
+            let got = 0;
+            await Promise.all(imageIds.map((id) => imageLoader.loadAndCacheImage(id).then(() => {
+              got += 1;
+              if (!disposed && (got % 5 === 0 || got === imageIds.length)) {
+                setStatus(`${tr("원본 DICOM 수신…")} ${Math.round((got / imageIds.length) * 100)}% (${got}/${imageIds.length})`);
+              }
+            })));
+            if (disposed) return;
+          }
+        } else {
+          imageIds = await buildImageIds(studyUid, selSeries);
+        }
         if (disposed) return;
         if (imageIds.length < 3) {
           throw new Error(`볼륨 구성에 슬라이스가 부족합니다 (${imageIds.length}장) — 다른 시리즈를 선택하세요`);
@@ -646,7 +696,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
         voxelManager?: { getCompleteScalarDataArray?: () => Float32Array | Int16Array | Uint16Array | Uint8Array };
       };
       const data = vol.getScalarData?.() ?? vol.voxelManager?.getCompleteScalarDataArray?.();
-      if (!data) { setStatus("이 볼륨에선 채우기를 지원하지 못했습니다"); return; }
+      if (!data) { setStatus(tr("이 볼륨에선 채우기를 지원하지 못했습니다")); return; }
       const dim = vol.imageData.getDimensions();
       const seed = vol.imageData.worldToIndex(world).map((v) => Math.round(v));
       if (seed.some((v, i) => v < 0 || v >= dim[i])) return;
@@ -696,8 +746,8 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
       await ensureSegOn([...MPR_VIEWPORTS.map((v) => v.id), ...MIP_VPS.map((mv) => mv.id)]);
       window.setTimeout(() => { void ensureSegOn(["vp-vr"]); }, 400);   // VR 준비 후 세그 추가
       engine.render();
-      setStatus("채우기 완료 — " + painted.toLocaleString() + " 복셀 분할(색 표시 + 3D 컬러 렌더링)");
-    } catch (e) { setStatus(e instanceof Error ? e.message : "채우기 실패"); }
+      setStatus(tr("채우기 완료") + " — " + painted.toLocaleString() + " " + tr("복셀 분할(색 표시 + 3D 컬러 렌더링)"));
+    } catch (e) { setStatus(e instanceof Error ? e.message : tr("채우기 실패")); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ensureSegOn]);
   const clearFill = useCallback(() => {
@@ -734,16 +784,16 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
     const engine = engineRef.current;
     if (!engine) return;
     try {
-      setStatus("페인 볼륨 로딩…");
+      setStatus(tr("페인 볼륨 로딩…"));
       const ids = await buildImageIds(studyUid, uid);
-      if (ids.length < 3) { setStatus("슬라이스가 부족해 볼륨을 만들 수 없습니다"); return; }
+      if (ids.length < 3) { setStatus(tr("슬라이스가 부족해 볼륨을 만들 수 없습니다")); return; }
       const vid = `cornerstoneStreamingImageVolume:sv-${uid.slice(-24)}`;
       const vol = cache.getVolume(vid) ?? await volumeLoader.createAndCacheVolume(vid, { imageIds: ids });
       await (vol as { load?: () => Promise<unknown> | unknown }).load?.();
       await setVolumesForViewports(engine, [{ volumeId: vid }], [vpId]);
       engine.getViewport(vpId)?.render();
-      setStatus(`${vpId.replace("vp-", "").toUpperCase()} 페인 볼륨 교체 완료`);
-    } catch (e) { setStatus(e instanceof Error ? e.message : "페인 볼륨 교체 실패"); }
+      setStatus(`${vpId.replace("vp-", "").toUpperCase()} ${tr("페인 볼륨 교체 완료")}`);
+    } catch (e) { setStatus(e instanceof Error ? e.message : tr("페인 볼륨 교체 실패")); }
   }, [studyUid]);
 
   // 제거 모드 — ROI 박스 복셀을 최소값으로 마스킹(백업 후), MPR 에도 반영(공유 볼륨)
@@ -846,11 +896,11 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
         // 제거(Saturation) — ROI 복셀을 마스킹하고 나머지만 렌더링
         restoreVoxels();   // 이전 제거 영역 복원 후 새 영역 적용
         const ok = maskVoxels(mins, maxs);
-        setStatus(ok ? "ROI 제거 렌더링 — 선택 영역을 제외한 볼륨 표시(ROI Off 로 복원)"
-                     : "이 볼륨에선 제거 모드를 적용하지 못했습니다");
+        setStatus(ok ? tr("ROI 제거 렌더링 — 선택 영역을 제외한 볼륨 표시(ROI Off 로 복원)")
+                     : tr("이 볼륨에선 제거 모드를 적용하지 못했습니다"));
         if (ok) setCropOn(true);
       } else {
-        setStatus("ROI Focus 렌더링 — 선택 영역만 볼륨 표시(ROI Off 로 복원)");
+        setStatus(tr("ROI Focus 렌더링 — 선택 영역만 볼륨 표시(ROI Off 로 복원)"));
         window.setTimeout(applyCrop, 300);   // VR 이 이미 켜져 있으면 즉시, 새로 켜지면 vrOn 효과 후 재적용
       }
     };
@@ -974,7 +1024,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
             const az = Math.round(Math.atan2(n[0], n[2]) * 180 / Math.PI);
             const el = Math.round(Math.asin(Math.max(-1, Math.min(1, n[1]))) * 180 / Math.PI);
             const pos = (cam.position ?? [0, 0, 0]).map((x) => Math.round(x));
-            setVrCam(`회전 ${az}° / ${el}° · 카메라 (${pos[0]}, ${pos[1]}, ${pos[2]})`);
+            setVrCam(`${tr("회전")} ${az}° / ${el}° · ${tr("카메라")} (${pos[0]}, ${pos[1]}, ${pos[2]})`);
           } catch { /* 무시 */ }
         };
         elVr.addEventListener(Enums.Events.CAMERA_MODIFIED, onCam);
@@ -1016,28 +1066,28 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
         <b>Saintview 3D</b>
         {/* 시리즈 선택 — 자동 선택이 부적합한 검사(보정/스카웃) 대비 */}
         <select value={selSeries} onChange={(e) => setSelSeries(e.target.value)}
-                title="볼륨을 구성할 시리즈" style={{ fontSize: 12, maxWidth: 260 }}>
+                title={tr("볼륨을 구성할 시리즈")} style={{ fontSize: 12, maxWidth: 260 }}>
           {seriesList.map((s) => (
             <option key={s.uid} value={s.uid}>
-              {s.modality} · {s.count}장 · {s.desc || "(무제)"}
+              {s.modality} · {s.count}{tr("장")} · {s.desc || tr("(무제)")}
             </option>
           ))}
         </select>
         {/* 도구 모드 — Crosshair(십자선 연동) / W/L */}
         <span style={{ display: "flex", gap: 2 }}>
           <button onClick={() => toggleMode("crosshair")}
-                  title="십자선 토글 — 다른 기능과 동시 사용(Mix). ON 이면 무수정자 좌클릭 우선"
+                  title={tr("십자선 토글 — 다른 기능과 동시 사용(Mix). ON 이면 무수정자 좌클릭 우선")}
                   style={{ fontSize: 11.5, padding: "2px 10px",
                            background: modes.crosshair ? "var(--accent)" : undefined,
                            color: modes.crosshair ? "#fff" : undefined }}>✛ Crosshair</button>
           <button onClick={() => toggleMode("roi")}
-                  title="ROI 토글 — Crosshair 와 동시 사용 시 Shift+드래그로 그리기. Off 시 측정값·효과 삭제"
+                  title={tr("ROI 토글 — Crosshair 와 동시 사용 시 Shift+드래그로 그리기. Off 시 측정값·효과 삭제")}
                   style={{ fontSize: 11.5, padding: "2px 10px",
                            background: modes.roi ? "var(--accent)" : undefined,
                            color: modes.roi ? "#fff" : undefined }}>▭ ROI{cropOn ? " ●" : ""}</button>
           {modes.roi && (
             <>
-              <select value={roiShape} title="ROI 모양"
+              <select value={roiShape} title={tr("ROI 모양")}
                       style={{ fontSize: 11.5 }}
                       onChange={(e) => {
                         const v = e.target.value as "rect" | "oval" | "free";
@@ -1047,26 +1097,26 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
                 <option value="rect">Rectangle ROI</option>
                 <option value="free">Free ROI</option>
               </select>
-              <select value={roiEffect} title="Focus=선택 영역만 렌더링 · 제거=선택 영역을 빼고 렌더링"
+              <select value={roiEffect} title={tr("Focus=선택 영역만 렌더링 · 제거=선택 영역을 빼고 렌더링")}
                       style={{ fontSize: 11.5 }}
                       onChange={(e) => setRoiEffect(e.target.value as "focus" | "remove")}>
-                <option value="focus">Focus (영역만)</option>
-                <option value="remove">제거 (영역 빼고)</option>
+                <option value="focus">{tr("Focus (영역만)")}</option>
+                <option value="remove">{tr("제거 (영역 빼고)")}</option>
               </select>
             </>
           )}
           <button onClick={() => toggleMode("wl")}
-                  title="W/L 토글 — 다른 기능과 동시 사용 시 Ctrl+드래그"
+                  title={tr("W/L 토글 — 다른 기능과 동시 사용 시 Ctrl+드래그")}
                   style={{ fontSize: 11.5, padding: "2px 10px",
                            background: modes.wl ? "var(--accent)" : undefined,
                            color: modes.wl ? "#fff" : undefined }}>◐ W/L</button>
           <button onClick={() => toggleMode("fill")}
-                  title="채우기(영역 성장) — MPR 에서 클릭한 지점과 같은 농도의 연결 영역(예: 척수강 뇌척수액)을 색으로 채우고 3D 컬러 렌더링. 다시 누르면 Off(삭제)"
+                  title={tr("채우기(영역 성장) — MPR 에서 클릭한 지점과 같은 농도의 연결 영역(예: 척수강 뇌척수액)을 색으로 채우고 3D 컬러 렌더링. 다시 누르면 Off(삭제)")}
                   style={{ fontSize: 11.5, padding: "2px 10px",
                            background: modes.fill ? "var(--accent)" : undefined,
-                           color: modes.fill ? "#fff" : undefined }}>🪄 채우기{fillOn ? " ●" : ""}</button>
+                           color: modes.fill ? "#fff" : undefined }}>🪄 {tr("채우기")}{fillOn ? " ●" : ""}</button>
           {modes.fill && (
-            <input type="color" value={fillColor} title="분할 표시/3D 렌더링 색 선택"
+            <input type="color" value={fillColor} title={tr("분할 표시/3D 렌더링 색 선택")}
                    onChange={(e) => setFillColor(e.target.value)}
                    style={{ width: 30, height: 24, padding: 0, border: "1px solid var(--border)",
                             borderRadius: 4, background: "transparent", cursor: "pointer" }} />
@@ -1076,23 +1126,23 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
         {error && <span style={{ color: "var(--stat-emergency)", fontSize: 12 }}>⚠ {error}</span>}
         <div style={{ flex: 1 }} />
         <button onClick={() => setVrOn((v) => !v)}
-                title="3D 볼륨 렌더링 페인 추가/제거 — MPR 참조선의 점선 핸들로 슬랩 폭을 조정해도 자동 추가됩니다"
+                title={tr("3D 볼륨 렌더링 페인 추가/제거 — MPR 참조선의 점선 핸들로 슬랩 폭을 조정해도 자동 추가됩니다")}
                 style={{ fontSize: 11.5, padding: "2px 10px",
-                         background: vrOn ? "var(--accent)" : undefined, color: vrOn ? "#fff" : undefined }}>🧊 3D 렌더링</button>
+                         background: vrOn ? "var(--accent)" : undefined, color: vrOn ? "#fff" : undefined }}>🧊 {tr("3D 렌더링")}</button>
         <div style={{ position: "relative" }}>
           <button onClick={() => setMipSetOpen((o) => !o)}
-                  title="MIP Settings — 강도 투영 모드(MIP/MinIP/AvIP/끄기)·슬랩 두께"
+                  title={tr("MIP Settings — 강도 투영 모드(MIP/MinIP/AvIP/끄기)·슬랩 두께")}
                   style={{ fontSize: 11.5, padding: "2px 10px",
                            background: mipSetOpen ? "var(--bg-elevated)" : undefined }}>
-            ⚙ MIP 설정 <span style={{ color: "var(--ai)" }}>
-              {blend === "off" ? "끄기" : blend.toUpperCase()}{blend !== "off" ? ` | ${slabMm}mm` : ""}</span>
+            ⚙ {tr("MIP 설정")} <span style={{ color: "var(--ai)" }}>
+              {blend === "off" ? tr("끄기") : blend.toUpperCase()}{blend !== "off" ? ` | ${slabMm}mm` : ""}</span>
           </button>
           {mipSetOpen && (
             <div style={{ position: "absolute", top: "110%", right: 0, zIndex: 400, width: 280,
                           background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
                           boxShadow: "0 10px 30px rgba(0,0,0,0.55)", padding: 12, fontSize: 12 }}>
               <b style={{ fontSize: 13 }}>MIP Settings</b>
-              <div style={{ color: "var(--text-secondary)", fontSize: 11, marginBottom: 8 }}>강도 투영 설정</div>
+              <div style={{ color: "var(--text-secondary)", fontSize: 11, marginBottom: 8 }}>{tr("강도 투영 설정")}</div>
               <div style={{ color: "var(--text-secondary)", fontSize: 10.5, letterSpacing: 1, margin: "6px 0 4px" }}>BLEND MODE</div>
               {([["mip", "MIP", "최대 강도 투영 - 혈관, 석회화 강조"],
                  ["minip", "MinIP", "최소 강도 투영 - 기도, 폐 강조"],
@@ -1103,8 +1153,8 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
                               padding: "7px 10px", borderRadius: 6, cursor: "pointer", marginBottom: 2,
                               background: blend === k ? "var(--bg-elevated)" : "transparent" }}>
                   <span>
-                    <div style={{ fontWeight: 700 }}>{label}</div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-secondary)" }}>{desc}</div>
+                    <div style={{ fontWeight: 700 }}>{tr(label)}</div>
+                    <div style={{ fontSize: 10.5, color: "var(--text-secondary)" }}>{tr(desc)}</div>
                   </span>
                   {blend === k && <span style={{ color: "var(--accent)", fontWeight: 800 }}>✓</span>}
                 </div>
@@ -1130,7 +1180,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
                 ))}
               </div>
               <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11.5 }}>
-                커스텀:
+                {tr("커스텀:")}
                 <input type="number" min={1} max={200} value={slabMm} disabled={blend === "off"}
                        style={{ width: 64 }}
                        onChange={(e) => {
@@ -1140,18 +1190,18 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
               </label>
               <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid var(--border)",
                             color: "var(--accent)", fontWeight: 700, fontSize: 11.5 }}>
-                {blend === "off" ? "일반 렌더링" : `${blend === "mip" ? "MIP" : blend === "minip" ? "MinIP" : "AvIP"} | ${slabMm}mm`}
+                {blend === "off" ? tr("일반 렌더링") : `${blend === "mip" ? "MIP" : blend === "minip" ? "MinIP" : "AvIP"} | ${slabMm}mm`}
               </div>
             </div>
           )}
         </div>
         <span style={{ color: "var(--text-secondary)", fontSize: 11 }}>
-          좌={modes.crosshair ? "십자선" : modes.roi ? "ROI" : modes.wl ? "W/L" : "-"}
-          {modes.roi && modes.crosshair ? " · Shift+좌=ROI" : ""}
-          {modes.wl && (modes.crosshair || modes.roi) ? " · Ctrl+좌=W/L" : ""}
-          {modes.fill ? " · Alt+클릭=채우기" : ""} · 우=Zoom · 휠=스크롤 · 중=Pan
+          {tr("좌=")}{modes.crosshair ? tr("십자선") : modes.roi ? "ROI" : modes.wl ? "W/L" : "-"}
+          {modes.roi && modes.crosshair ? tr(" · Shift+좌=ROI") : ""}
+          {modes.wl && (modes.crosshair || modes.roi) ? tr(" · Ctrl+좌=W/L") : ""}
+          {modes.fill ? tr(" · Alt+클릭=채우기") : ""}{tr(" · 우=Zoom · 휠=스크롤 · 중=Pan")}
         </span>
-        <button onClick={onClose}>닫기</button>
+        <button onClick={onClose}>{tr("닫기")}</button>
       </div>
 
       {/* 2×2 뷰포트 그리드 */}
@@ -1207,7 +1257,7 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
             {v.id === "vp-vr" && vrCam && (
               <div style={{ position: "absolute", bottom: 4, left: 6, zIndex: 1, fontSize: 10.5,
                             color: "var(--text-secondary)", pointerEvents: "none", textShadow: "0 0 4px #000" }}>
-                {vrCam}{cropOn ? " · ROI 크롭" : ""}
+                {vrCam}{cropOn ? tr(" · ROI 크롭") : ""}
               </div>
             )}
           </div>
@@ -1239,10 +1289,10 @@ export function Viewer3D({ studyUid, onClose, embedded, seriesUid }: {
                  style={{ position: "relative", minHeight: 0, minWidth: 0,
                           display: mipMax && mipMax !== mv.id ? "none" : "block",
                           outline: "1px solid var(--border)" }}
-                 title="더블클릭 = 1×1 확대 / 다시 더블클릭·Esc = 1×3 복귀">
+                 title={tr("더블클릭 = 1×1 확대 / 다시 더블클릭·Esc = 1×3 복귀")}>
               <div style={{ position: "absolute", top: 4, left: 6, zIndex: 1, fontSize: 11,
                             color: "var(--ai)", pointerEvents: "none", textShadow: "0 0 4px #000" }}>
-                {mv.label}{mipMax === mv.id ? " (확대)" : ""}
+                {mv.label}{mipMax === mv.id ? tr(" (확대)") : ""}
               </div>
               <div ref={(el) => { containerRefs.current[mv.id] = el; }}
                    style={{ width: "100%", height: "100%" }}

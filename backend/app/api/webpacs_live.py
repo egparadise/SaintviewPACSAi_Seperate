@@ -356,6 +356,35 @@ def _render_with_retry(db: Session, study_uid: str, series_uid: str, sop_uid: st
 
 
 # ── 픽셀 (PHI — pixel_user: Bearer 또는 HttpOnly 픽셀 쿠키. 모듈 독스트링 참조) ──
+@router.get("/dicom-web/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}")
+def instance_file(study_uid: str, series_uid: str, sop_uid: str, request: Request,
+                  db: Session = Depends(get_db), user: dict = Depends(pixel_user)):
+    """원본 DICOM 파일(P10) — 3D(MPR/MIP) 볼륨용. wadouri 로더가 이걸 받아 클라이언트에서
+    기하·픽셀을 직접 파싱한다(서버는 metadata/frames QIDO 를 만들 필요가 없다).
+
+    Live 검사는 로컬 Orthanc 에 없어서 QIDO 가 빈 배열을 돌려줬고, 3D 가
+    "영상 시리즈가 없습니다" 로 죽는 원인이었다 — 이 엔드포인트가 그 반대편 절반이다.
+    캐시는 get_instance_bytes(디스크 SOP 캐시 + a_pixel_slot + SOP 락)를 그대로 탄다.
+    """
+    _uid(study_uid, series_uid, sop_uid)
+    # SOP UID 는 불변 식별자 — 같은 UID 면 항상 같은 바이트이므로 ETag/304 가 안전하다
+    etag = 'W/"dcm-' + hashlib.sha1(sop_uid.encode()).hexdigest()[:20] + '"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag,
+                                                  "Cache-Control": "private, max-age=86400"})
+    client_box: list = []
+
+    def _client():
+        if not client_box:
+            client_box.append(_wrap(lambda: live.service_client(db)))
+        return client_box[0]
+
+    data = _wrap(lambda: live.get_instance_bytes(
+        _client(), study_uid, series_uid, sop_uid))
+    return Response(content=data, media_type="application/dicom",
+                    headers={"Cache-Control": "private, max-age=86400", "ETag": etag})
+
+
 @router.get("/dicom-web/studies/{study_uid}/series/{series_uid}/instances/{sop_uid}/rendered")
 def rendered(study_uid: str, series_uid: str, sop_uid: str, request: Request,
              window: str = "", accept: str = "", quality: int = 90, preview: int = 0,

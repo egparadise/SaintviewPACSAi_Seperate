@@ -4,6 +4,7 @@
 // 여기서는 **실제 배치 그대로의 미리보기 상자**를 두고, 귀퉁이를 클릭해 고른 뒤 값을 넣는다.
 // 미리보기에는 예시 값이 그 자리에 그대로 찍히므로 결과를 눈으로 확인하면서 고를 수 있다.
 import { useState } from "react";
+import { t as tr, useLang } from "../lib/i18n";
 import {
   CORNERS, CORNER_LABEL, DEFAULT_CORNERS, DEFAULT_BY_MODALITY, OVERLAY_FIELDS,
   cornerLines, cornersFor, type CornerMap, type Corner, type OverlaySource,
@@ -11,7 +12,7 @@ import {
 
 /** 편집 대상 모달리티 — "*" 는 나머지 전부에 적용되는 공통값 */
 const MODS = ["*", "CR", "DR", "MG", "US", "CT", "MR", "XA", "NM", "PT"];
-const MOD_LABEL = (m: string) => (m === "*" ? "공통 (그 외 전부)" : m);
+const MOD_LABEL = (m: string) => (m === "*" ? tr("공통 (그 외 전부)") : m);
 
 /** 미리보기에 쓰는 예시 값 — 실제 판독 화면과 같은 모양으로 보이게 */
 const SAMPLE: Record<string, OverlaySource> = {
@@ -40,6 +41,7 @@ export function OverlayLayoutEditor({ cfg, onChange }: {
   cfg: Record<string, CornerMap>;
   onChange: (next: Record<string, CornerMap>) => void;
 }) {
+  useLang();
   const [mod, setMod] = useState("*");
   const [corner, setCorner] = useState<Corner>("tl");
   const cur: CornerMap = cornersFor(cfg, mod === "*" ? undefined : mod);
@@ -61,7 +63,7 @@ export function OverlayLayoutEditor({ cfg, onChange }: {
     <div style={{ display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
       {/* 모달리티 — 값이 따로 지정된 것은 ● 로 표시 */}
       <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 132 }}>
-        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 2 }}>모달리티</div>
+        <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 2 }}>{tr("모달리티")}</div>
         {MODS.map((m) => (
           <button key={m} onClick={() => setMod(m)}
                   style={{ textAlign: "left", fontSize: 11.5, padding: "3px 7px",
@@ -76,8 +78,7 @@ export function OverlayLayoutEditor({ cfg, onChange }: {
       <div style={{ flex: 1, minWidth: 380 }}>
         {/* 미리보기 — 귀퉁이를 클릭해 고른다. 값은 예시로 실제 위치에 찍힌다 */}
         <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 4 }}>
-          미리보기 — 귀퉁이를 클릭해 고른 뒤, 아래에서 값을 넣거나 뺍니다
-          (다른 귀퉁이에 있던 값은 자동으로 옮겨집니다)
+          {tr("미리보기 — 귀퉁이를 클릭해 고른 뒤, 아래에서 값을 넣거나 뺍니다 (다른 귀퉁이에 있던 값은 자동으로 옮겨집니다)")}
         </div>
         <div style={{ position: "relative", width: "100%", aspectRatio: "16 / 9",
                       background: "linear-gradient(135deg,#1b1b1b 0%,#3a3a3a 45%,#141414 100%)",
@@ -90,7 +91,7 @@ export function OverlayLayoutEditor({ cfg, onChange }: {
             const lines = cornerLines(cur[c], sample);
             const on = corner === c;
             return (
-              <div key={c} onClick={() => setCorner(c)} title={`${CORNER_LABEL[c]} 선택`}
+              <div key={c} onClick={() => setCorner(c)} title={`${tr(CORNER_LABEL[c])} ${tr("선택")}`}
                    style={{ position: "absolute", ...posStyle[c], cursor: "pointer",
                             padding: "3px 6px", borderRadius: 4, minWidth: 66, minHeight: 20,
                             border: on ? "1px dashed var(--accent)" : "1px dashed transparent",
@@ -98,7 +99,7 @@ export function OverlayLayoutEditor({ cfg, onChange }: {
                             fontSize: 10.5, lineHeight: 1.45, color: "#fff",
                             textShadow: "0 0 3px #000", whiteSpace: "pre" }}>
                 {lines.length ? lines.join("\n")
-                  : <span style={{ opacity: 0.5 }}>({CORNER_LABEL[c]} 비어 있음)</span>}
+                  : <span style={{ opacity: 0.5 }}>({tr(CORNER_LABEL[c])} {tr("비어 있음")})</span>}
               </div>
             );
           })}
@@ -106,44 +107,44 @@ export function OverlayLayoutEditor({ cfg, onChange }: {
 
         {/* 값 선택 — 현재 귀퉁이에 있는 것은 강조, 다른 귀퉁이에 있는 것은 그 위치를 표시 */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "9px 0 5px" }}>
-          <b style={{ fontSize: 12 }}>선택한 귀퉁이: {CORNER_LABEL[corner]}</b>
+          <b style={{ fontSize: 12 }}>{tr("선택한 귀퉁이:")} {tr(CORNER_LABEL[corner])}</b>
           <button style={{ fontSize: 11 }} onClick={() => setCur({ ...cur, [corner]: [] })}>
-            이 귀퉁이 비우기
+            {tr("이 귀퉁이 비우기")}
           </button>
           <button style={{ fontSize: 11 }}
                   onClick={() => { const n = { ...cfg }; delete n[mod]; onChange(n); }}>
-            기본값으로
+            {tr("기본값으로")}
           </button>
         </div>
         {Array.from(new Set(OVERLAY_FIELDS.map((f) => f.group))).map((g) => (
           <div key={g} style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center",
                                 marginBottom: 4 }}>
-            <span style={{ fontSize: 10.5, color: "var(--text-secondary)", width: 42 }}>{g}</span>
+            <span style={{ fontSize: 10.5, color: "var(--text-secondary)", width: 42 }}>{tr(g)}</span>
             {OVERLAY_FIELDS.filter((f) => f.group === g).map((f) => {
               const at = whereIs(f.id);
               const here = at === corner;
               return (
                 <button key={f.id} onClick={() => toggle(f.id)}
-                        title={at ? `${CORNER_LABEL[at]}에 있음 — 클릭하면 ${here ? "제거" : `${CORNER_LABEL[corner]}로 이동`}`
-                                  : `${CORNER_LABEL[corner]}에 추가`}
+                        title={at ? `${tr(CORNER_LABEL[at])}${tr("에 있음 — 클릭하면")} ${here ? tr("제거") : `${tr(CORNER_LABEL[corner])}${tr("로 이동")}`}`
+                                  : `${tr(CORNER_LABEL[corner])}${tr("에 추가")}`}
                         style={{ fontSize: 11, padding: "2px 7px", borderRadius: 10,
                                  background: here ? "var(--accent)" : undefined,
                                  color: here ? "#fff" : at ? "var(--text-secondary)" : undefined,
                                  opacity: at && !here ? 0.7 : 1 }}>
-                  {f.label}{at && !here ? ` · ${CORNER_LABEL[at]}` : ""}
+                  {tr(f.label)}{at && !here ? ` · ${tr(CORNER_LABEL[at])}` : ""}
                 </button>
               );
             })}
           </div>
         ))}
         <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 6, lineHeight: 1.7 }}>
-          값이 없는 항목은 화면에 아예 그리지 않습니다(빈 줄이 생기지 않음).
-          <b> 모달리티에 따로 지정하지 않으면 공통 설정</b>을, 공통도 없으면 내장 기본값을 씁니다.
+          {tr("값이 없는 항목은 화면에 아예 그리지 않습니다(빈 줄이 생기지 않음).")}
+          <b> {tr("모달리티에 따로 지정하지 않으면 공통 설정")}</b>{tr("을, 공통도 없으면 내장 기본값을 씁니다.")}
           {mod !== "*" && !cfg[mod] && DEFAULT_BY_MODALITY[mod] && (
-            <> 지금 {mod} 는 <b>{mod} 전용 내장 기본값</b>을 쓰는 중입니다.</>
+            <> {tr("지금")} {mod} {tr("는")} <b>{mod} {tr("전용 내장 기본값")}</b>{tr("을 쓰는 중입니다.")}</>
           )}
           {mod === "*" && !cfg["*"] && (
-            <> 지금은 내장 기본값({DEFAULT_CORNERS.tl.length}개 항목 등)을 쓰는 중입니다.</>
+            <> {tr("지금은 내장 기본값")}({DEFAULT_CORNERS.tl.length}{tr("개 항목 등)을 쓰는 중입니다.")}</>
           )}
         </div>
       </div>
