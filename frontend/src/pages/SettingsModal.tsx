@@ -6,6 +6,8 @@ import {
   INFI_COLUMNS, SV_COLUMNS, SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
+// UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
+import { LANGS, setLang, t as tr, useLang } from "../lib/i18n";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
 import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
 import { dlForgetDone, dlProgress, type DlProgress } from "../lib/dlScheduler";
@@ -68,7 +70,8 @@ function FolderIcon({ size = 15 }: { size?: number }) {
   );
 }
 
-const TREE: { key: string; label: string; admin?: boolean; scope: SettingsScope; parent?: string }[] = [
+// labelKey 가 있으면 표기는 i18n(tr)을 따른다 — label 은 한국어 원문이자 폴백.
+const TREE: { key: string; label: string; labelKey?: string; admin?: boolean; scope: SettingsScope; parent?: string }[] = [
   // 시스템 — 서버 운영(시스템 관리자)
   { key: "server", label: "서버 (Server)", admin: true, scope: "system" },
   { key: "overview", label: "운영 현황 (감독)", admin: true, scope: "system" },
@@ -84,26 +87,26 @@ const TREE: { key: string; label: string; admin?: boolean; scope: SettingsScope;
   { key: "pdf", label: "판독서 PDF", admin: true, scope: "hospital" },
   { key: "ai", label: "AI 기능", admin: true, scope: "hospital" },
   // 뷰어 — 사용자/판독 환경
-  { key: "env", label: "환경 (Environment)", scope: "viewer" },
-  { key: "worklist", label: "워크리스트", scope: "viewer" },
+  { key: "env", label: "환경 (Environment)", labelKey: "nav.env", scope: "viewer" },
+  { key: "worklist", label: "워크리스트", labelKey: "nav.worklist", scope: "viewer" },
   // 표기·순서 규약: SaintView → I-View → T-View (선택 뷰어·모드 프로파일 콤보와 동일)
   { key: "wlSaint", label: "SaintView", scope: "viewer", parent: "worklist" },
   { key: "wlIn", label: "I-View", scope: "viewer", parent: "worklist" },
   { key: "wlTy", label: "T-View", scope: "viewer", parent: "worklist" },
-  { key: "report", label: "리포트", scope: "viewer" },
-  { key: "reading", label: "판독 (Reading)", scope: "viewer" },
+  { key: "report", label: "리포트", labelKey: "nav.report", scope: "viewer" },
+  { key: "reading", label: "판독 (Reading)", labelKey: "nav.reading", scope: "viewer" },
   // 뷰어 설정 3분리 — 공통(선택/모드/OHIF) · TY Viewer 전용 · In Viewer 전용 (키 이름은 기존 유지 — 로밍 호환)
-  { key: "viewer", label: "뷰어 공통", scope: "viewer" },
+  { key: "viewer", label: "뷰어 공통", labelKey: "nav.viewerCommon", scope: "viewer" },
   { key: "viewerSv", label: "SaintView", scope: "viewer", parent: "viewer" },
   { key: "viewerIn", label: "I-View", scope: "viewer", parent: "viewer" },
   { key: "viewerTy", label: "T-View", scope: "viewer", parent: "viewer" },
-  { key: "monitor", label: "모니터 (Display)", scope: "viewer" },
-  { key: "shortcuts", label: "단축키 (Mouse·Key)", scope: "viewer" },
-  { key: "policy", label: "정책 (Policy)", scope: "viewer" },
-  { key: "hp", label: "행잉 (HP)", scope: "viewer" },
-  { key: "speed", label: "속도 측정 (Speed Test)", scope: "viewer" },
+  { key: "monitor", label: "모니터 (Display)", labelKey: "nav.monitor", scope: "viewer" },
+  { key: "shortcuts", label: "단축키 (Mouse·Key)", labelKey: "nav.shortcuts", scope: "viewer" },
+  { key: "policy", label: "정책 (Policy)", labelKey: "nav.policy", scope: "viewer" },
+  { key: "hp", label: "행잉 (HP)", labelKey: "nav.hp", scope: "viewer" },
+  { key: "speed", label: "속도 측정 (Speed Test)", labelKey: "nav.speed", scope: "viewer" },
   // 정보 — 버전·적용일자·제조사(지속적인 버전 관리). 모든 scope 에서 접근 가능하도록 각 scope 에 배치
-  { key: "about", label: "정보 (About)", scope: "viewer" },
+  { key: "about", label: "정보 (About)", labelKey: "nav.about", scope: "viewer" },
   { key: "about", label: "정보 (About)", scope: "system" },
   { key: "about", label: "정보 (About)", scope: "hospital" },
 ];
@@ -186,6 +189,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   role: string; onClose: () => void; scope?: SettingsScope;
 }) {
   const isAdmin = role === "admin";
+  const uiLang = useLang();   // 언어 변경 시 이 컴포넌트 전체가 다시 그려진다 (tr 반영)
   // 현재 스코프에서 보이는 탭만 (단계별 분리)
   const visibleTabs = TREE.filter((t) => t.scope === scope && (!t.admin || isAdmin));
   const [page, setPage] = useState<string>(visibleTabs[0]?.key ?? "");
@@ -851,7 +855,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                        background: page === t.key ? "var(--accent-subtle)" : undefined,
                        color: page === t.key ? "var(--text-primary)" : "var(--text-secondary)",
                      }}>
-                  <FolderIcon /> {t.label}
+                  <FolderIcon /> {t.labelKey ? tr(t.labelKey) : t.label}
                 </div>
                 {/* 하위 항목 — 부모 아래 들여쓰기로 표시(워크리스트·뷰어 공통의 뷰어별 페이지) */}
                 {visibleTabs.filter((c) => (c as { parent?: string }).parent === t.key).map((c) => (
@@ -862,7 +866,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                          background: page === c.key ? "var(--accent-subtle)" : undefined,
                          color: page === c.key ? "var(--text-primary)" : "var(--text-secondary)",
                        }}>
-                    <span style={{ opacity: 0.6 }}>└</span> {c.label}
+                    <span style={{ opacity: 0.6 }}>└</span> {c.labelKey ? tr(c.labelKey) : c.label}
                   </div>
                 ))}
               </div>
@@ -1013,18 +1017,42 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             )}
             {page === "env" && (
               <>
+                {/* ★ 최상단 고정(사용자 규정) — UI 언어. 즉시 적용 + viewer.prefs.ui_lang 로밍.
+                    이관 전 문자열은 한국어로 남는다(lib/i18n.ts 폴백 규칙) — 점진 이관 대상. */}
+                <Group title={`${tr("language")} (Language)`}>
+                  <Row label={tr("language")}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <select value={uiLang}
+                              onChange={(e) => {
+                                const v = e.target.value as (typeof LANGS)[number]["code"];
+                                setLang(v);   // 즉시 적용 (localStorage — 로그인 화면에도 미리 반영)
+                                // 계정 로밍 — 다른 PC 에서도 같은 언어. 실패해도 이 PC 적용은 유지된다.
+                                api.getSetting("viewer.prefs")
+                                  .then((r) => api.putSetting("viewer.prefs", { ...(r.value || {}), ui_lang: v }, "user"))
+                                  .catch(() => {});
+                              }}>
+                        {LANGS.map((l) => <option key={l.code} value={l.code}>{l.native}</option>)}
+                      </select>
+                      <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
+                        {tr("language") === "언어"
+                          ? "선택 즉시 적용됩니다 — 메뉴·버튼부터 단계적으로 번역이 확장됩니다."
+                          : "Applied immediately — menus and buttons first; coverage grows incrementally."}
+                      </span>
+                    </span>
+                  </Row>
+                </Group>
                 <Group title="워크리스트 동작">
-                  <Row label="목록 갱신">
+                  <Row label={tr("env.listRefresh")}>
                     <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                       <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <input type="radio" name="wlrefresh" checked={refreshMode === "manual"}
                                onChange={() => setRefreshMode("manual")} />
-                        수동 (SEARCH 를 누를 때만)
+                        {tr("manual")} (SEARCH)
                       </label>
                       <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <input type="radio" name="wlrefresh" checked={refreshMode === "auto"}
                                onChange={() => setRefreshMode("auto")} />
-                        자동
+                        {tr("auto")}
                       </label>
                       <input type="number" min={1} max={3600} value={refreshSec}
                              disabled={refreshMode !== "auto"}
@@ -1033,7 +1061,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                                setRefreshSec(Number.isFinite(n) ? Math.min(3600, Math.max(1, Math.round(n))) : 10);
                              }}
                              style={{ width: 70, opacity: refreshMode === "auto" ? 1 : 0.45 }} />
-                      <span style={{ color: "var(--text-secondary)" }}>초마다</span>
+                      <span style={{ color: "var(--text-secondary)" }}>{tr("env.everySec")}</span>
                     </span>
                   </Row>
                   <Row label="">
@@ -1047,7 +1075,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       )}
                     </span>
                   </Row>
-                  <Row label="기본 상태 필터">
+                  <Row label={tr("env.statusFilter")}>
                     <select value={defaultStatus} onChange={(e) => setDefaultStatus(e.target.value)}>
                       <option value="">전체</option><option value="unread">미판독(확정 전)</option>
                       <option value="draft_ready">AI초안</option>
@@ -3029,11 +3057,11 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       .catch((e) => setSaved(`⚠ 저장 실패 — ${e instanceof Error ? e.message : String(e)}`))
                       .finally(() => setSaving(false));
                   }}>
-            {saving ? "저장 중…" : "OK (저장)"}
+            {saving ? "저장 중…" : tr("okSave")}
           </button>
           {/* 저장 전에는 Cancel(=버리고 나감), 저장이 **끝난 뒤에만** 닫기.
               라벨이 곧 상태 표시다 — 아직 Cancel 이면 저장이 안 끝난 것이다. */}
-          <button onClick={onClose}>{dirtySaved ? "닫기" : "Cancel"}</button>
+          <button onClick={onClose}>{dirtySaved ? tr("close") : tr("cancel")}</button>
         </div>
       </div>
       </div>

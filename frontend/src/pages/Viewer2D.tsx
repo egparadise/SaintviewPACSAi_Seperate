@@ -46,6 +46,7 @@ import { onDlFrame, opfsFrameUrl, setDlMode } from "../lib/dlCache";
 import { readDlPrefs } from "../lib/dlPrefs";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { rawAt, samplePixels } from "../lib/pixelTools";
+import { t as tr, useLang } from "../lib/i18n";
 
 // 내장 MPR/MIP — 새 창 없이 현재 뷰포트 영역에 Axial/Sagittal/Coronal+MIP 표시
 const Viewer3DEmbed = lazy(() => import("./Viewer3D").then((m) => ({ default: m.Viewer3D })));
@@ -538,6 +539,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   skin?: "ty" | "saint";             // SAINT VIEW 스킨 — 상단 가로 메뉴 툴바 + 세로 팔레트 숨김 (엔진·기능 동일)
 }) {
   const [prefs, setPrefs] = useState<ViewerPrefs>(DEFAULT_PREFS);
+  useLang();   // UI 언어 변경(설정 창·다른 창 storage 이벤트)에 즉시 반응
   // 병원별 영상 전송 형식 로드 — 관리자 설정(JPEG 품질/PNG)을 rendered 호출에 반영
   useEffect(() => {
     const hid = Number(localStorage.getItem("sv_active_hospital") || 0);
@@ -4903,7 +4905,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                            : collabDockOpen
                              ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" }
                              : {}) }}>
-          협진{cl.session ? ` · ${cl.session.participants.filter((p) => p.state === "joined").length}` : ""}
+          {tr("collab")}{cl.session ? ` · ${cl.session.participants.filter((p) => p.state === "joined").length}` : ""}
         </button>
         {/* 3D 뷰어(MPR/MIP) — 내장 Axial/Sagittal/Coronal + MIP 로 뷰포트 전환(재클릭 시 2D 복귀) */}
         <button title="3D 뷰어 — MPR(Axial/Sagittal/Coronal) + MIP 재구성 (CT/MR 볼륨). 다시 누르면 2D 복귀"

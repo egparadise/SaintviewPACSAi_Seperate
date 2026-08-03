@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import "./theme.css";
 import { hasToken, setToken, api, type LoginResp } from "./api";
 import { collab } from "./lib/collab";
+import { setLang, t as tr, useLang, type Lang } from "./lib/i18n";
 import { CollabGlobal } from "./components/CollabGlobal";
 import { portalRole, portalUrl, type PortalTarget } from "./lib/portals";
 import { Worklist } from "./pages/Worklist";
@@ -108,6 +109,16 @@ export default function App() {
   useEffect(() => {
     if (session) collab.reset();
     else collab.close();
+  }, [session]);
+
+  useLang();   // 언어 변경 시 상단 버튼(협진·설정·로그아웃) 등이 즉시 다시 그려진다
+  // UI 언어 로밍 — 로그인 직후 계정 저장값(viewer.prefs.ui_lang)을 이 PC 에 적용한다.
+  // localStorage 값이 이미 같으면 setLang 이 no-op 이라 화면 깜빡임은 없다.
+  useEffect(() => {
+    if (!session) return;
+    api.getSetting("viewer.prefs")
+      .then((r) => { const v = (r.value as { ui_lang?: Lang } | null)?.ui_lang; if (v) setLang(v); })
+      .catch(() => { /* 설정을 못 읽어도 로그인 흐름은 막지 않는다 */ });
   }, [session]);
 
   const logout = () => {
@@ -215,10 +226,10 @@ export default function App() {
             실제 영상 공유(세션)는 뷰어 창에서 [협진] 버튼으로 시작한다. */}
         <button onClick={() => setCollabOpen((v) => !v)} title="협진 — 친구 · 메신저"
                 style={collabOpen ? { background: "var(--accent)", color: "#fff", borderColor: "var(--accent)" } : undefined}>
-          협진
+          {tr("collab")}
         </button>
-        <button onClick={() => setSettingsOpen(true)}>설정</button>
-        <button onClick={logout}>로그아웃</button>
+        <button onClick={() => setSettingsOpen(true)}>{tr("settings")}</button>
+        <button onClick={logout}>{tr("logout")}</button>
       </header>
       <CollabGlobal open={collabOpen} onClose={() => setCollabOpen(false)} />
       {settingsOpen && <SettingsModal role={session.role} scope="viewer" onClose={() => setSettingsOpen(false)} />}
