@@ -806,7 +806,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
           <div style={{ padding: "7px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0,
                         background: "rgba(251,191,36,0.10)", color: "#fbbf24",
                         fontSize: 11.5, lineHeight: 1.65, maxHeight: 168, overflowY: "auto" }}>
-            <b>2D 행잉 설정 정리</b> — 아래 내용은 <b>어느 탭에서든 OK(저장)</b> 를 누르면 확정됩니다.
+            <b>General Layout Setting 저장본 정리</b> — 아래 내용은 <b>어느 탭에서든 OK(저장)</b> 를 누르면 확정됩니다.
             {visibleTabs.some((t) => t.key === "viewer") && (
               <> <span onClick={() => setPage("viewer")}
                        style={{ textDecoration: "underline", cursor: "pointer" }}>표 열기</span></>
@@ -833,7 +833,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             ))}
             {h2dDropped.length > 0 && (
               <div>
-                · 구 I-View 설정의 <b>{h2dDropped.join(", ")}</b> 는 2D 행잉 표에 행이 없어
+                · 구 I-View 설정의 <b>{h2dDropped.join(", ")}</b> 는 General Layout 표에 행이 없어
                 <b> 어떤 뷰어도 읽지 않습니다</b> — 필요하면 해당 모달리티를 표에서 다시 지정하세요.
               </div>
             )}
@@ -2065,9 +2065,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
                 <b>In Viewer 전용</b> — 표시·아이콘·사용 패턴 설정은 뷰어별로 적용되고, 판독·측정 등 기능은 두 뷰어 동일합니다.
               </div>
-              <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
+              <Group title="I-View General Layout Setting (이 뷰어 전용 — 모달리티 → Series / Image)">
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                  이 뷰어 전용 2D 행잉. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.
+                  이 뷰어 전용 General Layout. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.
                 </div>
                 {h2dCommonOn && (
                   <div style={{ fontSize: 11, color: "#fbbf24", marginBottom: 5 }}>
@@ -2208,14 +2208,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               </>
             )}
             {page === "viewer" && (
-              <Group title="2D 행잉 (모달리티 → Series / Image 분할) — 공통">
+              <Group title="Common General Layout Setting (모달리티 → Series / Image 분할)">
                 <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
                   {/* 체크만 바꾸고 끝내면 안 된다 — 읽히는 맵이 통째로 바뀌므로 그 자리에서 재정리 */}
                   <input type="checkbox" checked={h2dCommonOn} onChange={(e) => h2dRemigrate(e.target.checked)} />
                   이 공통 설정을 모든 뷰어에 우선 적용
                 </label>
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5, lineHeight: 1.7 }}>
-                  <b>체크</b>: SaintView/I-View/T-View 각 뷰어의 개별 2D 행잉은 <b>무시</b>됩니다 — 이 표만 적용(폴백 없음).<br />
+                  <b>체크</b>: SaintView/I-View/T-View 각 뷰어의 개별 General Layout Setting 은 <b>무시</b>됩니다 — 이 표만 적용(폴백 없음).<br />
                   <b>해제</b>: 이 공통 표는 적용되지 않고 각 뷰어(뷰어 공통 &gt; SaintView/I-View/T-View)의 개별 설정만 사용합니다.<br />
                   어느 쪽이든 해당 모달리티 칸을 지정하지 않았으면 <b>설정 없음</b> = 뷰어 자동 규칙(1×1, CT/MR 3×3 등)입니다.<br />
                   맘모(<b>MG</b>)는 체크와 무관하게 언제나 아래 <b>&lsquo;MG — 유방 사이 여백 제거&rsquo;</b> 규정을 따릅니다(이 표에 MG 행이 없는 이유).<br />
@@ -2345,9 +2345,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   const vk = page === "viewerSv" ? "sv" : "ty";
                   const vmap = h2dByViewer[vk] ?? {};
                   return (
-                    <Group title="2D 행잉 (이 뷰어 전용 — 모달리티 → Series / Image)">
+                    <Group title={`${page === "viewerSv" ? "SaintView" : "T-View"} General Layout Setting (이 뷰어 전용 — 모달리티 → Series / Image)`}>
                       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
-                        이 뷰어 전용 2D 행잉. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.
+                        이 뷰어 전용 General Layout. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.
                       </div>
                       {h2dCommonOn && (
                         <div style={{ fontSize: 11, color: "#fbbf24", marginBottom: 5 }}>
