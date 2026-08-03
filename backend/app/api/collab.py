@@ -30,7 +30,12 @@ router = APIRouter(prefix="/api/collab", tags=["collab"])
 def _me(db: Session, user: dict) -> Account:
     acc = svc.account_of(db, user)
     if acc is None:
-        raise HTTPException(status_code=401, detail="계정을 찾을 수 없습니다")
+        # ⚠ 401 이면 안 된다. 프론트의 전역 401 처리기는 '세션 만료' 로 보고
+        #   setToken(null) + 강제 리로드를 한다 — 협진 버튼을 누르는 순간 로그인 화면으로
+        #   튕겨 나가는 실제 사고가 이것이었다(A 계정 로그인 + 미러 행 없음 조합).
+        #   세션은 멀쩡하고 '이 기능을 쓸 자격 행이 없다' 는 뜻이므로 403 이 맞다.
+        raise HTTPException(status_code=403,
+                            detail="협진을 쓸 수 없는 계정입니다 — 다시 로그인하면 등록됩니다")
     return acc
 
 

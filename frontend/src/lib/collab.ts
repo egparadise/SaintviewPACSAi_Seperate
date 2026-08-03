@@ -102,6 +102,8 @@ const BACKOFF_MS = [500, 1000, 2000, 5000, 10000, 30000];
 const PING_MS = 25000;
 /** 인증 실패 close 코드 — 재연결해 봐야 같은 결과라 즉시 포기한다(무한 재시도 폭주 방지) */
 const CLOSE_UNAUTHORIZED = 4401;
+/** 토큰은 유효한데 협진 계정 행이 없다(백엔드 CLOSE_NO_ACCOUNT) — 재로그인하면 미러가 생긴다 */
+const CLOSE_NO_ACCOUNT = 4403;
 const CLOSE_TOO_MANY = 4429;
 
 function wsUrl(): string {
@@ -180,6 +182,10 @@ class CollabClient {
       if (ev.code === CLOSE_UNAUTHORIZED) {
         // 토큰이 죽었다 — 재연결해도 같은 결과다. api.ts 의 401 처리가 곧 로그아웃시킨다.
         this.fatal = "인증이 만료되었습니다";
+      } else if (ev.code === CLOSE_NO_ACCOUNT) {
+        // 세션은 멀쩡하다 — 협진 계정 행만 없다(구 로그인). 재연결해 봐야 같으므로 멈추되,
+        // '인증 만료' 라고 말하면 거짓 안내다. 재로그인하면 미러가 생겨 해결된다.
+        this.fatal = "협진을 쓸 수 없는 계정입니다 — 로그아웃 후 다시 로그인하면 등록됩니다";
       } else if (ev.code === CLOSE_TOO_MANY) {
         this.fatal = "협진 연결 수가 한도를 넘었습니다 — 사용하지 않는 뷰어 창을 닫으세요";
       }

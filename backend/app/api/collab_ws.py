@@ -32,6 +32,9 @@ router = APIRouter(tags=["collab"])
 
 # 정책 close 코드 (4000~4999 = 애플리케이션 정의)
 CLOSE_UNAUTHORIZED = 4401
+# 토큰은 유효한데 Account 행이 없다(협진 자격 없음) — 인증 만료(4401)와 **다른 코드**여야 한다.
+# 4401 로 닫으면 프론트가 "인증이 만료되었습니다" 를 띄우는데 세션은 멀쩡하다(거짓 안내).
+CLOSE_NO_ACCOUNT = 4403
 CLOSE_TOO_MANY = 4429
 CLOSE_INTERNAL = 4500
 
@@ -82,7 +85,7 @@ async def collab_ws(websocket: WebSocket) -> None:
 
     ctx = await run_in_threadpool(_sync_context, user)
     if ctx is None:
-        await websocket.close(code=CLOSE_UNAUTHORIZED)
+        await websocket.close(code=CLOSE_NO_ACCOUNT)
         return
 
     # 서브프로토콜을 반드시 echo 해야 브라우저가 핸드셰이크를 받아들인다

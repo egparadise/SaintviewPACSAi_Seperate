@@ -281,6 +281,16 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
     except (TypeError, ValueError):
         role = "doctor"
 
+    # 협진은 Account.id 기반이다 — A 신원도 미러 행이 있어야 쓸 수 있다. A 가 방금 검증한
+    # 신원이므로 여기서 보장한다(멱등). 실패해도 로그인은 막지 않는다.
+    try:
+        from app.services.account_mirror import ensure_mirror
+
+        ensure_mirror(db, user_id=body.user_id, name=a_name, role=role,
+                      a_user_idx=int(a_user_idx or 0))
+    except Exception:  # noqa: BLE001 — 미러는 부가 기능, 로그인 가용성이 우선
+        db.rollback()
+
     # B 세션 + JWT(sid) — B Account 없이 A 신원으로 세션 구성(sub=A user_id).
     sid = session_service.register(db, None, f"a:{body.user_id}")
     db.commit()

@@ -63,6 +63,43 @@ def is_active(row: dict) -> bool:
     return str(row.get("user_status") or "A").upper() != "D"
 
 
+def ensure_mirror(db: Session, *, user_id: str, name: str, role: str,
+                  a_user_idx: int = 0, hospital_id: int | None = None) -> "Account":
+    """A 로그인 **성공 직후** 그 계정 하나의 미러 행을 보장한다(멱등).
+
+    ⚠ 왜 필요한가(실제 사고): 협진(친구·메신저·세션)은 Account.id 기반이다. A 계정으로
+      로그인한 사용자는 미러 행이 없으면 /api/collab/* 가 실패하는데, 그것이 401 로 나가던
+      시절 프론트 전역 처리기가 '세션 만료' 로 오인해 **강제 로그아웃**시켰다 —
+      "협진 버튼을 누르면 화면이 튕겨 나간다" 가 그 증상이다.
+      A 가 방금 신원을 검증해 줬으므로 이 시점의 미러 생성은 sync_accounts 와 같은 성격이다
+      (아이디·이름·역할만, password_hash="" 로 로컬 로그인 불가 — 모듈 주석의 계약 동일).
+
+    ⚠ sync_accounts 를 1건짜리 목록으로 재사용하면 안 된다 — 그 함수는 '목록에 없는 미러를
+      비활성' 하므로 나머지 미러 전원이 꺼진다.
+
+    손으로 만든 동명 로컬 계정(a_user_idx 없음)은 **건드리지 않고 그대로 쓴다** —
+    미러로 바꾸면 관리자가 자기 계정에서 잠길 수 있다(sync_accounts 와 같은 규칙).
+    """
+    from app.models import Account
+
+    acc = db.execute(select(Account).where(Account.username == user_id)).scalar_one_or_none()
+    if acc is not None:
+        if getattr(acc, "a_user_idx", None):
+            # 미러 행 — 이름·활성만 따라간다. 역할은 관리자가 손봤을 수 있어 덮지 않는다.
+            if name and acc.title != name:
+                acc.title = name
+            if not acc.enabled:
+                acc.enabled = True          # A 가 방금 인증했다 — 차단이 풀린 계정이다
+            if a_user_idx and not acc.a_user_idx:
+                acc.a_user_idx = a_user_idx
+        return acc
+    acc = Account(username=user_id, password_hash="", role=role, hospital_id=hospital_id,
+                  enabled=True, title=name, a_user_idx=a_user_idx or 0)
+    db.add(acc)
+    db.flush()
+    return acc
+
+
 def sync_accounts(db: Session, rows: list[dict], *, hospital_id: int | None = None,
                   dry_run: bool = False) -> MirrorResult:
     """A 사용자 목록 → accounts 미러(멱등). 같은 목록을 두 번 넣어도 결과가 같다."""
