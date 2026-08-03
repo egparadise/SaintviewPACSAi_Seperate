@@ -1536,12 +1536,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /** 이 modality 를 열 때 걸 분할을 **다시 계산**해 적용하고, 새 페인 수를 돌려준다.
    *  ⚠ setLayout 은 비동기라 직후에 state 를 읽으면 옛값이다 — 그래서 페인 수를 반환값으로 준다.
    *    (그 혼동이 "DR 을 열었는데 CT 의 2×2 격자에 빈 칸이 남는" 사고의 절반이었다.) */
-  const applyHangFor = (modality: string): number => {
+  const applyHangFor = (modality: string, hpActive?: boolean): number => {
     // ⚠ 행잉 프로토콜이 걸려 있으면 분할은 **HP 가 정한다** — 여기서 덮으면 규정 위반이다.
     //   (우선순위: HP > 뷰어 공통 > 뷰어별. HP 기본은 해제.)
+    //   hpActive 를 인자로도 받는 이유: 검사 전환에서 재매칭 직후에는 setHpName 이 아직
+    //   반영되기 전이라 ref 가 옛값이다 — 호출부가 방금 판정한 결과를 그대로 넘긴다.
     const r = resolveHang2d(hang2dSrcRef.current as never, hang2dViewerKey(skin), modality,
-                            mgCfg.on ? mgCfg.layout : null,
-                            hpNameRef.current !== "기본");
+                            mgCfg.on ? { layout: mgCfg.layout, series: mgCfg.series_layout } : null,
+                            hpActive ?? hpNameRef.current !== "기본");
     if (r.s && LAYOUTS[r.s]) setLayout(r.s as keyof typeof LAYOUTS);
     hang2dImgRef.current = r.i;
     setImgLay(r.i ?? { r: 1, c: 1 });
@@ -1603,16 +1605,47 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         return !!k && k !== targetKey;
       });
 
-      // ★★ 규정: **탭으로 검사를 바꾸면 언제나** 설정(뷰어 공통/뷰어별)의 모달리티 분할을 따른다.
-      //    HP 가 선택돼 있으면 HP 가 이긴다(applyHangFor 안에서 판정 — 그때는 분할을 안 건드린다).
-      //
-      //    ⚠ 예전에 뚫려 있던 구멍 두 개를 여기서 함께 막는다:
-      //      ① `restoreExamView` 가 **옛 분할째로** 되살렸다. 그 검사를 처음 봤을 때의 격자가
-      //         그대로 돌아와, 설정을 바꿔도·모달리티가 달라도 이전 화면 구조가 따라다녔다.
-      //      ② 모달리티를 못 읽으면(메타 미로드) 조건문이 통째로 건너뛰어 이전 분할이 남았다.
-      //    그래서 '언제나 다시 계산' 으로 단순화했다. 규정이 예외를 두지 않으므로 코드도 두지 않는다.
-      const count = applyHangFor(targetMod);
-      hangAll(tree.uid, tree.series, count);
+      // ★★ 규정: **탭으로 검사를 바꾸면 언제나** 그 검사의 규칙대로 다시 건다.
+      //    ① HP 규칙을 이 검사로 **다시 매칭**한다 — 'HP 가 이긴다' 는 것은 검사마다 맞는
+      //       규칙을 다시 찾아 적용한다는 뜻이지, 화면을 얼리는 것이 아니다.
+      //       ⚠ 실제 사고: 예전 코드는 HP 가 걸려 있으면 분할을 '아예 건드리지 않아',
+      //         MG 창(1×1)에서 CT 탭으로 가면 CT 가 1×1 로 남았다(설정은 2×2).
+      //         반대 방향도 같았다 — 한 검사의 분할이 다른 모든 검사를 따라다녔다.
+      //    ② 규칙이 없으면 설정(뷰어 공통/뷰어별) 표를 따른다.
+      //    ③ 모달리티를 못 읽으면 강제하지 않는다(위에서 1회 조회까지 했다).
+      const hpRulesNow = hpRulesRef.current ?? [];
+      const hpExamInfo = examDetails[id]
+        ?? { modality: targetMod, study_desc: studyMeta[tree.uid]?.study_desc ?? "",
+             study_date: studyMeta[tree.uid]?.study_date ?? "" };
+      const hpMatch = hpRulesNow.length
+        ? matchHpRule(hpExamOf(hpExamInfo as never, tree.series), hpRulesNow, { forExamOpen: true })
+        : null;
+      let count: number;
+      if (hpMatch) {
+        setHpName(hpMatch.name);
+        hpNameRef.current = hpMatch.name;                 // 같은 틱의 후속 판정이 옛값을 안 보게
+        const key = `${hpMatch.s.r}x${hpMatch.s.c}`;
+        if (LAYOUTS[key]) setLayout(key as keyof typeof LAYOUTS);
+        const ig = hpMatch.i && (hpMatch.i.r > 1 || hpMatch.i.c > 1) ? hpMatch.i : null;
+        hang2dImgRef.current = ig;
+        setImgLay(ig ?? { r: 1, c: 1 });
+        count = LAYOUTS[key]?.count ?? 1;
+      } else {
+        setHpName("기본");
+        hpNameRef.current = "기본";
+        count = applyHangFor(targetMod, false);           // 방금 판정 — HP 없음
+      }
+      // MG 는 4-view 표준 순서 [R CC, L CC, R MLO, L MLO] 로 — 태그로 확정될 때만 재배열.
+      let list = tree.series;
+      if (isMg(targetMod) && list[0]) {
+        const ord = mgOrderIndexes(list[0].instances);
+        if (ord.some((v, j) => v !== j)) {
+          list = [{ ...list[0], instances: ord.map((j) => list[0].instances[j]) }, ...list.slice(1)];
+        }
+        setTool(null);
+        setMouseMode("select");                           // MG 는 Select 로 시작(사용자 규정)
+      }
+      hangAll(tree.uid, list, count);
       setStatus(mixed
         ? `검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다${targetMod ? ` (${targetMod} 분할)` : ""}`
         : `검사 전환${targetMod ? ` — ${targetMod} 분할로 배치했습니다` : ""}`);

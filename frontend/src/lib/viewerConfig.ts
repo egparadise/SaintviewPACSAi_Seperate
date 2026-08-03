@@ -330,11 +330,15 @@ export interface Hang2dResolved {
  * MG 는 2D 행잉 표 밖이라 pickHang2d 가 null 을 준다 — 대신 **mg 전용 규정**을 쓴다.
  * mgLayout 을 넘기지 않으면(2D-MG 꺼짐 등) MG 도 분할을 강제하지 않는다.
  */
+/** MG 분할 지정 — layout("2x2") + 방식. series=false(기본)가 Image 분할이다.
+ *  문자열만 주면 구 호출(Series 분할)로 취급한다. */
+export type MgLayoutSpec = string | { layout: string; series: boolean } | null | undefined;
+
 export function resolveHang2d(
   prefs: Hang2dPrefs | undefined,
   viewer: Hang2dViewer,
   modality: string,
-  mgLayout?: string | null,
+  mgLayout?: MgLayoutSpec,
   /** 지금 **행잉 프로토콜이 걸려 있는가**. 걸려 있으면 분할은 HP 가 정한다(사용자 확정 규정). */
   hpActive = false,
 ): Hang2dResolved {
@@ -350,7 +354,15 @@ export function resolveHang2d(
   //   엉뚱한 분할을 **강제**한다. 모르면 강제하지 않는 것이 규정이다.
   const mod = String(modality || "").trim().toUpperCase();
   if (mod === "MG") {
-    return { s: mgLayout || null, i: null };     // MG 는 뷰당 페인 1칸(타일 분할 없음)
+    // MG 는 mg_hang 규정. ⚠ 분할 **방식**을 반영해야 한다 — 기본(Image 분할)은
+    //   Series 1×1 + 페인 안 타일이다. 예전에 이 분기가 layout 을 Series 로만 돌려줘서,
+    //   탭으로 MG 에 오면 Image 모드인데 Series 2×2 가 걸리는 어긋남이 있었다.
+    if (!mgLayout) return { s: null, i: null };          // 2D-MG 꺼짐 — 강제하지 않는다
+    const m = typeof mgLayout === "string" ? { layout: mgLayout, series: true } : mgLayout;
+    if (!m.layout) return { s: null, i: null };
+    if (m.series) return { s: m.layout, i: null };       // Series 분할 — 뷰당 페인 1칸
+    const rc = rcOf(m.layout);
+    return { s: "1x1", i: rc && (rc.r > 1 || rc.c > 1) ? rc : null };   // Image 분할(기본)
   }
   const hv = pickHang2d(prefs, viewer, mod);
   const s = hv?.s || null;

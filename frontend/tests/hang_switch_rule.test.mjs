@@ -179,3 +179,31 @@ test("소문자 modality 도 같은 설정을 찾는다 (A 가 어떻게 주든)
   assert.equal(resolveHang2d(PREFS, "ty", "ct").s, "2x2");
   assert.equal(resolveHang2d(PREFS, "ty", "dr").s, "1x1");
 });
+
+/* ── MG 분할 **방식**이 탭 전환에도 반영된다 ─────────────────────────────────
+ * 실제 사고: resolveHang2d 의 MG 분기가 layout 을 Series 로만 돌려줘서, 탭으로 MG 에
+ * 오면 Image 모드(기본)인데 Series 2×2 가 걸렸다. 그리고 HP 가 걸려 있으면 분할을
+ * '아예 건드리지 않아' MG 창(1×1)에서 CT 탭 → CT 가 1×1 로 남았다(설정은 2×2).
+ */
+
+test("★ MG Image 분할(기본) — Series 1×1 + 페인 안 타일", () => {
+  const r = resolveHang2d(PREFS, "ty", "MG", { layout: "2x2", series: false });
+  assert.equal(r.s, "1x1", "Image 모드인데 Series 분할이 나왔다");
+  assert.deepEqual(r.i, { r: 2, c: 2 }, "타일 격자가 없다");
+});
+
+test("MG Series 분할(체크 시) — 뷰당 페인 하나", () => {
+  const r = resolveHang2d(PREFS, "ty", "MG", { layout: "2x2", series: true });
+  assert.equal(r.s, "2x2");
+  assert.equal(r.i, null);
+});
+
+test("MG 문자열 인자는 구 호출(Series 분할)로 취급 — 기존 테스트 호환", () => {
+  assert.equal(resolveHang2d(PREFS, "ty", "MG", "2x2").s, "2x2");
+});
+
+test("MG 1×2 Image 모드 — 타일 1×2", () => {
+  const r = resolveHang2d(PREFS, "ty", "MG", { layout: "1x2", series: false });
+  assert.equal(r.s, "1x1");
+  assert.deepEqual(r.i, { r: 1, c: 2 });
+});
