@@ -44,7 +44,8 @@ import { axisOf, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
 import { activeHang2dMap, mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
 import {
-  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgFromEl, mgPaneIs, mgProbe, mgReadable,
+  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgFromEl, mgInstView, mgOrderIndexes,
+  mgPaneIs, mgProbe, mgReadable,
   mgRatioBox, mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
@@ -718,7 +719,13 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       setPanes(Array.from({ length: r * c }, (_, i) => {
         if (single) {
           // 단독 검사: 페인마다 시리즈를 순서대로(부족하면 빈 페인), Image 레이아웃은 설정값. Mammo 는 표준 4-view 배치.
-          const s0 = mammoSeries ? (mammoSeries[i] ?? null) : (hangList[0].series[i] ?? null);
+          let s0 = mammoSeries ? (mammoSeries[i] ?? null) : (hangList[0].series[i] ?? null);
+          // ★ MG 4-view 표준 순서 [R CC, L CC, R MLO, L MLO] — 저장 순서대로 깔면
+          //   L 유방이 화면 왼쪽에 온다(실제 증상). 태그로 전부 확정될 때만 재배열.
+          if (mgTiled && s0) {
+            const ord = mgOrderIndexes(s0.instances);
+            if (ord.some((v, j) => v !== j)) s0 = { ...s0, instances: ord.map((j) => s0!.instances[j]) };
+          }
           const p = { ...initPane(hangList[0].d.study_uid), series: s0 };
           if (mgTiled) { p.il = mgIl; return applyPStateToPane(p); }   // 2D-MG 타일 행잉이 최우선
           if (hpMatch) {   // IN-2 ①: HP 규칙의 Image layout·W/L 적용 (TY applyHp 동일)
@@ -1861,7 +1868,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       if (!mgCfg.blind_ratio) return null;        // 근거 없는 추정 크롭 금지(기본)
     }
     // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
-    const lat = mammoView(p.series?.series_desc ?? "").lat;
+    // 좌우 판정은 **인스턴스 태그** 우선 — 4뷰가 한 시리즈에 들면 시리즈 설명으로는 모른다
+    const lat = mgInstView(inst).lat || mammoView(p.series?.series_desc ?? "").lat;
     const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, p.il.c);
     return mgRatioBox(wall, mgCfg.ratio);
   };
@@ -1902,7 +1910,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     if (!mgOn || !inst || !mgSeries(p)) return null;
     // 마주 볼 짝이 없는 칸(홀수 그리드 정가운데·그리드 바깥 변)은 손대지 않는다 —
     // 밀어붙이면 영상을 화면 바깥쪽으로 밀어내는 꼴이 된다
-    const side = mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, t % p.il.c, p.il.c);
+    const side = mgInnerSide(mgInstView(inst).lat || mammoView(p.series?.series_desc ?? "").lat,
+                             t % p.il.c, p.il.c);
     if (!side) return null;
     const size = tileSizes[`${pi}:${t}`];
     if (!size) return null;                       // 실측 전 — 다음 프레임에 적용

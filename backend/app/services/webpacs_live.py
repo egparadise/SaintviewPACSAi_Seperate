@@ -544,6 +544,12 @@ def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
                 "pixel_spacing": [float(x) for x in spacing][:2],
                 "position": [float(x) for x in position][:3],
                 "orientation": [float(x) for x in orientation][:6],
+                # MG 4-view 표준 배치(RCC|LCC / RMLO|LMLO)의 근거 — 4장이 한 시리즈에 든 검사는
+                # 이 태그 없이는 어느 장이 어느 뷰인지 알 수 없어 **저장 순서대로** 깔렸다
+                # (실제 증상: L 유방이 화면 왼쪽에 왔다). 화면의 큰 LCC/RCC 글자는 픽셀에
+                # 구워진 것이라 코드가 읽을 수 없다.
+                "view_position": str(_tag1(m, "00185101", "") or "").strip().upper(),
+                "laterality": str(_tag1(m, "00200062", "") or _tag1(m, "00200060", "") or "").strip().upper(),
                 "series_uid": se_uid,
                 "study_uid": st_uid,
             })

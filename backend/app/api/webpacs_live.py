@@ -438,6 +438,20 @@ def thumb(study_uid: str, series_uid: str, sop_uid: str, db: Session = Depends(g
         live.encoded_put(key, (data, "image/jpeg"))
         return Response(content=data, media_type="image/jpeg",
                         headers={"Cache-Control": "private, max-age=86400"})
-    # ⚠ 원본을 받아 렌더하는 폴백을 두지 않는다 — 썸네일 한 장 때문에 판독의가 기다리는
-    #   진단 슬롯(12개)을 쓰게 되고, 그것이 본 영상 취득을 밀어낸다. 호출부는 404 를 처리한다.
-    raise HTTPException(status_code=404, detail="썸네일 없음")
+    # 렌더 폴백 — A 가 썸네일을 미리 만들어 두지 않은 사이트가 실제로 있다.
+    # ⚠ 한 번 404 로 바꿨다가 **썸네일이 통째로 빈 화면**이 됐다(실사용 회귀). 폴백은 필요하다.
+    #   다만 무제한으로 두면 썸네일 폭주가 스레드풀을 먹으므로 **프리뷰 게이트 안**에서만 돈다.
+    #   (내부의 원본 취득은 픽셀 슬롯을 잠깐 쓰지만, 동시 진입 자체가 프리뷰 상한으로 묶인다.
+    #    픽셀 슬롯 보유자는 프리뷰 슬롯을 기다리지 않으므로 교착은 없다.)
+    try:
+        with live.a_preview_slot():
+            img, media = _render_with_retry(db, study_uid, series_uid, sop_uid, None, None, "jpeg", 70)
+    except WebPacsError:
+        raise HTTPException(status_code=404, detail="썸네일 없음 — 원격 PACS 응답 지연")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"썸네일 실패: {str(e)[:120]}")
+    live.encoded_put(key, (img, "image/jpeg"))
+    return Response(content=img, media_type=media,
+                    headers={"Cache-Control": "private, max-age=3600"})

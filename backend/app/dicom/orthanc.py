@@ -146,6 +146,10 @@ class OrthancClient:
                 "pixel_spacing": _floats(itags.get("PixelSpacing", "")),       # [row, col] mm
                 "position": _floats(itags.get("ImagePositionPatient", "")),    # [x,y,z]
                 "orientation": _floats(itags.get("ImageOrientationPatient", "")),  # [rx..cz] 6개
+                # MG 4-view 표준 배치용 — Live 경로(webpacs_live)와 같은 필드명
+                "view_position": str(itags.get("ViewPosition", "") or "").strip().upper(),
+                "laterality": str(itags.get("ImageLaterality", "")
+                                  or itags.get("Laterality", "") or "").strip().upper(),
             }
 
         r = self._client.get(f"/studies/{orthanc_study_id}/series")
@@ -159,7 +163,8 @@ class OrthancClient:
             ir = self._client.get(
                 f"/studies/{orthanc_study_id}/instances",
                 params={"requestedTags": "SOPInstanceUID;InstanceNumber;Rows;Columns;"
-                                         "PixelSpacing;ImagePositionPatient;ImageOrientationPatient"},
+                                         "PixelSpacing;ImagePositionPatient;ImageOrientationPatient;"
+                                         "ViewPosition;ImageLaterality;Laterality"},
                 timeout=120,
             )
             if ir.status_code == 200:

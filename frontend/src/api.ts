@@ -1491,6 +1491,8 @@ export interface InstanceNode {
   orientation: number[];     // ImageOrientationPatient 6개
   series_uid?: string;       // Combine(여러 시리즈를 한 시리즈처럼) 시 인스턴스의 원본 시리즈 UID — 렌더 URL 이 이를 우선 사용
   study_uid?: string;        // Combine 시 인스턴스의 원본 검사 UID — 다른 검사(과거/비교) 시리즈 결합 시 정확한 스터디로 요청
+  view_position?: string;    // (0018,5101) MG 뷰(CC/MLO) — 4-view 표준 배치의 근거
+  laterality?: string;       // (0020,0062) 좌우 — R 은 화면 왼쪽, L 은 오른쪽에 걸어야 한다
 }
 
 export interface SeriesNode {

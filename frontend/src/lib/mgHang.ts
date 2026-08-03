@@ -76,6 +76,45 @@ export const mgPaneIs = (seriesModality?: string | null,
 
 export const MG_LAYOUTS = ["1x2", "2x2", "2x3"] as const;
 
+/** 인스턴스 한 장의 뷰 판정 — DICOM 태그 우선, 없으면 시리즈 설명 파싱은 **호출부가** 폴백한다. */
+export interface MgViewSource { view_position?: string | null; laterality?: string | null }
+export function mgInstView(inst: MgViewSource | null | undefined):
+  { lat: "R" | "L" | ""; view: "CC" | "MLO" | "" } {
+  const latRaw = String(inst?.laterality ?? "").trim().toUpperCase();
+  const vpRaw = String(inst?.view_position ?? "").trim().toUpperCase();
+  const lat = latRaw === "R" || latRaw === "L" ? latRaw : "";
+  // ViewPosition 은 "CC"/"MLO" 외에 "ML"·"LM"·"XCCL" 같은 변형이 있다 — MLO 계열을 넓게 잡되
+  // CC 는 정확히(XCCL 이 CC 로 새면 배치가 틀어진다).
+  const view = vpRaw.includes("MLO") ? "MLO" : vpRaw === "CC" ? "CC" : "";
+  return { lat, view };
+}
+
+/**
+ * MG 4-view 표준 순서 [R CC, L CC, R MLO, L MLO] 로 걸 인스턴스 **인덱스 순열**.
+ *
+ * ⚠ 왜 필요한가(실제 증상): 4뷰가 한 시리즈에 든 검사는 저장 순서(instance_number)대로
+ *   깔려 **L 유방이 화면 왼쪽**에 왔다. 표준은 환자를 마주 본 배치 — R 이 왼쪽, L 이 오른쪽,
+ *   흉벽이 가운데에서 맞닿는다. 화면에 보이는 큰 LCC/RCC 글자는 픽셀에 구워진 것이라
+ *   코드가 읽을 수 없다 — 근거는 (0018,5101)/(0020,0062) 태그뿐이다.
+ *
+ * ⚠ **네 뷰를 전부 확실히 알 때만 재배열한다.** 태그가 없거나 중복이면 원래 순서를
+ *   그대로 돌려준다 — 확신 없이 섞으면 구운 글자와 실제 위치가 어긋나 더 위험하다.
+ */
+export function mgOrderIndexes(instances: readonly MgViewSource[]): number[] {
+  const id = instances.map((_, i) => i);
+  if (instances.length !== 4) return id;
+  const slot = (v: { lat: string; view: string }) =>
+    v.lat === "R" && v.view === "CC" ? 0 : v.lat === "L" && v.view === "CC" ? 1
+    : v.lat === "R" && v.view === "MLO" ? 2 : v.lat === "L" && v.view === "MLO" ? 3 : -1;
+  const out: number[] = [-1, -1, -1, -1];
+  for (let i = 0; i < 4; i++) {
+    const k = slot(mgInstView(instances[i]));
+    if (k < 0 || out[k] >= 0) return id;      // 판정 불가 또는 중복 — 손대지 않는다
+    out[k] = i;
+  }
+  return out;
+}
+
 export const DEFAULT_MG_CFG: MgCfg = {
   on: true, layout: "2x2", margin: 2, thr: 12, detect: "auto", blind_ratio: false, ratio: 38,
   series_layout: false,      // 기본은 **항상 uncheck** — Image 분할로 건다

@@ -20,7 +20,8 @@ import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
 import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d,
          resolveHang2d } from "../lib/viewerConfig";
 import {
-  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgPaneIs, mgProbe, mgReadable, mgRatioBox,
+  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgInstView, mgOrderIndexes, mgPaneIs,
+  mgProbe, mgReadable, mgRatioBox,
   mgStamp, mgWallByCol, mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
@@ -1317,8 +1318,15 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
    *   W/L·확대·계측이 독립적으로 동작한다. (I-View 는 타일별 레이어가 있어 무관.)
    */
   const mgHangTo = (lk: string) => {
-    const s0 = series[0];
-    if (!LAYOUTS[lk] || !s0) return;
+    const s0raw = series[0];
+    if (!LAYOUTS[lk] || !s0raw) return;
+    // ★ MG 표준 순서 [R CC, L CC, R MLO, L MLO] — R 이 화면 왼쪽, 흉벽이 가운데.
+    //   저장 순서(instance_number)대로 깔면 L 유방이 왼쪽에 온다(실제 증상).
+    //   태그로 네 뷰를 전부 확정할 수 있을 때만 재배열한다(mgOrderIndexes 주석 참조).
+    const ord = mgOrderIndexes(s0raw.instances);
+    const s0 = ord.some((v, i) => v !== i)
+      ? { ...s0raw, instances: ord.map((i) => s0raw.instances[i]) }
+      : s0raw;
     if (!mgCfg.series_layout) {
       // ── 기본: Image 분할 — 페인 1칸에 4뷰를 타일로 ──
       const g = { r: LAYOUTS[lk].rows, c: LAYOUTS[lk].cols };
@@ -1355,7 +1363,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   };
   useEffect(() => {
     if (!mgReady || detail.modality !== "MG" || !series.length) return;
-    const key = `${detail.id}:${mgCfg.on}:${mgCfg.layout}`;
+    // 우선순위 ① — 행잉 프로토콜이 선택돼 있으면 분할은 HP 가 정한다. 여기서 걸면
+    // 두 경로가 서로 덮어써 화면이 엉망이 된다(실제 스크린샷: HP:새 프로토콜 + MG 행잉 동시).
+    if (hpNameRef.current !== "기본") return;
+    const key = `${detail.id}:${mgCfg.on}:${mgCfg.layout}:${mgCfg.series_layout}`;
     if (mgHungRef.current === key) return;
     // 뷰별 시리즈가 따로 있는 검사(R CC/L CC/…)는 기존 표준 2×2 페인 행잉 유지
     if (!mgCfg.on || mammoAssign(series).some(Boolean) || (series[0]?.instances.length ?? 0) < 2) return;
@@ -3346,7 +3357,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       if (!mgCfg.blind_ratio) return null;      // 근거 없는 추정 크롭 금지(기본)
     }
     // MG 저장 관례: R 유방은 흉벽이 프레임 오른쪽, L 유방은 왼쪽(back-to-back 행잉 전제)
-    const lat = mammoView(p.series?.series_desc ?? "").lat;
+    // 좌우 판정은 **인스턴스 태그**가 우선 — 4뷰가 한 시리즈에 들면 시리즈 설명으로는 모른다.
+    const lat = mgInstView(inst).lat || mammoView(p.series?.series_desc ?? "").lat;
     const wall = lat === "R" ? "R" : lat === "L" ? "L" : mgWallByCol(t, cols);
     return mgRatioBox(wall, mgCfg.ratio);
   };
@@ -3406,7 +3418,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // Series 분할로 걸린 MG 는 페인 그리드의 열 위치로 판정한다.
     const gCols = (p.il?.c ?? 1) > 1 ? p.il!.c : LAYOUTS[layout].cols;
     const gi = (p.il?.c ?? 1) > 1 ? t % gCols : PANE_IDS.indexOf(pid) % LAYOUTS[layout].cols;
-    const side = mgInnerSide(mammoView(p.series?.series_desc ?? "").lat, gi, gCols);
+    const side = mgInnerSide(mgInstView(inst).lat || mammoView(p.series?.series_desc ?? "").lat,
+                             gi, gCols);
     if (!side) return null;
     const tiles = (p.il?.r ?? 1) * (p.il?.c ?? 1);
     // 단일 이미지 페인은 페인 자체가 타일 — 기존 페인 실측(ResizeObserver)을 그대로 쓴다
@@ -3427,7 +3440,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const box = mgBoxFor(p, inst, 0, 1);
     if (!box) return p;
     const cols = LAYOUTS[layout].cols;
-    const side = mgInnerSide(mammoView(p.series?.series_desc ?? "").lat,
+    const side = mgInnerSide(mgInstView(inst).lat || mammoView(p.series?.series_desc ?? "").lat,
                              Math.max(0, PANE_IDS.indexOf(pid ?? activePane)) % cols, cols);
     if (!side) return p;
     const sz = { w: rect.width, h: rect.height };
@@ -3499,7 +3512,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       series_modality: p.series?.modality,
       image_no: inst ? idx + 1 : undefined, image_total: p.series?.instances.length,
       rows: inst?.rows, cols: inst?.cols, pixel_spacing: inst?.pixel_spacing,
-      laterality: inst ? mammoView(p.series?.series_desc ?? "").lat || undefined : undefined,
+      laterality: inst ? mgInstView(inst).lat || mammoView(p.series?.series_desc ?? "").lat || undefined : undefined,
       view_position: inst ? mammoView(p.series?.series_desc ?? "").view || undefined : undefined,
       wl: p.wl, zoom, fx: p.fx || undefined,
     };
@@ -4945,14 +4958,21 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                             color: "#f0abfc", fontWeight: 700, cursor: "pointer" }}>
               <input type="checkbox" checked={mgOn} onChange={(e) => setMgOn(e.target.checked)} />2D-MG
             </label>
-            <select value={layout}
-                    title="MG 배치 — 뷰 하나당 페인 하나(계측·W/L 이 뷰별로 독립)"
+            {/* ⚠ value 를 layout 에 묶으면 안 된다 — Image 분할 모드에서는 layout 이 1×1 이고
+                 격자는 imgLay 에 있다. 예전엔 그래서 드롭다운이 늘 1×1 로 보였고, 2×2 를 골라도
+                 (내부적으론 적용됐는데) 표시가 1×1 로 "되돌아가는" 것처럼 보였다. */}
+            <select value={mgCfg.series_layout ? layout : `${imgLay.r}x${imgLay.c}`}
+                    title={mgCfg.series_layout
+                      ? "MG 배치(Series 분할) — 뷰 하나당 페인 하나(계측·W/L 이 뷰별로 독립)"
+                      : "MG 배치(Image 분할) — 페인 하나에 4뷰 타일. 계측이 필요하면 설정에서 Series Layout 체크"}
                     onChange={(e) => mgHangTo(e.target.value)}
                     style={{ fontSize: 11, padding: "0 2px" }}>
               {MG_LAYOUTS.map((l) => <option key={l} value={l}>{l.replace("x", "×")}</option>)}
-              {!(MG_LAYOUTS as readonly string[]).includes(layout) && (
-                <option value={layout}>{layout.replace("x", "×")}</option>
-              )}
+              {(() => {
+                const cur = mgCfg.series_layout ? layout : `${imgLay.r}x${imgLay.c}`;
+                return !(MG_LAYOUTS as readonly string[]).includes(cur)
+                  ? <option value={cur}>{cur.replace("x", "×")}</option> : null;
+              })()}
             </select>
           </span>
         )}
