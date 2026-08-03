@@ -6,6 +6,7 @@
 
 declare const __APP_VERSION__: string;
 declare const __BUILD_DATE__: string;
+declare const __BUILD_SHA__: string;
 
 /** 예: "1.1.0" */
 export const APP_VERSION: string =
@@ -20,3 +21,11 @@ export const VENDOR = "Inviz Corporation";
 
 /** 제품명 */
 export const PRODUCT_NAME = "Saintview PACS AI Viewer";
+
+/** 배포 커밋 짧은 해시 — 예: "c68a25f". 설정>정보와 오류 기록이 함께 쓴다. */
+export const BUILD_SHA: string =
+  typeof __BUILD_SHA__ !== "undefined" ? __BUILD_SHA__ : "";
+
+/** 화면 표기용 — "Ver 1-1-0_c68a25f" (사용자 확정 형식) */
+export const VERSION_LABEL: string =
+  `Ver ${APP_VERSION.replace(/\./g, "-")}${BUILD_SHA ? `_${BUILD_SHA}` : ""}`;

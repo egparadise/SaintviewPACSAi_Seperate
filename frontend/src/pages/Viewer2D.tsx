@@ -1369,9 +1369,51 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const key = `${detail.id}:${mgCfg.on}:${mgCfg.layout}:${mgCfg.series_layout}`;
     if (mgHungRef.current === key) return;
     // 뷰별 시리즈가 따로 있는 검사(R CC/L CC/…)는 기존 표준 2×2 페인 행잉 유지
-    if (!mgCfg.on || mammoAssign(series).some(Boolean) || (series[0]?.instances.length ?? 0) < 2) return;
+    if (!mgCfg.on) return;
+    const ma = mammoAssign(series);
+    const perView = ma.some(Boolean);
+    // Series 모드(체크)에서 뷰별 시리즈 검사는 구 경로(위 시리즈 로드의 2×2)가 처리한다.
+    // 단일 시리즈인데 장수가 2 미만이면 걸 것이 없다.
+    if (mgCfg.series_layout && perView) return;
+    if (!perView && (series[0]?.instances.length ?? 0) < 2) return;
     const g = toRC2(mgCfg.layout);
     mgHungRef.current = key;
+    if (!mgCfg.series_layout && perView) {
+      // ★ 뷰별 시리즈(R CC/L CC/R MLO/L MLO 가 각각 딴 시리즈)인 검사의 **Image 모드**.
+      //   페인 하나에 4뷰 타일이 규정인데 페인은 시리즈 하나만 담는다 — 그래서 각 뷰 시리즈의
+      //   가운데 장을 뽑아 **결합 시리즈**를 만든다. 인스턴스마다 원본 시리즈 UID 를 실어야
+      //   렌더 URL 이 제 시리즈로 나간다(instUrl 의 Combine 계약).
+      //   빠진 뷰는 건너뛴다(있는 것만 타일) — 빈 칸을 위해 규정을 포기하지 않는다.
+      const picks = ma
+        .map((sv) => {
+          if (!sv) return null;
+          const inst = sv.instances[Math.floor(sv.instances.length / 2)];
+          return inst ? { ...inst, series_uid: inst.series_uid ?? sv.series_uid,
+                          study_uid: inst.study_uid ?? detail.study_uid } : null;
+        })
+        .filter((x): x is NonNullable<typeof x> => !!x);
+      if (picks.length >= 2) {
+        const combined = { ...series[0], series_uid: "combined:mg4",
+                           series_desc: "MG 4-view", instances: picks };
+        hang2dImgRef.current = g;
+        setLayout("1x1");
+        setImgLay(g);
+        setPanes((prev) => {
+          const next = { ...prev };
+          PANE_IDS.forEach((pid, i) => {
+            next[pid] = i === 0
+              ? applyPState({ ...initPane(detail.study_uid), series: combined, index: 0, il: g })
+              : initPane(detail.study_uid);
+          });
+          return next;
+        });
+        setActivePane(PANE_IDS[0]);
+        setTool(null);
+        setMouseMode("select");
+        return;
+      }
+      // 결합할 뷰가 1개뿐 — 단일 시리즈 경로로 폴백(아래)
+    }
     mgHangTo(`${g.r}x${g.c}`);
     // MG 를 열면 마우스는 **Select** 여야 한다. 확대·이동 모드가 남아 있으면 유방을 클릭하는
     // 순간 화면이 움직여 버린다(사용자 보고: "맘모일 때 마우스가 확대로 되어 있다").
@@ -1379,7 +1421,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setTool(null);
     setMouseMode("select");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mgReady, detail.id, detail.modality, detail.study_uid, series, mgCfg.on, mgCfg.layout]);
+  }, [mgReady, detail.id, detail.modality, detail.study_uid, series, mgCfg.on, mgCfg.layout, mgCfg.series_layout]);
 
   /* 시리즈 트리 + 리포트 로드 */
   useEffect(() => {
@@ -1423,7 +1465,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       //   배율이 뒤죽박죽이었다(사용자 보고 스크린샷).
       //   → **뷰별 시리즈가 실제로 매칭된 경우에만** 여기서 2×2 를 건다. 4뷰가 한 시리즈면
       //     MG 규정이 소유한다(그쪽 effect 도 mammoAssign 이 성립하면 스스로 물러난다).
-      if (mammo && mammoSeries) setLayout("2x2");   // 오버레이는 끄지 않는다 — 판독 필수 정보
+      // ⚠ Series 2×2 는 **분할 방식이 Series(체크)일 때만** 여기서 건다.
+      //   Image 모드(기본)인데 여기서 2×2 를 걸면 '무조건 Series Layout 처럼 동작' 하게 된다
+      //   (사용자 보고). 뷰별 시리즈 검사도 Image 모드는 아래 MG effect 가 결합 시리즈로 건다.
+      if (mammo && mammoSeries && (mgCfg.series_layout || !mgCfg.on)) setLayout("2x2");
       setSelSeries(null);   // 처음 열 때 썸네일 이미지 목록은 모두 접힘 — 더블클릭으로만 펼침
       if (imgSeries[0]) {
         // ② AI 추천 W/L 자동 적용(수동 변경 가능). 합성/비보정 데이터(PixelSpacing 없음)는
@@ -1536,7 +1581,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /** 이 modality 를 열 때 걸 분할을 **다시 계산**해 적용하고, 새 페인 수를 돌려준다.
    *  ⚠ setLayout 은 비동기라 직후에 state 를 읽으면 옛값이다 — 그래서 페인 수를 반환값으로 준다.
    *    (그 혼동이 "DR 을 열었는데 CT 의 2×2 격자에 빈 칸이 남는" 사고의 절반이었다.) */
-  const applyHangFor = (modality: string, hpActive?: boolean): number => {
+  const applyHangFor = (modality: string, hpActive?: boolean,
+                        fallback: "keep" | "1x1" = "keep"): number => {
     // ⚠ 행잉 프로토콜이 걸려 있으면 분할은 **HP 가 정한다** — 여기서 덮으면 규정 위반이다.
     //   (우선순위: HP > 뷰어 공통 > 뷰어별. HP 기본은 해제.)
     //   hpActive 를 인자로도 받는 이유: 검사 전환에서 재매칭 직후에는 setHpName 이 아직
@@ -1547,7 +1593,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (r.s && LAYOUTS[r.s]) setLayout(r.s as keyof typeof LAYOUTS);
     hang2dImgRef.current = r.i;
     setImgLay(r.i ?? { r: 1, c: 1 });
-    return r.s && LAYOUTS[r.s] ? LAYOUTS[r.s].count : LAYOUTS[layout].count;
+    if (r.s && LAYOUTS[r.s]) return LAYOUTS[r.s].count;
+    // ⚠ 분할을 못 구한 경우(설정 미로드 레이스·모달리티 공백·MG 꺼짐).
+    //   검사 전환에서는 **이전 검사의 격자를 물려주면 안 된다** — 실제 증상: MR(2×3)을 보다
+    //   DX 로 가면 그 6칸 격자에 DX 한 장 + 빈 칸 5개가 남아 "MR 처럼 나온다".
+    //   fallback="1x1" 이면 1×1 로 리셋한다(어느 모달리티든 이전 구조 상속보다 안전하다).
+    if (fallback === "1x1") { setLayout("1x1"); return 1; }
+    return LAYOUTS[layout].count;
   };
 
   /** 화면 전체를 이 검사로 채운다. count 를 주면 그 분할로(검사 전환에서 새 분할을 넘긴다). */
@@ -1613,6 +1665,19 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       //         반대 방향도 같았다 — 한 검사의 분할이 다른 모든 검사를 따라다녔다.
       //    ② 규칙이 없으면 설정(뷰어 공통/뷰어별) 표를 따른다.
       //    ③ 모달리티를 못 읽으면 강제하지 않는다(위에서 1회 조회까지 했다).
+      // ⚠ 설정 로드 레이스 — 창이 방금 리로드됐거나(prefs effect 미완) 로드가 실패했으면
+      //   hang2dSrcRef 가 비어 있어 resolveHang2d 가 null 을 주고, 그러면 이전 격자가
+      //   상속된다(위 applyHangFor 주석의 그 증상). 여기서는 async 라 1회 채울 수 있다.
+      if (!Object.keys(hang2dSrcRef.current).length) {
+        try {
+          const r = await api.getSetting("viewer.prefs");
+          const v = r.value as { hanging2d?: Record<string, unknown>;
+                                 hanging2d_common_on?: boolean;
+                                 hanging2d_by_viewer?: Record<string, Record<string, unknown>> };
+          hang2dSrcRef.current = { hanging2d: v.hanging2d, hanging2d_common_on: v.hanging2d_common_on,
+                                   hanging2d_by_viewer: v.hanging2d_by_viewer };
+        } catch { /* 그래도 없으면 아래 1x1 폴백이 이전 격자 상속만은 막는다 */ }
+      }
       const hpRulesNow = hpRulesRef.current ?? [];
       const hpExamInfo = examDetails[id]
         ?? { modality: targetMod, study_desc: studyMeta[tree.uid]?.study_desc ?? "",
@@ -1633,7 +1698,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       } else {
         setHpName("기본");
         hpNameRef.current = "기본";
-        count = applyHangFor(targetMod, false);           // 방금 판정 — HP 없음
+        count = applyHangFor(targetMod, false, "1x1");    // 방금 판정 — HP 없음. 못 구하면 1×1
       }
       // MG 는 4-view 표준 순서 [R CC, L CC, R MLO, L MLO] 로 — 태그로 확정될 때만 재배열.
       let list = tree.series;

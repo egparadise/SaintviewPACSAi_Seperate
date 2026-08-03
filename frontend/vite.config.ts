@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { viteCommonjs } from '@originjs/vite-plugin-commonjs'
@@ -99,6 +100,14 @@ export default defineConfig(({ command }) => ({
   define: {
     __APP_VERSION__: JSON.stringify(pkgVersion),
     __BUILD_DATE__: JSON.stringify(buildDate),
+    // 배포 커밋 — "지금 서버에 어느 버전이 돌고 있나" 를 화면에서 확인하기 위해.
+    // (실제 사고: 수정을 배포했는데 증상이 계속돼 원인을 찾았더니 **옛 빌드**가 돌고 있었다.
+    //  화면에 커밋이 없으면 그걸 알 방법이 사용자에게 없다.)
+    __BUILD_SHA__: JSON.stringify((() => {
+      try {
+        return execSync("git rev-parse --short HEAD", { cwd: __dirname }).toString().trim()
+      } catch { return "" }
+    })()),
   },
   plugins: [viteCommonjs(), react(), precompress()],
   optimizeDeps: {

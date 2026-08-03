@@ -29,7 +29,7 @@ import { normCorners, type CornerMap } from "../lib/overlayFields";
 import { screenApiIssue } from "../lib/screens";
 import { SC_ACTIONS, SC_DEFAULTS, displayKey } from "../lib/shortcutDefs";
 import { ToolIconTy } from "../components/ToolIconTy";
-import { APP_VERSION, BUILD_DATE, PRODUCT_NAME, VENDOR } from "../lib/appVersion";
+import { BUILD_DATE, PRODUCT_NAME, VENDOR, VERSION_LABEL } from "../lib/appVersion";
 import { clearCrashLog, readCrashLog, type CrashEntry } from "../components/ErrorBoundary";
 import { SpeedTestPanel } from "./SpeedTestPanel";
 import { AnatomyIcon } from "../lib/anatomyIcons";
@@ -792,7 +792,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
           <span onClick={() => setPage("about")} title={`${PRODUCT_NAME} — 클릭하면 정보 보기`}
                 style={{ marginLeft: "auto", marginRight: 10, fontSize: 11.5, cursor: "pointer",
                          color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
-            v{APP_VERSION}
+            {VERSION_LABEL}
           </span>
           <button style={{ marginRight: 6 }} title={maxed ? "기본 크기로 복원" : "전체 화면으로 크게 보기"}
                   onClick={() => setMaxed((m) => !m)}>{maxed ? "❐ 복원" : "⬜ 최대화"}</button>
@@ -2886,7 +2886,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               <Group title="정보 (About)">
                 <Row label="제품">{PRODUCT_NAME}</Row>
                 <Row label="현재 Version">
-                  <b style={{ fontSize: 14, letterSpacing: 0.3 }}>v{APP_VERSION}</b>
+                  <b style={{ fontSize: 14, letterSpacing: 0.3 }}>{VERSION_LABEL}</b>
                 </Row>
                 <Row label="버전 적용일자">{BUILD_DATE || "—"}</Row>
                 <Row label="제조사">{VENDOR}</Row>

@@ -10,7 +10,7 @@
 //  ② 무엇이 왜 터졌는지 **localStorage 에 남긴다** — 새로고침해도 증거가 살아남는다.
 //     설정 > 정보 에서 확인·복사할 수 있다.
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { APP_VERSION, BUILD_DATE } from "../lib/appVersion";
+import { APP_VERSION, BUILD_DATE, BUILD_SHA } from "../lib/appVersion";
 import { describeReason } from "../lib/crashReason";
 
 const LOG_KEY = "sv_crash_log";
@@ -69,7 +69,7 @@ export function recordCrash(e: Partial<CrashEntry> & { message: string }): void 
       // ⚠ vite 의 define 은 **식별자 치환**이라 globalThis 에는 안 붙는다.
       //   예전 코드가 globalThis.__APP_VERSION__ 를 읽어 build 가 늘 빈 문자열이었고,
       //   그래서 사용자가 보낸 로그가 어느 빌드에서 났는지 알 수 없었다.
-      build: `${APP_VERSION} (${BUILD_DATE})`,
+      build: `${APP_VERSION}_${BUILD_SHA} (${BUILD_DATE})`,
       count: 1,
     });
     localStorage.setItem(LOG_KEY, JSON.stringify(list.slice(0, LOG_MAX)));

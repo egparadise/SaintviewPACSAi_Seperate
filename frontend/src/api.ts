@@ -205,7 +205,12 @@ async function reqRaw<T>(path: string, init?: RequestInit): Promise<T> {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt]));
       continue;
     }
-    if (res.status === 401) {
+    if (res.status === 401 && !path.startsWith("/api/collab/")) {
+      // ⚠ 협진 경로는 전역 로그아웃에서 **면제**한다.
+      //   실제 사고: 협진 계정 행이 없는 사용자의 /api/collab/* 가 401 을 내자 이 처리기가
+      //   '세션 만료' 로 오인해 강제 리로드 — 협진 버튼을 누르는 순간 로그인 화면으로 튕겼다.
+      //   백엔드는 403 으로 고쳤지만, 구 백엔드가 섞인 배포 전환기에도 튕기지 않도록
+      //   프론트에도 같은 선을 긋는다. 진짜 세션 만료는 다음 일반 API 호출이 처리한다.
       // ★ 저장본 삭제가 끝난 **뒤에** 리로드한다.
       //   예전에는 setToken(null) 바로 뒤에 reload 를 때렸는데, setToken 안의 삭제는 대기하지
       //   않는 `void opfsWipe()` 라 리로드가 JS 컨텍스트를 내리면서 삭제가 중간에 끊겼다 —

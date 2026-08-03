@@ -693,8 +693,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // MG 라고 오버레이를 끄지 않는다 — 환자·검사·W/L 은 판독 필수 정보(사용자 토글로 제어)
       // 4-view 가 한 시리즈에 다 들어 있는 검사(대부분의 MG)는 Series 2×2 로 걸면 3칸이 빈다.
       // 2D-MG 사용 시엔 Series 1×1 + 설정된 Image layout(1×2/2×2/2×3) 타일로 건다.
-      const mgTiled = mammo && mg.on && !mammoSeries
-        && (hangList[0].series[0]?.instances.length ?? 0) > 1;
+      // Image 모드(기본)는 뷰별 시리즈 검사도 타일이 규정이다 — !mammoSeries 조건을 빼면
+      // '무조건 Series Layout 처럼 동작' 하던 증상이 사라진다. Series 모드(체크)만 구 경로.
+      const mgTiled = mammo && mg.on && !mg.series_layout
+        && (mammoSeries ? true : (hangList[0].series[0]?.instances.length ?? 0) > 1);
       const mgIl = toRC(mg.layout);
       let r: number, c: number;
       if (mgTiled) { r = 1; c = 1; setHpName(`Mammo ${mgIl.r}×${mgIl.c}`); }
@@ -719,10 +721,25 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       setPanes(Array.from({ length: r * c }, (_, i) => {
         if (single) {
           // 단독 검사: 페인마다 시리즈를 순서대로(부족하면 빈 페인), Image 레이아웃은 설정값. Mammo 는 표준 4-view 배치.
-          let s0 = mammoSeries ? (mammoSeries[i] ?? null) : (hangList[0].series[i] ?? null);
-          // ★ MG 4-view 표준 순서 [R CC, L CC, R MLO, L MLO] — 저장 순서대로 깔면
-          //   L 유방이 화면 왼쪽에 온다(실제 증상). 태그로 전부 확정될 때만 재배열.
-          if (mgTiled && s0) {
+          let s0: SeriesNode | null = mammoSeries ? (mammoSeries[i] ?? null) : (hangList[0].series[i] ?? null);
+          if (mgTiled && mammoSeries) {
+            // 뷰별 시리즈 검사의 Image 모드 — 각 뷰 시리즈의 가운데 장으로 **결합 시리즈**를
+            // 만들어 페인 하나에 타일로 건다(mammoAssign 순서 = 표준 [RCC,LCC,RMLO,LMLO]).
+            // 인스턴스에 원본 시리즈 UID 를 실어야 렌더 URL 이 제 시리즈로 나간다(Combine 계약).
+            const picks = mammoSeries
+              .map((sv) => {
+                if (!sv) return null;
+                const inst = sv.instances[Math.floor(sv.instances.length / 2)];
+                return inst ? { ...inst, series_uid: inst.series_uid ?? sv.series_uid,
+                                study_uid: inst.study_uid ?? hangList[0].d.study_uid } : null;
+              })
+              .filter((x): x is NonNullable<typeof x> => !!x);
+            s0 = picks.length >= 2
+              ? { ...(mammoSeries.find(Boolean)!), series_uid: "combined:mg4",
+                  series_desc: "MG 4-view", instances: picks }
+              : (mammoSeries.find(Boolean) ?? null);
+          } else if (mgTiled && s0) {
+            // ★ 단일 시리즈 — 표준 순서 [R CC, L CC, R MLO, L MLO]. 태그로 확정될 때만 재배열.
             const ord = mgOrderIndexes(s0.instances);
             if (ord.some((v, j) => v !== j)) s0 = { ...s0, instances: ord.map((j) => s0!.instances[j]) };
           }

@@ -289,7 +289,9 @@ def test_session_expiry_wipes_before_reload():
     환자 영상이 남는다. 세션 만료는 로그아웃 버튼보다 흔한 경로다.
     """
     api = _src("api.ts")
-    m = re.search(r"if \(res\.status === 401\) \{(.*?)\n    \}", api, re.S)
+    # 401 처리기는 협진 경로 면제 조건이 붙을 수 있다(협진 401 이 로그아웃으로 오인되던 사고)
+    # — 조건이 무엇이든 '401 이면' 으로 시작하는 그 블록을 잡는다.
+    m = re.search(r"if \(res\.status === 401[^\n]*\{(.*?)\n    \}", api, re.S)
     assert m, "401 처리기를 찾지 못했다"
     body = m.group(1)
     assert "opfsWipeDone" in body, "삭제 완료를 기다리지 않고 리로드한다(파일이 남을 수 있다)"
