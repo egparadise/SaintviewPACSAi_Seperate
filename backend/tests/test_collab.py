@@ -508,6 +508,111 @@ def _drain_to_pong(ws) -> list[str]:
     raise AssertionError("pong 이 오지 않았다")
 
 
+def test_ws_guest_can_type_and_send_dm(client, db, duo):
+    """초대한 쪽/시스템 관리자만 채팅 가능한 것이 아니다 — 상대 계정도 같은 DM을 보낸다.
+
+    실제 회귀: admin 발신은 저장됐지만 초대받은 병원 계정은 입력 UI가 흔들려 발신 기록이
+    하나도 남지 않았다. UI 수정과 별개로 서버의 양방향 계약도 여기서 고정한다.
+    """
+    from app.services.collab_service import dm_room
+
+    _befriend(client, duo)
+    tok = duo["hh"]["Authorization"].split(" ", 1)[1]
+    gtok = duo["gh"]["Authorization"].split(" ", 1)[1]
+    room = dm_room(duo["host"].id, duo["guest"].id)
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", gtok]) as guest_ws:
+            guest_ws.receive_json()
+            _drain_to_pong(host_ws)  # guest 접속 presence 소진
+            guest_ws.send_json({"t": "chat", "room": room, "body": "guest says hello"})
+            assert "chat" in _drain_to_pong(guest_ws), "발신자 확정 에코가 없다"
+            assert "chat" in _drain_to_pong(host_ws), "상대 계정 메시지가 admin 쪽에 도착하지 않았다"
+
+
+def test_ws_friends_can_relay_dm_webrtc_signals(client, db, duo):
+    """1:1 대화에서도 서버가 SDP를 열지 않고 정확한 친구에게만 릴레이한다."""
+    from app.services.collab_service import dm_room
+
+    _befriend(client, duo)
+    tok = duo["hh"]["Authorization"].split(" ", 1)[1]
+    gtok = duo["gh"]["Authorization"].split(" ", 1)[1]
+    room = dm_room(duo["host"].id, duo["guest"].id)
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as host_ws:
+        host_ws.receive_json()
+        with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", gtok]) as guest_ws:
+            guest_ws.receive_json()
+            _drain_to_pong(host_ws)
+            host_ws.send_json({"t": "rtc.offer", "to": duo["guest"].id,
+                               "room": room, "d": {"type": "offer", "sdp": "opaque"}})
+            _drain_to_pong(host_ws)  # 발신 소켓 FIFO 처리 확정
+            guest_ws.send_json({"t": "ping"})
+            received = []
+            for _ in range(50):
+                event = guest_ws.receive_json()
+                if event["t"] == "pong":
+                    break
+                received.append(event)
+            offer = next((e for e in received if e["t"] == "rtc.offer"), None)
+            assert offer is not None, "DM WebRTC offer가 친구에게 도착하지 않았다"
+            assert offer["from"] == duo["host"].id and offer["room"] == room
+            assert offer["d"] == {"type": "offer", "sdp": "opaque"}
+
+
+def test_dm_webrtc_survives_being_in_a_session(client, db, duo):
+    """검사 협진 세션에 들어가 있어도 1:1 DM 통화 시그널은 살아 있어야 한다.
+
+    실제 회귀: 릴레이 분기를 프레임의 room 이 아니라 **소켓의 세션 소속**으로 고르면,
+    협진 초대를 수락한 창(워크리스트가 CollabGlobal 에서 session.enter 를 보낸다)은
+    그 뒤로 친구와의 음성·화상·화면공유 시그널이 전부 세션 분기에 먹혀 조용히 버려졌다.
+    오류도 안 나고 새로고침 전까지 회복되지 않아, 사용자에게는 '통화가 안 된다'로만 보인다.
+    """
+    from app.services.collab_service import dm_room
+
+    code = _open_and_join(client, duo, _study(db, "dmsess", duo["ha"].id).id)
+    tok = duo["hh"]["Authorization"].split(" ", 1)[1]
+    gtok = duo["gh"]["Authorization"].split(" ", 1)[1]
+    room = dm_room(duo["host"].id, duo["guest"].id)
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as host_ws:
+        host_ws.receive_json()
+        host_ws.send_json({"t": "session.enter", "code": code})   # ← 이 소켓이 세션에 들어간다
+        _drain_to_pong(host_ws)
+        with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", gtok]) as guest_ws:
+            guest_ws.receive_json()
+            _drain_to_pong(host_ws)
+            host_ws.send_json({"t": "rtc.offer", "to": duo["guest"].id,
+                               "room": room, "d": {"type": "offer", "sdp": "opaque"}})
+            _drain_to_pong(host_ws)
+            guest_ws.send_json({"t": "ping"})
+            received = []
+            for _ in range(50):
+                event = guest_ws.receive_json()
+                if event["t"] == "pong":
+                    break
+                received.append(event)
+            offer = next((e for e in received if e["t"] == "rtc.offer"), None)
+            assert offer is not None, "세션에 들어간 소켓의 DM offer 가 친구에게 도달하지 않았다"
+            # room 이 벗겨지면 수신측 mesh(signalRoom=dm:…)가 다시 버린다 — 반드시 실려야 한다
+            assert offer["room"] == room, "DM 릴레이에서 room 이 유실됐다"
+
+
+def test_dm_webrtc_guard_requires_friend_and_exact_room(db, duo):
+    """room ID 위조나 비친구 계정으로는 화상 시그널을 보낼 수 없다."""
+    from app.api.collab_ws import _can_relay_dm_rtc
+    from app.services import collab_service as svc
+
+    stranger = _account(db, "rtc_signal_stranger", duo["hb"].id)
+    svc.unfriend(db, duo["host"], stranger.id)  # 재실행해도 항상 비친구에서 시작
+    room = svc.dm_room(duo["host"].id, stranger.id)
+    assert _can_relay_dm_rtc(duo["host"].id, stranger.id, room) is False
+
+    svc.request_friend(db, duo["host"], stranger.id)
+    svc.respond_friend(db, stranger, duo["host"].id, True)
+    assert _can_relay_dm_rtc(duo["host"].id, stranger.id, room) is True
+    assert _can_relay_dm_rtc(duo["host"].id, stranger.id,
+                             svc.dm_room(duo["host"].id, stranger.id + 999)) is False
+
+
 def test_ws_non_controller_state_is_dropped(client, db, duo):
     """제어권 없는 참가자가 보낸 화면 상태는 서버가 버린다(관전자가 화면을 흔들 수 없다)."""
     code = _open_and_join(client, duo, _study(db, "ws1", duo["ha"].id).id)

@@ -2,10 +2,11 @@
 //
 // 세 덩어리를 한 컬럼에 세로로 쌓는다: [비디오 타일] / [참가자·제어권] / [룸 채팅].
 // 판독 화면 옆에 붙는 폭 좁은 패널이라, 각 덩어리는 접을 수 있어야 실사용이 된다.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type CollabMessage, type CollabSession, type CollabUser } from "../api";
 import { collab, type CollabEvent } from "../lib/collab";
 import { colorOf, sessionRoom } from "../lib/collabState";
+import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { showToast } from "../lib/toast";
 
@@ -40,22 +41,38 @@ function Section({ title, open, onToggle, children }: {
   );
 }
 
-function VideoTile({ id, name, stream, muted, color, label }: {
+export function VideoTile({ id, name, stream, muted, color, label }: {
   id: number; name: string; stream: MediaStream | null; muted?: boolean;
   color: string; label?: string;
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
+  const [, setTrackRevision] = useState(0);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     if (el.srcObject !== stream) el.srcObject = stream;
     if (stream) void el.play().catch(() => { /* 자동재생 차단은 무시 — 사용자 조작 후 붙는다 */ });
+    const changed = () => setTrackRevision((v) => v + 1);
+    const tracks = stream?.getTracks() ?? [];
+    for (const track of tracks) {
+      track.addEventListener("mute", changed);
+      track.addEventListener("unmute", changed);
+      track.addEventListener("ended", changed);
+    }
+    return () => {
+      for (const track of tracks) {
+        track.removeEventListener("mute", changed);
+        track.removeEventListener("unmute", changed);
+        track.removeEventListener("ended", changed);
+      }
+    };
   }, [stream]);
-  const hasVideo = !!stream?.getVideoTracks().some((t) => t.enabled && t.readyState === "live");
+  const hasVideo = !!stream?.getVideoTracks().some(
+    (t) => t.enabled && !t.muted && t.readyState === "live");
   return (
     <div style={{ position: "relative", border: `2px solid ${color}`, borderRadius: 4,
                   overflow: "hidden", background: "#000", aspectRatio: "4 / 3" }}>
-      <video ref={ref} muted={muted} playsInline
+      <video ref={ref} muted={muted} autoPlay playsInline
              style={{ width: "100%", height: "100%", objectFit: "cover",
                       display: hasVideo ? "block" : "none" }} />
       {!hasVideo && (
@@ -82,11 +99,14 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
   isHost: boolean;
   meId: number;
 }) {
+  useLang();
   const [peers, setPeers] = useState<PeerView[]>([]);
   const [msgs, setMsgs] = useState<CollabMessage[]>([]);
-  const [draft, setDraft] = useState("");
+  const draftRef = useRef<HTMLDivElement | null>(null);
   const [mic, setMic] = useState(false);
   const [cam, setCam] = useState(false);
+  const [screen, setScreen] = useState(false);
+  const [mediaBusy, setMediaBusy] = useState("");
   const [showChat, setShowChat] = useState(true);
   const [showVideo, setShowVideo] = useState(true);
   const [wantCaps, setWantCaps] = useState<string[]>(["collab.viewport"]);
@@ -116,24 +136,31 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
     return () => mesh.stop();
   }, [meId]);
   useEffect(() => mesh.onChange(setPeers), []);
+  useEffect(() => mesh.onMediaChange((s) => {
+    setMic(s.mic); setCam(s.camera); setScreen(s.screen);
+  }), []);
   useEffect(() => {
     mesh.syncPeers(joined.map((p) => p.id));
   }, [joined.map((p) => p.id).sort().join(",")]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const toggleMedia = useCallback(async (nextMic: boolean, nextCam: boolean) => {
+  const runMedia = async (work: () => Promise<void>, label: string) => {
+    if (mediaBusy) return;
+    setMediaBusy(label);
     try {
-      await mesh.setMedia(nextMic, nextCam);
-      setMic(nextMic); setCam(nextCam);
+      await work();
     } catch (e) {
-      showToast(e instanceof Error ? `장치를 열 수 없습니다 — ${e.message}` : "장치를 열 수 없습니다", "error");
+      const reason = e instanceof Error ? e.message : tr("권한 또는 장치를 확인하세요");
+      showToast(`${label} — ${tr("시작할 수 없습니다")}: ${reason}`, "error");
+    } finally {
+      setMediaBusy("");
     }
-  }, []);
+  };
 
   const send = () => {
-    const body = draft.trim();
+    const body = draftRef.current?.innerText.trim() ?? "";
     if (!body) return;
-    if (!collab.send({ t: "chat", room, body })) { showToast("연결이 끊겼습니다", "error"); return; }
-    setDraft("");
+    if (!collab.send({ t: "chat", room, body })) { showToast(tr("연결이 끊겼습니다"), "error"); return; }
+    if (draftRef.current) draftRef.current.textContent = "";
   };
 
   const nameOf = (id: number) => joined.find((p) => p.id === id)?.name ?? `#${id}`;
@@ -144,24 +171,24 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
       {/* ── 헤더: 역할 · 종료 ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px",
                     borderBottom: "1px solid var(--border)" }}>
-        <span style={{ fontSize: 12.5, fontWeight: 700 }}>협진</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{tr("협진")}</span>
         <span style={{ fontSize: 10.5, padding: "1px 6px", borderRadius: 8,
                        background: isHost ? "var(--accent-subtle)" : "var(--bg-elevated)",
                        color: isHost ? "#9ec5fb" : "var(--text-secondary)" }}>
           {isHost ? "Master" : "Slave"}
         </span>
         <div style={{ flex: 1 }} />
-        <button onClick={onLeave} title={isHost ? "세션을 종료합니다(전원 나감)" : "협진에서 나갑니다"}
+        <button onClick={onLeave} title={isHost ? tr("세션을 종료합니다(전원 나감)") : tr("협진에서 나갑니다")}
                 style={{ fontSize: 11, padding: "2px 6px" }}>
-          {isHost ? "종료" : "나가기"}
+          {isHost ? tr("종료") : tr("나가기")}
         </button>
       </div>
 
       {/* ── 제어권 상태 ── */}
       <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", fontSize: 11.5 }}>
         <div style={{ color: "var(--text-secondary)" }}>
-          화면 조작권: <b style={{ color: iControl ? "var(--stat-final)" : "var(--text-primary)" }}>
-            {controller ? (controller.id === meId ? "나" : controller.name) : "없음"}
+          {tr("화면 조작권:")} <b style={{ color: iControl ? "var(--stat-final)" : "var(--text-primary)" }}>
+            {controller ? (controller.id === meId ? tr("나") : controller.name) : tr("없음")}
           </b>
         </div>
         {!isHost && !iControl && (
@@ -172,42 +199,42 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
                   <input type="checkbox" checked={wantCaps.includes(c)}
                          onChange={(e) => setWantCaps((prev) =>
                            e.target.checked ? [...prev, c] : prev.filter((x) => x !== c))} />
-                  <span>{CAP_LABEL[c]}</span>
+                  <span>{tr(CAP_LABEL[c])}</span>
                 </label>
               ))}
             </div>
             <button className="primary" style={{ fontSize: 11, padding: "3px 8px", width: "100%" }}
                     disabled={mySeat?.control === "requested"}
                     onClick={() => collab.send({ t: "ctl.request", caps: wantCaps })}>
-              {mySeat?.control === "requested" ? "승인 대기 중…" : "조작 권한 요청"}
+              {mySeat?.control === "requested" ? tr("승인 대기 중…") : tr("조작 권한 요청")}
             </button>
             <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 3, lineHeight: 1.5 }}>
-              판독 수정 · 영상 삭제는 협진으로 위임되지 않습니다.
+              {tr("판독 수정 · 영상 삭제는 협진으로 위임되지 않습니다.")}
             </div>
           </div>
         )}
         {iControl && !isHost && (
           <button style={{ fontSize: 11, padding: "3px 8px", width: "100%", marginTop: 4 }}
-                  onClick={() => collab.send({ t: "ctl.revoke" })}>조작 권한 반납</button>
+                  onClick={() => collab.send({ t: "ctl.revoke" })}>{tr("조작 권한 반납")}</button>
         )}
         {isHost && controller?.id !== meId && (
           <button style={{ fontSize: 11, padding: "3px 8px", width: "100%", marginTop: 4 }}
-                  onClick={() => collab.send({ t: "ctl.revoke" })}>조작 권한 회수</button>
+                  onClick={() => collab.send({ t: "ctl.revoke" })}>{tr("조작 권한 회수")}</button>
         )}
         {isHost && pending.length > 0 && (
           <div style={{ marginTop: 6 }}>
             {pending.map((p) => (
               <div key={p.id} style={{ background: "var(--bg-elevated)", borderRadius: 4,
                                        padding: "5px 6px", marginBottom: 4 }}>
-                <div style={{ fontSize: 11 }}><b>{p.name}</b> 님이 조작 권한을 요청했습니다</div>
+                <div style={{ fontSize: 11 }}><b>{p.name}</b> {tr("님이 조작 권한을 요청했습니다")}</div>
                 <div style={{ fontSize: 10, color: "var(--text-secondary)", margin: "2px 0 4px" }}>
-                  {(p.caps ?? []).map((c) => CAP_LABEL[c] ?? c).join(" · ") || "화면 조작"}
+                  {(p.caps ?? []).map((c) => tr(CAP_LABEL[c] ?? c)).join(" · ") || tr("화면 조작")}
                 </div>
                 <div style={{ display: "flex", gap: 4 }}>
                   <button className="primary" style={{ fontSize: 11, padding: "2px 6px", flex: 1 }}
-                          onClick={() => collab.send({ t: "ctl.grant", target: p.id, caps: p.caps })}>승인</button>
+                          onClick={() => collab.send({ t: "ctl.grant", target: p.id, caps: p.caps })}>{tr("승인")}</button>
                   <button style={{ fontSize: 11, padding: "2px 6px", flex: 1 }}
-                          onClick={() => collab.send({ t: "ctl.revoke" })}>거절</button>
+                          onClick={() => collab.send({ t: "ctl.revoke" })}>{tr("거절")}</button>
                 </div>
               </div>
             ))}
@@ -216,38 +243,55 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
       </div>
 
       {/* ── 화상·음성 ── */}
-      <Section title={`화상채팅 (${joined.length}명)`} open={showVideo} onToggle={() => setShowVideo((v) => !v)}>
+      <Section title={`${tr("화상채팅")} (${joined.length}${tr("명")})`} open={showVideo} onToggle={() => setShowVideo((v) => !v)}>
         <div style={{ padding: 6 }}>
-          <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>
-            <button onClick={() => void toggleMedia(!mic, cam)}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4, marginBottom: 6 }}>
+            <button onClick={() => void runMedia(() => mesh.setMicrophone(!mic), tr("마이크"))}
+                    disabled={!!mediaBusy}
                     className={mic ? "primary" : undefined}
                     style={{ flex: 1, fontSize: 11, padding: "3px 4px" }}
-                    title={mic ? "마이크 끄기" : "마이크 켜기"}>{mic ? "🎙 켜짐" : "🎙 꺼짐"}</button>
-            <button onClick={() => void toggleMedia(mic, !cam)}
+                    title={mic ? tr("마이크 끄기") : tr("마이크 켜기")}>{mic ? `🎙 ${tr("켜짐")}` : `🎙 ${tr("꺼짐")}`}</button>
+            <button onClick={() => void runMedia(() => mesh.setCamera(!cam), tr("카메라"))}
+                    disabled={!!mediaBusy}
                     className={cam ? "primary" : undefined}
                     style={{ flex: 1, fontSize: 11, padding: "3px 4px" }}
-                    title={cam ? "카메라 끄기" : "카메라 켜기"}>{cam ? "📹 켜짐" : "📹 꺼짐"}</button>
+                    title={cam ? tr("카메라 끄기") : screen ? tr("화면 공유를 끄고 카메라 켜기") : tr("카메라 켜기")}>
+              {cam ? `📹 ${tr("켜짐")}` : `📹 ${tr("꺼짐")}`}
+            </button>
+            <button onClick={() => void runMedia(() => mesh.setScreenShare(!screen), tr("화면 공유"))}
+                    disabled={!!mediaBusy}
+                    className={screen ? "primary" : undefined}
+                    style={{ flex: 1, fontSize: 11, padding: "3px 4px" }}
+                    title={screen ? tr("화면 공유 중지") : cam ? tr("카메라를 끄고 화면 공유") : tr("화면 공유")}>
+              {screen ? `🖥 ${tr("공유 중")}` : `🖥 ${tr("화면")}`}
+            </button>
           </div>
+          {mediaBusy && (
+            <div style={{ fontSize: 10, color: "var(--text-secondary)", margin: "-2px 0 5px" }}>
+              {mediaBusy} — {tr("권한 확인 중…")}
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-            <VideoTile id={meId} name="나" stream={mesh.localStream()} muted
-                       color={colorOf(meId)} label={iControl ? "조작 중" : undefined} />
+            <VideoTile id={meId} name={tr("나")} stream={mesh.localStream()} muted
+                       color={colorOf(meId)} label={screen ? tr("화면 공유")
+                         : iControl ? tr("조작 중") : undefined} />
             {peers.map((p) => (
               <VideoTile key={p.id} id={p.id} name={nameOf(p.id)} stream={p.stream}
                          color={colorOf(p.id)}
-                         label={p.state !== "connected" ? "연결 중…"
-                           : controller?.id === p.id ? "조작 중" : undefined} />
+                         label={p.state !== "connected" ? tr("연결 중…")
+                           : controller?.id === p.id ? tr("조작 중") : undefined} />
             ))}
           </div>
           {joined.length > 1 && peers.length === 0 && (
             <div style={{ fontSize: 10, color: "var(--text-disabled)", marginTop: 4, lineHeight: 1.5 }}>
-              마이크나 카메라를 켜면 상대와 연결됩니다.
+              {tr("마이크·카메라·화면 공유 중 하나를 켜면 상대와 연결됩니다.")}
             </div>
           )}
         </div>
       </Section>
 
       {/* ── 룸 채팅 ── */}
-      <Section title="채팅" open={showChat} onToggle={() => setShowChat((v) => !v)}>
+      <Section title={tr("채팅")} open={showChat} onToggle={() => setShowChat((v) => !v)}>
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
           <div style={{ flex: 1, overflowY: "auto", padding: 6, display: "flex",
                         flexDirection: "column", gap: 5, maxHeight: 260 }}>
@@ -267,11 +311,26 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
             <div ref={bottomRef} />
           </div>
           <div style={{ display: "flex", gap: 4, padding: 5, borderTop: "1px solid var(--border)" }}>
-            <input value={draft} onChange={(e) => setDraft(e.target.value)} name="collab_room_msg"
-                   autoComplete="off" placeholder="내용을 입력하세요."
-                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            <div key="collab-room-editor-v3" ref={draftRef}
+                   className="collab-chat-editor" contentEditable={true}
+                   suppressContentEditableWarning role="textbox" tabIndex={0}
+                   aria-label={tr("협진 채팅 내용")} aria-placeholder={tr("내용을 입력하세요.")}
+                   data-placeholder={tr("내용을 입력하세요.")}
+                   onPointerDown={(e) => e.stopPropagation()}
+                   onClick={(e) => e.stopPropagation()}
+                   onBeforeInput={(e) => e.stopPropagation()}
+                   onInput={(e) => e.stopPropagation()}
+                   onKeyDown={(e) => {
+                     // 뷰어/워크리스트 전역 단축키까지 전파되면 관전 모드에서 키 입력을
+                     // 도구 명령으로 오인할 수 있다. IME 조합 Enter 도 전송하지 않는다.
+                     e.stopPropagation();
+                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                       e.preventDefault(); send();
+                     }
+                   }}
+                   onKeyUp={(e) => e.stopPropagation()}
                    style={{ flex: 1, fontSize: 11.5 }} />
-            <button className="primary" onClick={send} style={{ fontSize: 11.5 }}>전송</button>
+            <button className="primary" onClick={send} style={{ fontSize: 11.5 }}>{tr("전송")}</button>
           </div>
         </div>
       </Section>
@@ -279,7 +338,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
       {/* ── 참가자 ── */}
       <div style={{ overflowY: "auto", flexShrink: 0 }}>
         <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-secondary)",
-                      background: "var(--bg-canvas)" }}>참가자</div>
+                      background: "var(--bg-canvas)" }}>{tr("참가자")}</div>
         {session.participants.filter((p) => p.state !== "denied").map((p) => (
           <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px",
                                    fontSize: 11.5, borderBottom: "1px solid var(--border)",
@@ -294,7 +353,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
               </span>
             </span>
             <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-              {p.seat === "host" ? "Master" : p.state === "joined" ? "Slave" : "초대됨"}
+              {p.seat === "host" ? "Master" : p.state === "joined" ? "Slave" : tr("초대됨")}
             </span>
           </div>
         ))}
@@ -309,21 +368,22 @@ export function CollabInviteBanner({ invite, onAccept, onDecline }: {
   onAccept: () => void;
   onDecline: () => void;
 }) {
+  useLang();
   if (!invite) return null;
   return (
     <div style={{ position: "fixed", top: 16, left: "50%", transform: "translateX(-50%)",
                   zIndex: 100000, background: "var(--bg-elevated)", border: "1px solid var(--accent)",
                   borderRadius: 8, padding: "12px 16px", boxShadow: "0 6px 24px rgba(0,0,0,.5)",
                   minWidth: 320 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>협진 초대</div>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{tr("협진 초대")}</div>
       <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 10 }}>
         <b style={{ color: "var(--text-primary)" }}>{invite.from.name}</b>
-        {invite.from.hospital ? ` (${invite.from.hospital})` : ""} 님이 협진에 초대했습니다.
+        {invite.from.hospital ? ` (${invite.from.hospital})` : ""} {tr("님이 협진에 초대했습니다.")}
         {invite.title && <div style={{ marginTop: 2 }}>{invite.title}</div>}
       </div>
       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-        <button onClick={onDecline} style={{ fontSize: 12 }}>거절</button>
-        <button className="primary" onClick={onAccept} style={{ fontSize: 12 }}>참여</button>
+        <button onClick={onDecline} style={{ fontSize: 12 }}>{tr("거절")}</button>
+        <button className="primary" onClick={onAccept} style={{ fontSize: 12 }}>{tr("참여")}</button>
       </div>
     </div>
   );

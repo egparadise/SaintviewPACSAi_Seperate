@@ -5,8 +5,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type CollabFriends, type CollabMessage, type CollabUser } from "../api";
 import { collab, type CollabEvent } from "../lib/collab";
-import { dmRoom } from "../lib/collabState";
+import { colorOf, dmRoom } from "../lib/collabState";
+import { t as tr, useLang } from "../lib/i18n";
+import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { showToast } from "../lib/toast";
+import { VideoTile } from "./CollabSessionPanel";
 
 type Tab = "friends" | "find" | "chat";
 
@@ -25,7 +28,7 @@ function Avatar({ user, online }: { user: CollabUser; online?: boolean }) {
                     display: "grid", placeItems: "center", fontSize: 13, fontWeight: 600,
                     color: "var(--text-secondary)" }}>{initial}</div>
       {online !== undefined && (
-        <span title={online ? "접속 중" : "오프라인"}
+        <span title={online ? tr("접속 중") : tr("오프라인")}
               style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9,
                        borderRadius: "50%", border: "2px solid var(--bg-panel)",
                        background: online ? "var(--stat-final)" : "var(--text-disabled)" }} />
@@ -64,7 +67,7 @@ function UserRow({ user, online, right }: {
                       textOverflow: "ellipsis" }}>{user.name}</div>
         <div style={{ fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap",
                       overflow: "hidden", textOverflow: "ellipsis" }}>
-          {[ROLE_LABEL[user.role] ?? user.role, user.hospital].filter(Boolean).join(" · ")}
+          {[tr(ROLE_LABEL[user.role] ?? user.role), user.hospital].filter(Boolean).join(" · ")}
         </div>
       </div>
       {right}
@@ -79,6 +82,7 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
   onInvite?: (user: CollabUser) => void;
   inviteLabel?: string;
 }) {
+  useLang();
   const [tab, setTab] = useState<Tab>("friends");
   const [data, setData] = useState<CollabFriends>(EMPTY);
   const [query, setQuery] = useState("");
@@ -86,7 +90,14 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
   const [searching, setSearching] = useState(false);
   const [peer, setPeer] = useState<CollabUser | null>(null);
   const [msgs, setMsgs] = useState<CollabMessage[]>([]);
-  const [draft, setDraft] = useState("");
+  // 채팅 초안은 DOM 이 소유한다. 협진 WS 프레즌스/메시지로 부모가 다시 그려져도
+  // IME 조합과 입력 포커스가 흔들리지 않아야 한다(특히 초대받은 쪽에서 재현됐던 문제).
+  const draftRef = useRef<HTMLDivElement | null>(null);
+  const [peers, setPeers] = useState<PeerView[]>([]);
+  const [mic, setMic] = useState(false);
+  const [cam, setCam] = useState(false);
+  const [screen, setScreen] = useState(false);
+  const [mediaBusy, setMediaBusy] = useState("");
   const [online, setOnline] = useState<Set<number>>(() => new Set(collab.online));
   // 연결 표시등은 **구독**해야 한다. collab.status 를 렌더 중에 읽기만 하면 WS 가 끊겨도
   // 이 컴포넌트가 다시 그려질 이유가 없어 초록불이 그대로 남는다(거짓 안심).
@@ -95,6 +106,10 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
   const meId = collab.me?.id ?? 0;
 
   useEffect(() => collab.onStatus((s) => setWsOpen(s === "open")), []);
+  useEffect(() => mesh.onChange(setPeers), []);
+  useEffect(() => mesh.onMediaChange((s) => {
+    setMic(s.mic); setCam(s.camera); setScreen(s.screen);
+  }), []);
 
   const reload = useCallback(() => {
     api.collabFriends().then(setData).catch(() => { /* 목록 실패는 조용히 — 도크가 비어 보일 뿐 */ });
@@ -113,10 +128,10 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
     } else if (e.t === "hello") {
       setOnline(new Set(e.online));
     } else if (e.t === "friend.request") {
-      showToast(`${e.from.name} 님이 친구 요청을 보냈습니다`);
+      showToast(`${e.from.name} ${tr("님이 친구 요청을 보냈습니다")}`);
       reload();
     } else if (e.t === "friend.accepted") {
-      showToast(`${e.from.name} 님과 친구가 되었습니다`);
+      showToast(`${e.from.name} ${tr("님과 친구가 되었습니다")}`);
       reload();
     } else if (e.t === "chat") {
       const m = e.d;
@@ -140,6 +155,27 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [msgs]);
 
+  // 친구 목록에서 대화를 열면 편집기가 새로 마운트된 뒤 바로 포커스한다.
+  // 열린 패널에 HMR 수정이 적용될 때도 예전 input DOM에 포커스가 남지 않는다.
+  useEffect(() => {
+    if (!open || tab !== "chat" || !peer) return;
+    const frame = window.requestAnimationFrame(() => draftRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, tab, peer]);
+
+  // 1:1 대화도 검사 협진 세션과 같은 P2P mesh를 쓴다. room 컨텍스트를 넣어
+  // 다른 친구·다른 창의 SDP/ICE가 섞이지 않게 하고, 대화를 닫으면 장치도 끈다.
+  const peerOnline = !!peer && (online.has(peer.id) || peer.online === true);
+  useEffect(() => {
+    if (!open || tab !== "chat" || !peer || !meId || !peerOnline) {
+      return;
+    }
+    const room = dmRoom(meId, peer.id);
+    mesh.start(meId, room);
+    mesh.syncPeers([peer.id]);
+    return () => mesh.stop();
+  }, [open, tab, peer, meId, peerOnline]);
+
   // 검색 — 입력 후 300ms 디바운스(타이핑마다 서버를 때리지 않는다)
   useEffect(() => {
     if (tab !== "find") return;
@@ -154,18 +190,31 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
   }, [query, tab]);
 
   const send = () => {
-    const body = draft.trim();
+    const body = draftRef.current?.innerText.trim() ?? "";
     if (!body || !peer) return;
     if (!collab.send({ t: "chat", room: dmRoom(meId, peer.id), body })) {
-      showToast("연결이 끊겨 메시지를 보내지 못했습니다", "error");
+      showToast(tr("연결이 끊겨 메시지를 보내지 못했습니다"), "error");
       return;
     }
-    setDraft("");
+    if (draftRef.current) draftRef.current.textContent = "";
+  };
+
+  const runMedia = async (work: () => Promise<void>, label: string) => {
+    if (mediaBusy) return;
+    setMediaBusy(label);
+    try {
+      await work();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : tr("권한 또는 장치를 확인하세요");
+      showToast(`${label} — ${tr("시작할 수 없습니다")}: ${reason}`, "error");
+    } finally {
+      setMediaBusy("");
+    }
   };
 
   const act = (p: Promise<unknown>, ok: string) =>
     p.then(() => { showToast(ok); reload(); })
-     .catch((e) => showToast(e instanceof Error ? e.message : "실패", "error"));
+     .catch((e) => showToast(e instanceof Error ? e.message : tr("실패"), "error"));
 
   const incomingCount = data.incoming.length;
   const unreadTotal = useMemo(
@@ -178,21 +227,21 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
                   background: "var(--bg-panel)", borderLeft: "1px solid var(--border)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px",
                     borderBottom: "1px solid var(--border)" }}>
-        <span style={{ fontSize: 12.5, fontWeight: 700 }}>협진</span>
-        <span title={wsOpen ? "실시간 연결됨" : "연결 끊김 — 자동 재연결 중"}
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{tr("협진")}</span>
+        <span title={wsOpen ? tr("실시간 연결됨") : tr("연결 끊김 — 자동 재연결 중")}
               style={{ width: 7, height: 7, borderRadius: "50%",
                        background: wsOpen ? "var(--stat-final)" : "var(--stat-reading)" }} />
         <div style={{ flex: 1 }} />
-        <button onClick={onClose} title="닫기"
+        <button onClick={onClose} title={tr("닫기")}
                 style={{ background: "none", border: "none", color: "var(--text-secondary)",
                          cursor: "pointer", fontSize: 14, lineHeight: 1 }}>✕</button>
       </div>
 
       <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
-        <TabBtn id="friends" label="친구" badge={incomingCount || unreadTotal}
+        <TabBtn id="friends" label={tr("친구")} badge={incomingCount || unreadTotal}
                 active={tab === "friends"} onPick={setTab} />
-        <TabBtn id="find" label="찾기" active={tab === "find"} onPick={setTab} />
-        <TabBtn id="chat" label="대화" active={tab === "chat"} onPick={setTab} />
+        <TabBtn id="find" label={tr("찾기")} active={tab === "find"} onPick={setTab} />
+        <TabBtn id="chat" label={tr("대화")} active={tab === "chat"} onPick={setTab} />
       </div>
 
       {tab === "friends" && (
@@ -200,25 +249,25 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
           {incomingCount > 0 && (
             <>
               <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-secondary)",
-                            background: "var(--bg-canvas)" }}>받은 요청</div>
+                            background: "var(--bg-canvas)" }}>{tr("받은 요청")}</div>
               {data.incoming.map((u) => (
                 <UserRow key={u.id} user={u} online={online.has(u.id)} right={
                   <span style={{ display: "flex", gap: 3 }}>
                     <button style={{ fontSize: 11, padding: "2px 6px" }}
-                            onClick={() => act(api.collabRespondFriend(u.id, true), "수락했습니다")}>수락</button>
+                            onClick={() => act(api.collabRespondFriend(u.id, true), tr("수락했습니다"))}>{tr("수락")}</button>
                     <button style={{ fontSize: 11, padding: "2px 6px" }}
-                            onClick={() => act(api.collabRespondFriend(u.id, false), "거절했습니다")}>거절</button>
+                            onClick={() => act(api.collabRespondFriend(u.id, false), tr("거절했습니다"))}>{tr("거절")}</button>
                   </span>
                 } />
               ))}
             </>
           )}
           <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-secondary)",
-                        background: "var(--bg-canvas)" }}>친구 {data.friends.length}</div>
+                        background: "var(--bg-canvas)" }}>{tr("친구")} {data.friends.length}</div>
           {data.friends.length === 0 && (
             <div style={{ padding: 12, fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-              아직 친구가 없습니다.<br />[찾기] 탭에서 같은 병원 또는 다른 병원 사용자를 검색해
-              친구 요청을 보내세요.
+              {tr("아직 친구가 없습니다.")}<br />
+              {tr("[찾기] 탭에서 같은 병원 또는 다른 병원 사용자를 검색해 친구 요청을 보내세요.")}
             </div>
           )}
           {data.friends.map((u) => {
@@ -229,12 +278,12 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
                   {!!unread && <span style={{ fontSize: 10, background: "var(--stat-emergency)",
                                               color: "#fff", borderRadius: 8, padding: "1px 5px" }}>{unread}</span>}
                   <button style={{ fontSize: 11, padding: "2px 6px" }}
-                          onClick={() => openChat(u)} title="1:1 대화">💬</button>
+                          onClick={() => openChat(u)} title={tr("1:1 대화")}>💬</button>
                   {onInvite && (
                     <button className="primary" style={{ fontSize: 11, padding: "2px 6px" }}
                             disabled={!online.has(u.id)}
-                            title={online.has(u.id) ? (inviteLabel ?? "협진 초대") : "오프라인 — 초대할 수 없습니다"}
-                            onClick={() => onInvite(u)}>초대</button>
+                            title={online.has(u.id) ? tr(inviteLabel ?? "협진 초대") : tr("오프라인 — 초대할 수 없습니다")}
+                            onClick={() => onInvite(u)}>{tr("초대")}</button>
                   )}
                 </span>
               } />
@@ -243,11 +292,11 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
           {data.outgoing.length > 0 && (
             <>
               <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-secondary)",
-                            background: "var(--bg-canvas)" }}>보낸 요청 (대기 중)</div>
+                            background: "var(--bg-canvas)" }}>{tr("보낸 요청 (대기 중)")}</div>
               {data.outgoing.map((u) => (
                 <UserRow key={u.id} user={u} online={online.has(u.id)} right={
                   <button style={{ fontSize: 11, padding: "2px 6px" }}
-                          onClick={() => act(api.collabRemoveFriend(u.id), "요청을 취소했습니다")}>취소</button>
+                          onClick={() => act(api.collabRemoveFriend(u.id), tr("요청을 취소했습니다"))}>{tr("취소")}</button>
                 } />
               ))}
             </>
@@ -259,27 +308,27 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
           <div style={{ padding: 8 }}>
             <input value={query} onChange={(e) => setQuery(e.target.value)} name="collab_find"
-                   autoComplete="off" placeholder="이름 · 아이디 · 직책으로 검색"
+                   autoComplete="off" placeholder={tr("이름 · 아이디 · 직책으로 검색")}
                    style={{ width: "100%", fontSize: 12 }} />
             <div style={{ fontSize: 10.5, color: "var(--text-secondary)", marginTop: 4 }}>
-              같은 병원 · 다른 병원 사용자가 모두 검색됩니다.
+              {tr("같은 병원 · 다른 병원 사용자가 모두 검색됩니다.")}
             </div>
           </div>
           <div style={{ flex: 1, overflowY: "auto" }}>
-            {searching && <div style={{ padding: 10, fontSize: 11.5, color: "var(--text-secondary)" }}>검색 중…</div>}
+            {searching && <div style={{ padding: 10, fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("검색 중…")}</div>}
             {!searching && found.length === 0 && (
-              <div style={{ padding: 10, fontSize: 11.5, color: "var(--text-secondary)" }}>결과가 없습니다.</div>
+              <div style={{ padding: 10, fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("결과가 없습니다.")}</div>
             )}
             {found.map((u) => (
               <UserRow key={u.id} user={u} online={u.online} right={
-                u.relation === "accepted" ? <span style={{ fontSize: 11, color: "var(--stat-final)" }}>친구</span>
+                u.relation === "accepted" ? <span style={{ fontSize: 11, color: "var(--stat-final)" }}>{tr("친구")}</span>
                   : u.relation === "pending" ? <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                      {u.relation_mine ? "대기 중" : "요청 받음"}</span>
-                    : u.relation === "blocked" ? <span style={{ fontSize: 11, color: "var(--text-disabled)" }}>차단</span>
+                      {u.relation_mine ? tr("대기 중") : tr("요청 받음")}</span>
+                    : u.relation === "blocked" ? <span style={{ fontSize: 11, color: "var(--text-disabled)" }}>{tr("차단")}</span>
                       : <button className="primary" style={{ fontSize: 11, padding: "2px 6px" }}
-                                onClick={() => act(api.collabRequestFriend(u.id), "친구 요청을 보냈습니다")
+                                onClick={() => act(api.collabRequestFriend(u.id), tr("친구 요청을 보냈습니다"))
                                   .then(() => api.collabDirectory(query).then((r) => setFound(r.items)).catch(() => {}))}>
-                          친구 요청
+                          {tr("친구 요청")}
                         </button>
               } />
             ))}
@@ -291,7 +340,7 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
           {!peer && (
             <div style={{ padding: 12, fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-              [친구] 탭에서 💬 를 눌러 대화를 시작하세요.
+              {tr("[친구] 탭에서 💬 를 눌러 대화를 시작하세요.")}
             </div>
           )}
           {peer && (
@@ -303,6 +352,54 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
                   <div style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{peer.name}</div>
                   <div style={{ fontSize: 10.5, color: "var(--text-secondary)" }}>{peer.hospital}</div>
                 </div>
+              </div>
+              {/* 1:1 통화 — 검사 협진 세션을 먼저 만들지 않아도 친구 대화에서 바로 사용. */}
+              <div style={{ padding: 6, borderBottom: "1px solid var(--border)",
+                            background: "var(--bg-canvas)" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
+                  <button onClick={() => void runMedia(() => mesh.setMicrophone(!mic), tr("음성"))}
+                          disabled={!!mediaBusy || !peerOnline}
+                          className={mic ? "primary" : undefined}
+                          style={{ fontSize: 11, padding: "4px 2px" }}
+                          title={mic ? tr("마이크 끄기") : tr("음성 통화")}>
+                    {mic ? `🎤 ${tr("음성 켜짐")}` : `🎤 ${tr("음성")}`}
+                  </button>
+                  <button onClick={() => void runMedia(() => mesh.setCamera(!cam), tr("화상"))}
+                          disabled={!!mediaBusy || !peerOnline}
+                          className={cam ? "primary" : undefined}
+                          style={{ fontSize: 11, padding: "4px 2px" }}
+                          title={cam ? tr("카메라 끄기") : tr("화상 통화")}>
+                    {cam ? `📹 ${tr("화상 켜짐")}` : `📹 ${tr("화상")}`}
+                  </button>
+                  <button onClick={() => void runMedia(() => mesh.setScreenShare(!screen), tr("화면 공유"))}
+                          disabled={!!mediaBusy || !peerOnline}
+                          className={screen ? "primary" : undefined}
+                          style={{ fontSize: 11, padding: "4px 2px" }}
+                          title={screen ? tr("화면 공유 중지") : tr("화면 공유")}>
+                    {screen ? `🖥 ${tr("공유 중")}` : `🖥 ${tr("화면")}`}
+                  </button>
+                </div>
+                {!peerOnline && (
+                  <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-disabled)" }}>
+                    {tr("상대가 오프라인입니다. 접속하면 통화 버튼이 활성화됩니다.")}
+                  </div>
+                )}
+                {mediaBusy && (
+                  <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-secondary)" }}>
+                    {mediaBusy} — {tr("권한 확인 중…")}
+                  </div>
+                )}
+                {(mic || cam || screen || peers.some((p) => (p.stream?.getTracks().length ?? 0) > 0)) && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginTop: 6 }}>
+                    <VideoTile id={meId} name={tr("나")} stream={mesh.localStream()} muted
+                               color={colorOf(meId)} label={screen ? tr("화면 공유") : undefined} />
+                    {peers.map((p) => (
+                      <VideoTile key={p.id} id={p.id} name={peer.name} stream={p.stream}
+                                 color={colorOf(p.id)}
+                                 label={p.state === "connected" ? undefined : tr("연결 중…")} />
+                    ))}
+                  </div>
+                )}
               </div>
               <div style={{ flex: 1, overflowY: "auto", padding: 8, display: "flex",
                             flexDirection: "column", gap: 6 }}>
@@ -324,11 +421,26 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
                 <div ref={bottomRef} />
               </div>
               <div style={{ display: "flex", gap: 4, padding: 6, borderTop: "1px solid var(--border)" }}>
-                <input value={draft} onChange={(e) => setDraft(e.target.value)} name="collab_msg"
-                       autoComplete="off" placeholder="내용을 입력하세요."
-                       onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                <div key="collab-dm-editor-v3" ref={draftRef}
+                       className="collab-chat-editor" contentEditable={true}
+                       suppressContentEditableWarning role="textbox" tabIndex={0}
+                       aria-label={tr("대화 내용")} aria-placeholder={tr("내용을 입력하세요.")}
+                       data-placeholder={tr("내용을 입력하세요.")}
+                       onPointerDown={(e) => e.stopPropagation()}
+                       onClick={(e) => e.stopPropagation()}
+                       onBeforeInput={(e) => e.stopPropagation()}
+                       onInput={(e) => e.stopPropagation()}
+                       onKeyDown={(e) => {
+                         // 뷰어/워크리스트 전역 단축키까지 전파되면 일반 계정의 관전 모드에서
+                         // 키 입력을 도구 명령으로 오인할 수 있다. IME 조합 Enter 도 전송하지 않는다.
+                         e.stopPropagation();
+                         if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                           e.preventDefault(); send();
+                         }
+                       }}
+                       onKeyUp={(e) => e.stopPropagation()}
                        style={{ flex: 1, fontSize: 12 }} />
-                <button className="primary" onClick={send} style={{ fontSize: 12 }}>전송</button>
+                <button className="primary" onClick={send} style={{ fontSize: 12 }}>{tr("전송")}</button>
               </div>
             </>
           )}

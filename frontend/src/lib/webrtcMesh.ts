@@ -42,18 +42,29 @@ export interface PeerView {
 }
 
 type Listener = (peers: PeerView[]) => void;
+export interface MediaState { mic: boolean; camera: boolean; screen: boolean }
+type MediaListener = (state: MediaState) => void;
 
-class WebrtcMesh {
+export class WebrtcMesh {
   private pcs = new Map<number, RTCPeerConnection>();
   private streams = new Map<number, MediaStream>();
   private states = new Map<number, RTCPeerConnectionState>();
+  private pendingIce = new Map<number, RTCIceCandidateInit[]>();
   private local: MediaStream | null = null;
+  private audioTrack: MediaStreamTrack | null = null;
+  private videoTrack: MediaStreamTrack | null = null;
+  private videoSource: "camera" | "screen" | null = null;
   private listeners = new Set<Listener>();
+  private mediaListeners = new Set<MediaListener>();
   private off: (() => void) | null = null;
   private myId = 0;
+  // null=검사 기반 협진 세션, dm:...=1:1 친구 통화. 서로 다른 통화의
+  // SDP/ICE가 한 창의 mesh에 섞이지 않도록 수신·송신 모두에 넣는 컨텍스트다.
+  private signalRoom: string | null = null;
 
   micOn = false;
   camOn = false;
+  screenOn = false;
 
   /** 내 로컬 스트림(자기 화면 미리보기용) */
   localStream(): MediaStream | null { return this.local; }
@@ -62,6 +73,16 @@ class WebrtcMesh {
     this.listeners.add(fn);
     fn(this.snapshot());
     return () => { this.listeners.delete(fn); };
+  }
+
+  onMediaChange(fn: MediaListener): () => void {
+    this.mediaListeners.add(fn);
+    fn(this.mediaState());
+    return () => { this.mediaListeners.delete(fn); };
+  }
+
+  private mediaState(): MediaState {
+    return { mic: this.micOn, camera: this.camOn, screen: this.screenOn };
   }
 
   private snapshot(): PeerView[] {
@@ -76,72 +97,160 @@ class WebrtcMesh {
     for (const fn of [...this.listeners]) {
       try { fn(snap); } catch { /* 리스너 하나의 예외가 나머지를 막지 않게 */ }
     }
+    const media = this.mediaState();
+    for (const fn of [...this.mediaListeners]) {
+      try { fn(media); } catch { /* 미디어 UI 하나의 예외를 격리 */ }
+    }
   }
 
-  /** 세션 참가 시 1회 — 시그널링 구독을 건다(미디어는 아직 켜지 않는다). */
-  start(myAccountId: number): void {
+  /** 세션/DM 대화 진입 시 1회 — 시그널링 구독을 건다(미디어는 아직 켜지 않는다). */
+  start(myAccountId: number, signalRoom: string | null = null): void {
+    if (this.off && (this.myId !== myAccountId || this.signalRoom !== signalRoom)) this.stop();
     this.myId = myAccountId;
+    this.signalRoom = signalRoom;
     if (this.off) return;
     this.off = collab.on((e) => {
-      if (e.t === "rtc.offer") void this.onOffer(e.from, e.d as RTCSessionDescriptionInit);
-      else if (e.t === "rtc.answer") void this.onAnswer(e.from, e.d as RTCSessionDescriptionInit);
-      else if (e.t === "rtc.ice") void this.onIce(e.from, e.d as RTCIceCandidateInit);
-      else if (e.t === "rtc.leave") this.dropPeer(e.from);
+      if (e.t === "rtc.ready" || e.t === "rtc.offer" || e.t === "rtc.answer"
+          || e.t === "rtc.ice" || e.t === "rtc.leave") {
+        if ((e.room ?? null) !== this.signalRoom) return;
+        if (e.t === "rtc.ready") {
+          // ready 는 **유실된 offer 를 되살리는 복구 신호**다. 이미 붙어 있는 연결에까지
+          // 반응해 dropPeer 하면, 세션에 누가 들어오고 나갈 때마다(syncPeers) 통화가
+          // 전원 끊겼다 다시 붙는다. 살아 있는 연결은 건드리지 않는다.
+          const live = this.states.get(e.from);
+          if (live === "connected" || live === "connecting") return;
+          // 상대가 나중에 대화창을 열면 이전 offer는 그 브라우저에서 유실됐다.
+          // ID가 큰 쪽(offer 담당)이 연결을 새로 만들어 재전송한다.
+          if (this.myId > e.from) {
+            this.dropPeer(e.from);
+            void this.connectTo(e.from);
+          } else {
+            this.peer(e.from);
+          }
+        }
+        else if (e.t === "rtc.offer") void this.onOffer(e.from, e.d as RTCSessionDescriptionInit);
+        else if (e.t === "rtc.answer") void this.onAnswer(e.from, e.d as RTCSessionDescriptionInit);
+        else if (e.t === "rtc.ice") void this.onIce(e.from, e.d as RTCIceCandidateInit);
+        else this.dropPeer(e.from);
+      }
       else if (e.t === "left") this.dropPeer(e.id);
-      else if (e.t === "session.closed") this.stop();
+      else if (e.t === "session.closed" && this.signalRoom === null) this.stop();
     });
   }
 
   stop(): void {
     for (const id of [...this.pcs.keys()]) {
-      collab.send({ t: "rtc.leave", to: id, d: null });
+      this.sendRtc("rtc.leave", id, null);
       this.dropPeer(id);
     }
     this.off?.();
     this.off = null;
     this.stopLocal();
+    this.signalRoom = null;
     this.emit();
   }
 
+  private sendRtc(t: "rtc.ready" | "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave",
+                  to: number, d: unknown): boolean {
+    return collab.send(this.signalRoom ? { t, to, d, room: this.signalRoom } : { t, to, d });
+  }
+
   // ── 로컬 미디어 ───────────────────────────────────────────────────────────
-  /** 마이크·카메라 토글. 둘 다 끄면 로컬 스트림을 완전히 해제한다(카메라 LED 가 꺼져야 한다). */
+  /** 이전 호출부 호환용 — mic/cam 두 값만 받으므로 화면 공유는 종료한다. */
   async setMedia(mic: boolean, cam: boolean): Promise<void> {
-    if (!mic && !cam) {
-      this.stopLocal();
-      this.micOn = this.camOn = false;
-      for (const pc of this.pcs.values()) {
-        for (const s of pc.getSenders()) { if (s.track) await s.replaceTrack(null).catch(() => {}); }
-      }
-      this.emit();
+    if (this.screenOn) await this.setScreenShare(false);
+    await this.setMicrophone(mic);
+    await this.setCamera(cam);
+  }
+
+  async setMicrophone(enabled: boolean): Promise<void> {
+    if (enabled === this.micOn) return;
+    if (!enabled) {
+      this.replaceAudio(null);
       return;
     }
-    const want: MediaStreamConstraints = {
-      audio: mic ? AUDIO_CONSTRAINTS : false,
-      video: cam ? VIDEO_CONSTRAINTS : false,
-    };
-    const next = await navigator.mediaDevices.getUserMedia(want);
-    this.stopLocal();
-    this.local = next;
-    this.micOn = mic;
-    this.camOn = cam;
-    // 이미 붙어 있는 피어에는 트랙을 교체한다 — 재협상 없이 켜고 끌 수 있다
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저는 마이크를 지원하지 않습니다");
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS, video: false });
+    const track = stream.getAudioTracks()[0];
+    if (!track) { stream.getTracks().forEach((t) => t.stop()); throw new Error("사용 가능한 마이크가 없습니다"); }
+    stream.getTracks().filter((t) => t !== track).forEach((t) => t.stop());
+    this.replaceAudio(track);
+  }
+
+  async setCamera(enabled: boolean): Promise<void> {
+    if (enabled === this.camOn) return;
+    if (!enabled) {
+      if (this.videoSource === "camera") this.replaceVideo(null, null);
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저는 카메라를 지원하지 않습니다");
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: VIDEO_CONSTRAINTS });
+    const track = stream.getVideoTracks()[0];
+    if (!track) { stream.getTracks().forEach((t) => t.stop()); throw new Error("사용 가능한 카메라가 없습니다"); }
+    stream.getTracks().filter((t) => t !== track).forEach((t) => t.stop());
+    this.replaceVideo(track, "camera");       // 화면 공유 중이었다면 카메라로 교체
+  }
+
+  async setScreenShare(enabled: boolean): Promise<void> {
+    if (enabled === this.screenOn) return;
+    if (!enabled) {
+      if (this.videoSource === "screen") this.replaceVideo(null, null);
+      return;
+    }
+    const getDisplay = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices);
+    if (!getDisplay) throw new Error("이 브라우저는 화면 공유를 지원하지 않습니다");
+    const stream = await getDisplay({
+      video: { frameRate: { ideal: 15, max: 20 } }, audio: false,
+    });
+    const track = stream.getVideoTracks()[0];
+    if (!track) { stream.getTracks().forEach((t) => t.stop()); throw new Error("공유할 화면을 선택하지 않았습니다"); }
+    stream.getTracks().filter((t) => t !== track).forEach((t) => t.stop());
+    this.replaceVideo(track, "screen");       // 카메라 중이었다면 화면으로 교체
+    track.addEventListener("ended", () => {
+      // 브라우저의 [공유 중지] 버튼으로 종료한 경우에도 UI와 송신 트랙을 즉시 맞춘다.
+      if (this.videoTrack === track && this.videoSource === "screen") this.replaceVideo(null, null);
+    }, { once: true });
+  }
+
+  private replaceAudio(track: MediaStreamTrack | null) {
+    if (this.audioTrack && this.audioTrack !== track) this.audioTrack.stop();
+    this.audioTrack = track;
+    this.micOn = !!track;
+    this.rebuildLocal();
+  }
+
+  private replaceVideo(track: MediaStreamTrack | null, source: "camera" | "screen" | null) {
+    if (this.videoTrack && this.videoTrack !== track) this.videoTrack.stop();
+    this.videoTrack = track;
+    this.videoSource = track ? source : null;
+    this.camOn = this.videoSource === "camera";
+    this.screenOn = this.videoSource === "screen";
+    this.rebuildLocal();
+  }
+
+  private rebuildLocal() {
+    const tracks = [this.audioTrack, this.videoTrack].filter((t): t is MediaStreamTrack => !!t);
+    this.local = tracks.length ? new MediaStream(tracks) : null;
+    // 연결을 만들 때 audio/video transceiver 를 미리 확보하므로 replaceTrack 만으로 즉시 송신된다.
     for (const pc of this.pcs.values()) this.attachTracks(pc);
     this.emit();
   }
 
   private stopLocal() {
-    this.local?.getTracks().forEach((t) => t.stop());
+    this.audioTrack?.stop();
+    this.videoTrack?.stop();
+    this.audioTrack = this.videoTrack = null;
+    this.videoSource = null;
     this.local = null;
+    this.micOn = this.camOn = this.screenOn = false;
+    this.emit();
   }
 
   private attachTracks(pc: RTCPeerConnection) {
-    const senders = pc.getSenders();
     for (const kind of ["audio", "video"] as const) {
-      const track = this.local?.getTracks().find((t) => t.kind === kind) ?? null;
-      const sender = senders.find((s) => s.track?.kind === kind)
-        ?? senders.find((s) => !s.track && (s as RTCRtpSender & { _kind?: string })._kind === kind);
-      if (sender) void sender.replaceTrack(track).catch(() => {});
-      else if (track && this.local) pc.addTrack(track, this.local);
+      const track = kind === "audio" ? this.audioTrack : this.videoTrack;
+      const tx = pc.getTransceivers().find((t) => t.receiver.track.kind === kind);
+      if (tx) void tx.sender.replaceTrack(track).catch(() => {});
     }
   }
 
@@ -151,8 +260,13 @@ class WebrtcMesh {
     if (found) return found;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     this.pcs.set(id, pc);
+    this.states.set(id, "new");
+    // 핵심: 로컬 장치를 켜기 **전에** 송수신 m-line 을 협상한다. 이후 마이크/카메라/화면을
+    // 켜도 addTrack 재협상 없이 replaceTrack 으로 상대에게 바로 전달된다.
+    pc.addTransceiver("audio", { direction: "sendrecv" });
+    pc.addTransceiver("video", { direction: "sendrecv" });
     pc.onicecandidate = (ev) => {
-      if (ev.candidate) collab.send({ t: "rtc.ice", to: id, d: ev.candidate.toJSON() });
+      if (ev.candidate) this.sendRtc("rtc.ice", id, ev.candidate.toJSON());
     };
     pc.ontrack = (ev) => {
       const ms = this.streams.get(id) ?? new MediaStream();
@@ -176,37 +290,62 @@ class WebrtcMesh {
     if (id === this.myId || this.pcs.has(id)) return;
     if (this.myId < id) { this.peer(id); return; }   // 상대가 걸어 온다 — 받을 준비만
     const pc = this.peer(id);
-    const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-    await pc.setLocalDescription(offer);
-    collab.send({ t: "rtc.offer", to: id, d: offer });
+    try {
+      const offer = await pc.createOffer();
+      if (this.pcs.get(id) !== pc) return;  // rtc.ready가 중간에 재연결을 시작함
+      await pc.setLocalDescription(offer);
+      if (this.pcs.get(id) === pc) this.sendRtc("rtc.offer", id, offer);
+    } catch {
+      if (this.pcs.get(id) === pc) this.dropPeer(id);
+    }
   }
 
   /** 세션 참가자 명단과 현재 연결을 맞춘다(들어온 사람은 연결, 나간 사람은 정리) */
   syncPeers(memberIds: number[]): void {
     const want = new Set(memberIds.filter((x) => x !== this.myId));
-    for (const id of want) void this.connectTo(id);
+    for (const id of want) {
+      // connectTo 가 pc 를 만들기 **전에** 신규 여부를 봐야 한다(연결 뒤엔 항상 has=true).
+      const fresh = !this.pcs.has(id);
+      void this.connectTo(id);
+      // 내가 지금 수신 준비됐음을 알린다. 먼저 열어 둔 상대의 유실 offer를 복구한다.
+      // 이미 연결이 있으면 복구할 것이 없다 — 보내면 상대가 멀쩡한 통화를 끊는다.
+      if (fresh && this.myId < id) this.sendRtc("rtc.ready", id, null);
+    }
     for (const id of [...this.pcs.keys()]) if (!want.has(id)) this.dropPeer(id);
   }
 
   private async onOffer(from: number, sdp: RTCSessionDescriptionInit) {
     const pc = this.peer(from);
     await pc.setRemoteDescription(sdp);
+    await this.flushIce(from, pc);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    collab.send({ t: "rtc.answer", to: from, d: answer });
+    this.sendRtc("rtc.answer", from, answer);
   }
 
   private async onAnswer(from: number, sdp: RTCSessionDescriptionInit) {
     const pc = this.pcs.get(from);
     if (!pc || pc.signalingState === "stable") return;   // 늦게 온 answer 는 버린다
     await pc.setRemoteDescription(sdp).catch(() => { /* 상태 불일치는 무시 — 재협상이 덮는다 */ });
+    await this.flushIce(from, pc);
   }
 
   private async onIce(from: number, cand: RTCIceCandidateInit) {
     const pc = this.pcs.get(from);
     if (!pc) return;
-    // remoteDescription 이전에 도착한 후보는 브라우저가 큐에 넣거나 던진다 — 던지면 무시
+    if (!pc.remoteDescription) {
+      const queued = this.pendingIce.get(from) ?? [];
+      queued.push(cand);
+      this.pendingIce.set(from, queued);
+      return;
+    }
     await pc.addIceCandidate(cand).catch(() => {});
+  }
+
+  private async flushIce(id: number, pc: RTCPeerConnection) {
+    const queued = this.pendingIce.get(id) ?? [];
+    this.pendingIce.delete(id);
+    for (const cand of queued) await pc.addIceCandidate(cand).catch(() => {});
   }
 
   private dropPeer(id: number) {
@@ -215,6 +354,7 @@ class WebrtcMesh {
     this.pcs.delete(id);
     this.streams.delete(id);
     this.states.delete(id);
+    this.pendingIce.delete(id);
     this.emit();
   }
 }

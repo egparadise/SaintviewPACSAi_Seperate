@@ -74,7 +74,7 @@ export type CollabEvent =
   | { t: "cursor"; from: number; d: unknown }
   | { t: "ctl.requested" | "ctl.granted" | "ctl.revoked"; d: CollabSession; by: number; target: number | null }
   | { t: "exam"; d: CollabSession; granted: number[] }
-  | { t: "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave"; from: number; d: unknown }
+  | { t: "rtc.ready" | "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave"; from: number; d: unknown; room?: string }
   | { t: "session.closed"; code: string }
   | { t: "error"; detail: string };
 
@@ -90,7 +90,7 @@ export type CollabSend =
   | { t: "ctl.grant"; target: number; caps?: string[] }
   | { t: "ctl.revoke" }
   | { t: "exam.switch"; study_id: number }
-  | { t: "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave"; to: number; d: unknown };
+  | { t: "rtc.ready" | "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave"; to: number; d: unknown; room?: string };
 
 export type CollabStatus = "idle" | "connecting" | "open" | "closed";
 

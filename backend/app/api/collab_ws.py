@@ -38,8 +38,10 @@ CLOSE_NO_ACCOUNT = 4403
 CLOSE_TOO_MANY = 4429
 CLOSE_INTERNAL = 4500
 
-# 릴레이 전용(무 DB) 메시지 — 이 집합에 있는 타입은 어떤 경우에도 DB 를 타지 않는다
-_RELAY_TYPES = frozenset({"state", "cursor", "rtc.offer", "rtc.answer", "rtc.ice", "rtc.leave"})
+# 화면 상태는 고빈도라 무조건 DB 0회. WebRTC는 검사 기반 세션이면 허브만
+# 확인하고, 1:1 DM 통화면 친구 관계를 짧게 캐시해 검증한다(아래 분기).
+_STATE_RELAY_TYPES = frozenset({"state", "cursor"})
+_RTC_RELAY_TYPES = frozenset({"rtc.ready", "rtc.offer", "rtc.answer", "rtc.ice", "rtc.leave"})
 
 # 제어권 캐시 수명(초). 짧게 잡는 이유: 만료·회수가 이 시간 안에는 반영되어야 한다.
 # 회수는 어차피 즉시 이벤트로 캐시를 깨므로, 이 값은 '이벤트를 놓쳤을 때의 상한'이다.
@@ -65,6 +67,23 @@ def _sync_context(user: dict) -> dict[str, Any] | None:
             "friend_ids": sorted(svc.friend_ids(db, me.id)),
             "sessions": [svc.session_brief(db, s) for s in svc.open_sessions_for(db, me.id)],
         }
+
+
+def _can_relay_dm_rtc(account_id: int, target_id: int, room: str) -> bool:
+    """1:1 WebRTC 시그널을 서로 수락한 친구 사이에서만 허용한다.
+
+    room 문자열만 믿지 않고, 두 ID가 실제 당사자인지와 accepted 관계를 함께 검증한다.
+    SDP/ICE 내용은 열어 보지 않는다.
+    """
+    from app.models import Account
+
+    with SessionLocal() as db:
+        me = db.get(Account, account_id)
+        return bool(
+            me is not None
+            and svc.dm_peer(room, account_id) == target_id
+            and target_id in svc.friend_ids(db, account_id)
+        )
 
 
 async def _announce_presence(account_id: int, friends: list[int], online: bool) -> None:
@@ -107,6 +126,8 @@ async def collab_ws(websocket: WebSocket) -> None:
     # cap → (만료시각, 제어권 리비전, 허용여부). 리비전이 있어야 **다른 소켓**에서 일어난
     # 제어권 승인·회수가 이 소켓에도 즉시 반영된다(collab_hub._ctl_rev 주석 참조).
     _ctl_cache: dict[str, tuple[float, int, bool]] = {}
+    # (room, target) -> (만료시각, 허용). 친구 차단/삭제가 3초 안에 반영되도록 짧게 둔다.
+    _dm_rtc_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 
     try:
         await websocket.send_json({
@@ -136,23 +157,49 @@ async def collab_ws(websocket: WebSocket) -> None:
                 continue
 
             # ── 고빈도 릴레이 경로 (DB 접근 0) ────────────────────────────────
-            if t in _RELAY_TYPES:
+            if t in _STATE_RELAY_TYPES:
                 code = hub.session_of(websocket)
                 if not code:
                     continue
-                if t in ("state", "cursor"):
-                    # 화면을 움직일 수 있는 사람만 송출한다 — 서버가 검증한다.
-                    # 커서는 관전자도 보여 주는 편이 협진에 유용하므로 검사하지 않는다.
-                    if t == "state" and not await _may_control(_ctl_cache, code, aid, "collab.viewport"):
+                # 화면을 움직일 수 있는 사람만 송출한다. 커서는 관전자도 허용한다.
+                if t == "state" and not await _may_control(_ctl_cache, code, aid, "collab.viewport"):
+                    continue
+                payload = {"t": t, "from": aid, "d": msg.get("d")}
+                await hub.send_session_socket(code, payload, exclude_ws=websocket)
+                continue
+
+            # WebRTC 시그널링 — 검사 협진 세션과 1:1 친구 DM 통화를 모두 지원한다.
+            if t in _RTC_RELAY_TYPES:
+                to = msg.get("to")
+                if not isinstance(to, int) or to == aid:
+                    continue
+                room = str(msg.get("room") or "")
+                # ⚠ 경로는 **프레임의 room** 으로 고른다(소켓의 세션 소속이 아니라).
+                #   소켓 상태로 고르면, 협진 초대를 수락해 세션에 들어간 창에서는
+                #   1:1 DM 통화 시그널이 전부 세션 분기로 빨려 들어가 조용히 버려진다 —
+                #   워크리스트 창은 CollabGlobal 이 초대 수락 시 session.enter 를 보내므로
+                #   그 창의 DM 음성·화상·화면공유가 새로고침 전까지 죽어 있었다.
+                #   dm_peer 는 내가 그 DM 룸의 당사자일 때만 상대 id 를 준다(룸 위조 차단).
+                if svc.dm_peer(room, aid) is not None:
+                    key = (room, to)
+                    now = time.monotonic()
+                    cached = _dm_rtc_cache.get(key)
+                    if cached is None or cached[0] <= now:
+                        allowed = await run_in_threadpool(_can_relay_dm_rtc, aid, to, room)
+                        _dm_rtc_cache[key] = (now + _CTL_TTL, allowed)
+                    else:
+                        allowed = cached[1]
+                    if not allowed:
+                        continue
+                    payload = {"t": t, "from": aid, "d": msg.get("d"), "room": room}
+                else:
+                    # 검사 협진 세션 경로 — 같은 세션 참가자에게만. 세션 mesh 는 room 없이
+                    # 보내고 room 없이 받으므로(webrtcMesh.signalRoom=null) payload 도 그대로.
+                    code = hub.session_of(websocket)
+                    if not code or to not in hub.session_members(code):
                         continue
                     payload = {"t": t, "from": aid, "d": msg.get("d")}
-                    await hub.send_session_socket(code, payload, exclude_ws=websocket)
-                    continue
-                # WebRTC 시그널링 — 서버는 내용을 보지 않고 지정 상대에게만 넘긴다(SDP/ICE 는 불투명)
-                to = msg.get("to")
-                if not isinstance(to, int) or to not in hub.session_members(code):
-                    continue
-                await hub.send_to(to, {"t": t, "from": aid, "d": msg.get("d")})
+                await hub.send_to(to, payload)
                 continue
 
             # ── 저빈도 경로 (DB 사용 — 스레드풀) ─────────────────────────────

@@ -154,6 +154,33 @@ input, select {
 }
 input:focus, select:focus { outline: 1px solid var(--accent); }
 
+/* 협진 채팅은 React controlled input과 브라우저 확장의 input 후킹에서 독립한
+   plain-text 편집기를 쓴다. 뷰어 전역 단축키에 포커스가 빼앗기지 않는다. */
+.collab-chat-editor {
+  min-width: 0;
+  min-height: 29px;
+  max-height: 88px;
+  overflow-y: auto;
+  box-sizing: border-box;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-family: inherit;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+  user-select: text;
+}
+.collab-chat-editor:focus { outline: 1px solid var(--accent); }
+.collab-chat-editor:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-disabled);
+  pointer-events: none;
+}
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #3a3f46; border-radius: 5px; }
 ::-webkit-scrollbar-track { background: var(--bg-panel); }
