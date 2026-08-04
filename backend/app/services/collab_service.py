@@ -115,12 +115,23 @@ def directory(db: Session, me: Account, q: str = "", only_other_hospital: bool =
     """친구 요청 대상 검색 — 같은 병원 + 타 병원 모두.
 
     노출 범위는 이름·아이디·직책·역할·병원명뿐이다(연락처·생년 등 개인정보는 싣지 않는다).
-    비활성 계정과 병원 미소속 시스템 관리자는 제외한다 — 협진 상대가 아니다.
+    제외 대상은 둘뿐이다: **비활성 계정**과 **병원 미소속 시스템 관리자**(협진 상대가 아니다).
+
+    ⚠ 예전에 `hospital_id IS NOT NULL` 로 걸렀는데 그것이 사고였다 —
+      원격 PACS(A) 로그인으로 만들어지는 **미러 계정**은 hospital_id 가 없다
+      (auth.webpacs-login → ensure_mirror 가 병원을 넘기지 않는다. A 신원에는 병원 개념이 없다).
+      그래서 Live 모드 서버에서는 A 계정 사용자끼리 **서로를 절대 검색할 수 없었다**
+      ("Sunshin_lee 를 찾아도 결과가 없습니다"). 의도했던 것은 '시스템 관리자 제외' 였으므로
+      그 조건만 정확히 쓴다.
+
+    ⚠ `enabled IS TRUE` 가 아니라 `IS NOT FALSE` 다 — 레거시 행(_sync_columns 의 ALTER 로
+      추가된 컬럼)은 NULL 이고, auth_service.authenticate 는 그것을 **활성으로 본다**.
+      두 곳의 규칙이 갈리면 '로그인은 되는데 친구 검색에는 영원히 안 보이는' 계정이 생긴다.
     """
     stmt = select(Account).where(
         Account.id != me.id,
-        Account.enabled.is_(True),
-        Account.hospital_id.isnot(None),
+        Account.enabled.isnot(False),
+        ~and_(Account.role == "admin", Account.hospital_id.is_(None)),
     )
     term = (q or "").strip()
     if term:

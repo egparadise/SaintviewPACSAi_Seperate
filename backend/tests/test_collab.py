@@ -107,6 +107,75 @@ def _open_and_join(client, duo, study_id: int | None = None):
     return code
 
 
+# ═══════════════════ ⓪ 디렉터리 — 검색에 사람이 보여야 한다 ═══════════════════
+def test_directory_finds_remote_pacs_mirror_accounts(client, db, duo):
+    """원격 PACS(A) 로그인으로 만들어진 **미러 계정**이 친구 검색에 나와야 한다.
+
+    실제 증상: Live 모드 서버에서 "Sunshin_lee" 를 검색해도 "결과가 없습니다".
+    원인: ensure_mirror(auth.py webpacs-login)가 hospital_id 를 넘기지 않아 미러 행은
+         hospital_id=NULL 인데, directory 가 hospital_id IS NOT NULL 로 걸렀다.
+         → A 계정으로 로그인한 사용자끼리는 서로를 **절대** 찾을 수 없었다.
+    (이 저장소의 '인자는 받는데 아무도 안 넘김' 유형 — register_study(body_part=…) 와 같다)
+    """
+    from app.services.account_mirror import ensure_mirror
+    from app.services.collab_service import directory
+
+    mirror = ensure_mirror(db, user_id="Sunshin_lee", name="이순신",
+                           role="doctor", a_user_idx=4242)
+    db.commit()
+    assert mirror.hospital_id is None, "전제 — 미러는 병원 미소속으로 만들어진다"
+
+    got = directory(db, duo["host"], q="Sunshin")
+    assert any(u["username"] == "Sunshin_lee" for u in got), \
+        f"A 미러 계정이 검색되지 않는다 — {[u['username'] for u in got]}"
+    # 대소문자 무관하게 찾혀야 한다(사용자는 소문자로 친다)
+    assert any(u["username"] == "Sunshin_lee" for u in directory(db, duo["host"], q="sunshin"))
+    # 이름(한글)으로도 찾힌다
+    assert any(u["username"] == "Sunshin_lee" for u in directory(db, duo["host"], q="이순신"))
+
+
+def test_directory_predicate_tolerates_null_enabled():
+    """enabled 가 NULL 인 레거시 계정도 검색에 나와야 한다 — SQL 조건으로 확인한다.
+
+    auth_service.authenticate 는 **명시적 False 만** 거부하고 NULL 은 활성으로 본다
+    (컬럼 추가 전 계정 보호 — 그 컬럼은 db._sync_columns 의 ALTER 로 붙어 nullable 이다).
+    directory 가 `IS TRUE` 로 걸면 '로그인은 되는데 친구 검색에는 영원히 안 보이는' 계정이 된다.
+
+    ⚠ 행으로 재현할 수 없다: 새 스키마의 accounts.enabled 는 NOT NULL 이라
+      NULL 을 넣는 순간 DB 가 거부한다. NULL 은 **레거시 DB 에만** 있는 상태다.
+      그래서 '무엇으로 거르는가'(조건식)를 직접 본다 — 이 규칙이 갈리는 것이 사고였다.
+    """
+    from app.models import Account
+    from app.services.collab_service import directory
+    import inspect
+
+    src = inspect.getsource(directory)
+    assert "enabled.isnot(False)" in src, "NULL 을 활성으로 보지 않는다(auth_service 와 갈린다)"
+    assert "enabled.is_(True)" not in src
+    # 조건식 자체가 NULL 을 통과시키는지 SQL 로 확인
+    sql = str(Account.enabled.isnot(False).compile(compile_kwargs={"literal_binds": True}))
+    assert "IS NOT" in sql.upper(), sql
+
+
+def test_directory_still_excludes_disabled_and_system_admin(client, db, duo):
+    """열되 열지 말아야 할 것은 그대로 — 비활성 계정과 병원 미소속 **시스템 관리자**."""
+    from app.services.collab_service import directory
+
+    off = _account(db, "collab_disabled", duo["ha"].id)
+    off.enabled = False
+    db.commit()
+    names = [u["username"] for u in directory(db, duo["host"], q="collab_")]
+    assert "collab_disabled" not in names, "비활성 계정이 검색된다"
+
+    from app.models import Account
+    sysadmin = db.execute(
+        select(Account).where(Account.username == "admin")).scalar_one_or_none()
+    if sysadmin is not None:
+        assert sysadmin.hospital_id is None
+        assert "admin" not in [u["username"] for u in directory(db, duo["host"], q="admin")], \
+            "병원 미소속 시스템 관리자는 협진 상대가 아니다"
+
+
 # ═══════════════════ ① 친구 — 중복·양방향·차단 ═══════════════════
 def test_friend_request_dedup_and_mutual_merge(client, db, duo):
     from app.models import CollabFriend
