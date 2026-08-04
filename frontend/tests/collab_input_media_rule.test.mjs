@@ -65,3 +65,15 @@ test("rtc.ready 는 '유실 offer 복구' 신호다 — 살아 있는 통화를 
 test("원격 미디어는 자동 재생 속성을 가진다", () => {
   assert.match(session, /muted=\{muted\} autoPlay playsInline/);
 });
+
+test("응답 측 미디어가 나갈 자리를 만든다 — associated transceiver 우선 + sendrecv", () => {
+  // 실브라우저 2탭 검증에서 잡은 결함: 원격 offer 를 적용하면 브라우저가 m-line 마다
+  // 새 transceiver 를 만들고, 미리 선점한 것은 mid=null 고아로 남는다. 고아에 트랙을 붙이면
+  // answer 가 recvonly 로 나가 **응답한 쪽의 음성·영상이 한 방향도 흐르지 않는다**.
+  assert.match(rtc, /txs\.find\(\(t\) => t\.mid !== null\)/,
+    "연결된(mid 있는) transceiver 를 우선 고르지 않는다");
+  assert.match(rtc, /tx\.direction === "recvonly"[\s\S]{0,60}tx\.direction = "sendrecv"/,
+    "recvonly 로 남은 방향을 sendrecv 로 열지 않는다");
+  assert.match(rtc, /this\.attachTracks\(pc\);[\s\S]{0,200}createAnswer\(\)/,
+    "answer 를 만들기 전에 트랙을 붙이지 않는다(그 뒤엔 재협상 없이 못 보낸다)");
+});

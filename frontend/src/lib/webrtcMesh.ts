@@ -249,8 +249,17 @@ export class WebrtcMesh {
   private attachTracks(pc: RTCPeerConnection) {
     for (const kind of ["audio", "video"] as const) {
       const track = kind === "audio" ? this.audioTrack : this.videoTrack;
-      const tx = pc.getTransceivers().find((t) => t.receiver.track.kind === kind);
-      if (tx) void tx.sender.replaceTrack(track).catch(() => {});
+      const txs = pc.getTransceivers().filter((t) => t.receiver.track.kind === kind);
+      // ⚠ 원격 offer 를 적용하면 브라우저가 m-line 마다 **새 transceiver** 를 만든다.
+      //   미리 선점해 둔 것은 mid=null 고아로 남고, 거기 붙인 트랙은 영영 나가지 않는다.
+      //   실브라우저 2탭 검증에서 "응답한 쪽의 음성·영상이 한 방향도 안 흐르는" 원인이 이것이었다.
+      //   → 실제로 연결된(mid 있는) transceiver 를 우선 쓰고, 없을 때만 선점분을 쓴다.
+      const tx = txs.find((t) => t.mid !== null) ?? txs[0];
+      if (!tx) continue;
+      // 브라우저가 만든 associated transceiver 는 기본이 recvonly 다. 그대로 answer 하면
+      // 내 미디어가 나갈 자리가 없다 — 장치를 나중에 켜도 되도록 항상 sendrecv 로 열어 둔다.
+      if (tx.direction === "recvonly" || tx.direction === "inactive") tx.direction = "sendrecv";
+      void tx.sender.replaceTrack(track).catch(() => {});
     }
   }
 
@@ -318,6 +327,9 @@ export class WebrtcMesh {
     const pc = this.peer(from);
     await pc.setRemoteDescription(sdp);
     await this.flushIce(from, pc);
+    // answer 를 만들기 **전에** 붙여야 한다. 여기서 associated transceiver 를 sendrecv 로 열지
+    // 않으면 answer 가 recvonly 로 나가고, 그 뒤엔 재협상 없이는 내 미디어를 보낼 수 없다.
+    this.attachTracks(pc);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     this.sendRtc("rtc.answer", from, answer);
