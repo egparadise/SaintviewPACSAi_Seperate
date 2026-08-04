@@ -43,10 +43,10 @@ import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
 // 기하 헬퍼를 lib/scoutLines 로 추출할 때 이 둘만 import 에서 빠져 빌드가 깨져 있었다.
 import { axisOf, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment, vdot, vsub } from "../lib/scoutLines";
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
-import { mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
+import { mammoAssign, mammoView, mgExamLooksMammo, mgSeriesLooksMammo, pickHang2d } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgFromEl, mgInstView, mgOrderIndexes,
-  mgPaneIs, mgProbe, mgReadable,
+  mgProbe, mgReadable,
   mgRatioBox, mgInnerSide, mgStamp, mgWallByCol, mgZoomOf, readMgCfg, toRC, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
 } from "../lib/mgHang";
@@ -678,9 +678,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // MG 는 2D 행잉 표 밖(뷰어 공통 맘모 규정 = 표준 2×2 + mg_hang). defMap 에는 MG 키가 없지만
       // '*'(기타 전체, 구 infi_default_layout) 가 흘러들면 맘모 페인의 타일 분할(p.il)을 덮어쓴다 →
       // 4칸이 16칸이 됐다. Viewer2D(sv/ty)는 MG 를 통째로 배제하므로 여기서도 같게 막는다.
-      const defCfg = single && mod !== "MG" ? (defMap[mod] ?? defMap["*"]) : undefined;
+      // ★ 판정은 뷰 신호 포함(mgExamLooksMammo) — CR 코드 맘모 장비 현장(sv70) 대응.
+      const mammoLike = mgExamLooksMammo(mod, hangList[0]?.series ?? []);
+      const defCfg = single && !mammoLike ? (defMap[mod] ?? defMap["*"]) : undefined;
       // Mammo(MG) 전용 행잉 — 표준 2×2 [R CC, L CC, R MLO, L MLO] + 오버레이 텍스트 제거 (전 뷰어 공통 규칙)
-      const mammo = single && mod === "MG";
+      const mammo = single && mammoLike;
       const ma = mammo ? mammoAssign(hangList[0].series) : null;
       // 부분 매칭(예: RCC 만 라벨이 맞는 검사)에서 빈 슬롯을 남기면 반대편 유방이 아예 안 뜬다
       // → 매칭 안 된 시리즈로 빈 칸을 순서대로 채운다. 매칭 0이면 통째로 순서대로 폴백.
@@ -1875,7 +1877,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   // ── 2D-MG: 타일별 조직 경계상자 → 페인 보정값 ───────────────────────────
   // Viewer2D 와 **같은 술어**(lib/mgHang.mgPaneIs) — 두 뷰어가 갈리면 같은 검사에서
   // 한쪽만 2D-MG 가 도는 일이 생긴다. 시리즈 modality 가 비었을 때만 검사 값으로 보강한다.
-  const mgSeries = (p: Pane) => mgPaneIs(p.series?.modality, curD?.modality);
+  const mgSeries = (p: Pane) => mgSeriesLooksMammo(p.series, curD?.modality);
   /** 탐지 결과가 있으면 그걸로, 없으면(canvas 오염·고정비율 모드) 검사명 laterality → 열 위치로 흉벽 추정 */
   /** 이 타일에 쓸 조직 상자 — 탐지 결과 우선, 못 읽었을 때만(설정 시) 고정 비율 */
   const mgBoxAt = (p: Pane, inst: InstanceNode, t: number): MgBox | null => {

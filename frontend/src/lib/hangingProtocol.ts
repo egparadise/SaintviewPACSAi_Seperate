@@ -634,12 +634,23 @@ export function hpRuleMatches(rule: HpRule, exam: HpExam): boolean {
  *  ⚠ 이 지점이 두 뷰어에서 갈려 있었다: ViewerInfi 는 find 조건에 넣어 건너뛰었고(→ 다음 규칙 적용),
  *    Viewer2D 는 먼저 찾은 뒤 `use_on_exam_open !== false` 로 막아 **아무 규칙도 적용하지 않았다**.
  *    '이 규칙은 수동 전용' 이라는 뜻이므로 다음 규칙을 막을 이유가 없다 → 건너뛰기로 통일한다. */
+/** 규칙에 매칭 조건이 하나라도 있는가 — 자동 적용(forExamOpen) 게이트.
+ *  ⚠ 실제 사고(sv70/계정별 재현): 방금 만든 '새 프로토콜'(조건 전부 비움)이 **모든 검사**에
+ *    자동 매칭돼 그 계정만 전 검사가 HP 1×1 이 됐다 — "Common 설정이 풀려" 보고의 한 갈래.
+ *    HP 기본은 해제(CLAUDE.md) — 조건 없는 규칙은 HP 메뉴에서 **직접 고를 때만** 쓴다. */
+export function hpRuleHasCondition(r: HpRule): boolean {
+  return !!((r.modality || "").trim()
+    || hpPartTerms(r.body_part || "").length
+    || up(r.projection).trim());
+}
+
 export function matchHpRule(
   exam: HpExam, rules: readonly HpRule[] | undefined, opts?: { forExamOpen?: boolean },
 ): HpRule | null {
   const list = rules ?? [];
   const ok = (r: HpRule) =>
-    (!opts?.forExamOpen || r.use_on_exam_open !== false) && hpRuleMatches(r, exam);
+    (!opts?.forExamOpen || (r.use_on_exam_open !== false && hpRuleHasCondition(r)))
+    && hpRuleMatches(r, exam);
   return list.find((r) => r.priority && ok(r)) ?? list.find((r) => !r.priority && ok(r)) ?? null;
 }
 

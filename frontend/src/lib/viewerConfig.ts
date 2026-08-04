@@ -1,4 +1,8 @@
 // 뷰어 설정 공용 정의 — Viewer2D와 SettingsModal이 함께 사용 (경량, cornerstone 미포함)
+// mgHang 은 무의존 모듈 — 이 방향(viewerConfig → mgHang)만 허용된다(역방향은 순환).
+// ⚠ 확장자를 붙인다 — node --test(타입 스트리핑)가 이 파일을 직접 import 하므로(hang2d_rule 등)
+//   확장자 없는 상대 import 는 Node ESM 이 해석하지 못한다(i18n 사전에서 실제로 깨졌던 그 함정).
+import { isMg, mgInstView, mgPaneIs } from "./mgHang.ts";
 
 /** Mammo(MG) view 분류 — series_desc 파싱(laterality R/L + view CC/MLO).
  *  DICOM ImageLaterality/ViewPosition 이 미노출이라 first-cut(검사명 파싱). 정확도 필요 시 백엔드 태그 노출로 강화. */
@@ -18,19 +22,49 @@ export function mammoAssign<T extends { series_desc: string }>(list: T[]): (T | 
   return [pick("R", "CC"), pick("L", "CC"), pick("R", "MLO"), pick("L", "MLO")];
 }
 
-/* ══════════════ 2D 행잉 우선순위 — 뷰어 3종의 단일 규정 ══════════════
-   설정 화면(뷰어 공통 > 2D 행잉)의 '이 공통 설정을 모든 뷰어에 우선 적용' 체크박스가 규정 원문이다.
-   ① MG(유방촬영)는 2D 행잉 표의 대상이 아니다 — 맘모는 언제나 '뷰어 공통' 단일 규정
-      (표준 2×2 4-view + mg_hang 타일). 공통/뷰어별 어느 맵에 MG 값이 남아 있어도 무시한다.
-   ② 체크 on(키가 없으면 on): **공통 맵만** 본다. 뷰어별(sv/ty/infi)은 통째로 무시 — 폴백 없음.
-   ③ 체크 off: **그 뷰어의 맵만** 본다. 공통은 적용하지 않는다 — 폴백 없음.
-   ④ 읽는 맵 **안에서만** '*'(기타 전체) 행이 그 맵의 나머지 모달리티를 받는다. 맵을 건너뛰지 않으므로
-      ②③ 과 충돌하지 않는다(공통을 읽는 중이면 공통의 '*', 뷰어별을 읽는 중이면 그 뷰어의 '*').
-   어느 쪽이든 해당 모달리티 키도 '*' 도 없으면 null = '설정 없음' → 각 뷰어의 자동 규칙에 맡긴다.
+/** ★ 2D-MG 게이트 술어(시리즈 단위) — modality 코드가 MG 가 아니어도 뷰 신호로 맘모를 판정한다.
+ *  실제 사고(sv70): 맘모 장비가 **CR 코드**로 보내는 병원에서 시리즈·검사 modality 가 모두 CR 이라
+ *  구 술어(mgPaneIs — modality 만 봄)가 false → 2D-MG(여백 제거·공유 배율·표준 배치)가 전혀 안 돌았다.
+ *  신호: ① 시리즈 modality 가 MG ② 시리즈 설명이 표준 뷰(RCC/LCC/RMLO/LMLO — mammoView)로 읽힘
+ *        ③ 인스턴스 태그(ViewPosition/ImageLaterality — mgInstView)가 2장 이상(단일 장이면 1장)
+ *  두 뷰어가 이 술어 하나만 쓴다 — 각자 검사식을 복사하면 반드시 갈린다(mgPaneIs 주석의 그 사고). */
+export function mgSeriesLooksMammo(
+  s: { modality?: string | null; series_desc?: string | null;
+       instances?: readonly { view_position?: string | null; laterality?: string | null }[] } | null | undefined,
+  examModality?: string | null,
+): boolean {
+  if (!s) return isMg(examModality ?? "");
+  const sm = String(s.modality ?? "").trim();
+  if (sm && isMg(sm)) return true;
+  if (mammoView(String(s.series_desc ?? "")).view) return true;
+  const inst = s.instances ?? [];
+  const withTag = inst.filter((i) => mgInstView(i as never).view).length;
+  if (withTag >= 2 || (inst.length === 1 && withTag === 1)) return true;
+  // 신호가 없으면 구 술어(mgPaneIs)로 폴백 — 시리즈 modality 명시 시 그 값, 미상이면 검사 modality.
+  return mgPaneIs(s.modality, examModality ?? "");
+}
 
-   ⚠ 폴백을 되살리면 안 된다. 편집기는 사용자가 만진 모달리티만 맵에 쓰므로 '키 없음'이 정상 상태다.
-   여기서 반대쪽 맵으로 떨어뜨리면 체크 on 인데 뷰어별 값이 먹고(=②위반), 체크 off 인데 공통 값이
-   먹는다(=③위반). 실제로 그 버그가 있었다(ddafd93 이 0174cca 시절의 하위호환 폴백을 안 걷어냄). */
+/** 검사 단위 — 시리즈 중 하나라도 맘모 신호면 맘모 검사로 본다.
+ *  ⚠ 이 판정은 '맘모로 보이는가' 만 답한다 — **2D-MG 규정 적용 여부는 선택(mgCfg.on)이 정한다**
+ *    (CLAUDE.md: Mammo Layout 은 선택되었을 때만). 호출부가 mgCfg.on 과 함께 쓴다. */
+export function mgExamLooksMammo(
+  modality: string | null | undefined,
+  series: readonly Parameters<typeof mgSeriesLooksMammo>[0][] | null | undefined,
+): boolean {
+  if (isMg(String(modality ?? ""))) return true;
+  return !!series?.some((s) => mgSeriesLooksMammo(s, ""));
+}
+
+/* ══════════════ 2D 분할 우선순위 — 뷰어 3종의 단일 규정 (원문: CLAUDE.md) ══════════════
+   ⚠ 이 블록이 CLAUDE.md 와 어긋나면 CLAUDE.md 가 이긴다. 규정 서술을 코드 여러 곳에 두다
+     서로 어긋난 것이 "고쳤는데 재발" 의 반복 원인이었다(Obsidian 22 에러 분석).
+
+   2026-08-04 사용자 확정 — 네 기능은 각기 독립:
+   ① 행잉(HP): **선택되었을 때만** 이긴다. 기본은 해제. (조건 없는 규칙은 자동 매칭 금지 — matchHpRule)
+   ② Mammo(2D-MG): **선택되었을 때만** 맘모 규정. MG 는 2D 분할 표 밖(어느 맵의 MG 키도 무시).
+   ③ 표는 **Common → 뷰어별 캐스케이드** — 각 표 안에서 전용 행 → '*'(기타) 행 순.
+      구 hanging2d_common_on(양자택일 체크)은 판정에 쓰지 않는다(저장 호환만).
+   ④ 어디에도 없으면 null = '설정 없음' → 각 뷰어의 자동 규칙(1×1 등). */
 
 /** 2D 행잉 한 칸의 값 — {Series 분할, Image 분할}. 구 형식(문자열=Series 만)도 저장본에 남아 있다. */
 export type Hang2dVal = string | { s?: string; i?: string };

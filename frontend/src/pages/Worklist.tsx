@@ -3541,14 +3541,24 @@ export function Worklist() {
         // View&Draft = 자체 뷰어(기본) — 더블클릭 동작은 환경설정에서 변경 가능
         // Study With Open(p.13): 체크 시 Related Study List 검사를 ADD/STACK 모드로 함께 오픈
         if (target) {
-          const d = await api.study(target.id);
-          selectAndSync(d);
-          if (dblAction === "ohif" && ohifOnRef.current) openStudy(d);
-          else if (withOpen) {
+          // ★ 창은 **클릭 제스처 안에서 즉시** 연다 — 실제 사고(sv70/Live): api.study 가 A 왕복으로
+          //   수 초 걸리는 동안 아무 일도 없다가 "몇 초 뒤 갑자기 열리는" 증상 + 제스처 밖
+          //   window.open 이라 팝업 차단까지 걸렸다. 워크리스트 행(StudyRow)에는 openV2 가 쓰는
+          //   필드(id·study_uid·modality·환자·검사명)가 전부 있다 — 상세는 뷰어 창이 스스로 받는다.
+          //   With Open 만 related_exams 가 필요해 상세를 먼저 받는다(명시적 다중 오픈 — 지연 수용).
+          if (dblAction === "ohif" && ohifOnRef.current) {
+            openStudy(target);
+            void api.study(target.id).then(selectAndSync).catch(() => {});
+          } else if (withOpen) {
+            const d = await api.study(target.id);
+            selectAndSync(d);
             // With Open 체크 = 명시적 다중 오픈 — 다른 환자라도 기존 검사에 ADD/STACK 으로 누적.
             // 과거검사(최대 3건)도 함께. related 가 없어도 withOpen 신호를 보내 누적 유지
             openV2({ detail: d, withOpen: { mode: withOpenMode, ids: d.related_exams.slice(0, 3).map((e) => e.id) } });
-          } else openV2({ detail: d });
+          } else {
+            openV2({ detail: target as StudyDetail });
+            void api.study(target.id).then(selectAndSync).catch(() => {});
+          }
         }
         break;
       case "viewer2d": case "ub_view":
@@ -3569,10 +3579,10 @@ export function Worklist() {
         }
         // ① View: 기존 영상을 닫고 선택 검사를 그 자리에 표시 — In Viewer 누적 목록 초기화(교체 시맨틱)
         if (target) {
-          const d = await api.study(target.id);
-          selectAndSync(d);
+          // ★ 창은 클릭 제스처 안에서 즉시(viewdraft 와 동일 — Live A 왕복 지연·팝업 차단 방지)
           localStorage.setItem("sv_infi_exams", "[]");
-          openV2({ detail: d });
+          openV2({ detail: target as StudyDetail });
+          void api.study(target.id).then(selectAndSync).catch(() => {});
         }
         break;
       case "ub_add": {

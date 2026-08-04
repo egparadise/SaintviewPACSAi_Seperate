@@ -17,10 +17,11 @@ import { XLINK_DEFAULT, geomOf, lineStyle, pickLineSources, positionLabel, scout
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
 import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pickHpScreen } from "../lib/hpCapture";
 import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
-import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView, pickHang2d,
+import { DEFAULT_WL_PRESETS, hang2dViewerKey, mammoAssign, mammoView,
+         mgExamLooksMammo, mgSeriesLooksMammo, pickHang2d,
          resolveHang2d } from "../lib/viewerConfig";
 import {
-  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgInstView, mgOrderIndexes, mgPaneIs,
+  DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgInstView, mgOrderIndexes,
   mgProbe, mgReadable, mgRatioBox,
   mgStamp, mgWallByCol, mgInnerSide, mgZoomOf, readMgCfg, toRC as toRC2, useTileSizes,
   type MgBox, type MgCfg, type MgFit, type MgProbe,
@@ -1376,7 +1377,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     });
   };
   useEffect(() => {
-    if (!mgReady || detail.modality !== "MG" || !series.length) return;
+    if (!mgReady || !series.length) return;
+    // ★ 뷰 신호 포함 판정 — CR 코드 맘모(sv70 현장)도 여기서 잡는다. 적용은 아래 mgCfg.on 이 게이트.
+    if (!mgExamLooksMammo(detail.modality, series)) return;
     // 우선순위 ① — 행잉 프로토콜이 선택돼 있으면 분할은 HP 가 정한다. 여기서 걸면
     // 두 경로가 서로 덮어써 화면이 엉망이 된다(실제 스크린샷: HP:새 프로토콜 + MG 행잉 동시).
     if (hpNameRef.current !== "기본") return;
@@ -1470,7 +1473,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       seriesForRef.current = { id: detail.id, ok: true };
       setSeries(imgSeries);
       // Mammo(MG) 전용 행잉 — 표준 2×2 [R CC, L CC, R MLO, L MLO] + 오버레이 텍스트 제거 (전 뷰어 공통 규칙)
-      const mammo = detail.modality === "MG";
+      // ★ 판정은 뷰 신호 포함(mgExamLooksMammo) — CR 코드 맘모 장비 현장 대응. 적용은 선택 시만(CLAUDE.md).
+      const mammo = mgCfg.on && mgExamLooksMammo(detail.modality, imgSeries);
       const ma = mammo ? mammoAssign(imgSeries) : null;
       const mammoSeries = ma && ma.some(Boolean) ? ma : null;   // 매칭 0이면 순서대로 폴백(빈 페인 방지)
       // ⚠ 예전에는 MG 면 **무조건** setLayout("2x2") 였다. 그런데 4뷰가 한 시리즈에 든 검사는
@@ -1482,7 +1486,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       // ⚠ Series 2×2 는 **분할 방식이 Series(체크)일 때만** 여기서 건다.
       //   Image 모드(기본)인데 여기서 2×2 를 걸면 '무조건 Series Layout 처럼 동작' 하게 된다
       //   (사용자 보고). 뷰별 시리즈 검사도 Image 모드는 아래 MG effect 가 결합 시리즈로 건다.
-      if (mammo && mammoSeries && (mgCfg.series_layout || !mgCfg.on)) setLayout("2x2");
+      // ⚠ 구 조건의 `|| !mgCfg.on`(꺼져 있어도 2×2 강제)은 CLAUDE.md 규정 위반이라 제거 —
+      //   Mammo Layout 은 **선택되었을 때만** 동작한다. 꺼져 있으면 표·자동 규칙대로.
+      if (mammo && mammoSeries && mgCfg.series_layout) setLayout("2x2");
       setSelSeries(null);   // 처음 열 때 썸네일 이미지 목록은 모두 접힘 — 더블클릭으로만 펼침
       if (imgSeries[0]) {
         // ② AI 추천 W/L 자동 적용(수동 변경 가능). 합성/비보정 데이터(PixelSpacing 없음)는
@@ -1699,6 +1705,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const hpMatch = hpRulesNow.length
         ? matchHpRule(hpExamOf(hpExamInfo as never, tree.series), hpRulesNow, { forExamOpen: true })
         : null;
+      // ★ 뷰 신호 포함 맘모 판정(CR 코드 맘모) — 분할 계산·재배열·마우스 모드가 함께 쓴다.
+      //   적용은 선택 시만(mgCfg.on — CLAUDE.md ②).
+      const tgtMammo = mgCfg.on && mgExamLooksMammo(targetMod, tree.series);
       let count: number;
       if (hpMatch) {
         setHpName(hpMatch.name);
@@ -1712,11 +1721,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       } else {
         setHpName("기본");
         hpNameRef.current = "기본";
-        count = applyHangFor(targetMod, false, "1x1");    // 방금 판정 — HP 없음. 못 구하면 1×1
+        // 맘모(뷰 신호 포함)는 MG 규정으로 — CR 코드 맘모가 Common CR 행(예: 1×1)에 걸리면 안 된다
+        count = applyHangFor(tgtMammo ? "MG" : targetMod, false, "1x1");    // 방금 판정 — HP 없음. 못 구하면 1×1
       }
       // MG 는 4-view 표준 순서 [R CC, L CC, R MLO, L MLO] 로 — 태그로 확정될 때만 재배열.
       let list = tree.series;
-      if (isMg(targetMod) && list[0]) {
+      if (tgtMammo && list[0]) {
         const ord = mgOrderIndexes(list[0].instances);
         if (ord.some((v, j) => v !== j)) {
           list = [{ ...list[0], instances: ord.map((j) => list[0].instances[j]) }, ...list.slice(1)];
@@ -1725,9 +1735,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         setMouseMode("select");                           // MG 는 Select 로 시작(사용자 규정)
       }
       hangAll(tree.uid, list, count);
+      // HP 가 이긴 경우 **이름을 보여 준다** — 계정에 저장된 규칙이 Common 을 덮는 것을
+      // 사용자가 '설정이 풀렸다' 로 오인한 실제 사고(sv70, '새 프로토콜' 1×1) 재발 방지.
       setStatus(mixed
         ? `${tr("검사 전환 — 다른 환자이므로 화면 전체를 이 검사로 표시했습니다")}${targetMod ? ` (${targetMod} ${tr("분할")})` : ""}`
-        : `${tr("검사 전환")}${targetMod ? ` — ${targetMod} ${tr("분할로 배치했습니다")}` : ""}`);
+        : hpMatch
+          ? `${tr("검사 전환")} — HP '${hpMatch.name}' ${tr("적용")}`
+          : `${tr("검사 전환")}${targetMod ? ` — ${tgtMammo ? "MG" : targetMod} ${tr("분할로 배치했습니다")}` : ""}`);
       focusExam(id);
     } catch { setStatus(tr("검사 전환 실패")); }
   };
@@ -3475,7 +3489,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   //   예전엔 시리즈 modality 만 봐서, 그 값이 비어 오면 체크박스도 없고 보정도 안 돌았다.
   //   과거검사 페인은 그 검사의 modality 를 모르므로 보강하지 않는다(시리즈 값만 믿는다).
   const mgSeries = (p: PaneState) =>
-    mgPaneIs(p.series?.modality,
+    mgSeriesLooksMammo(p.series,
              (p.studyUid || detail.study_uid) === detail.study_uid ? detail.modality : "");
   /** 흉벽 방향: 탐지 결과 우선 → 검사명 laterality → 타일 열 위치 */
   const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number): MgBox | null => {

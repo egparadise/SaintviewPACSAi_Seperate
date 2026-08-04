@@ -18,7 +18,7 @@ import {
   DEFAULT_HP_PART_FIELDS, DEFAULT_HP_SLOT, HP_EDITOR_CHROME, HP_MODALITY_PRESETS, HP_OPTION_FIELDS, HP_PART_FIELDS, HP_PART_FIELDS_UNAVAILABLE, HP_SLOTS,
   HP_SLOT_LABEL, LEGACY_HP_PART_FIELDS, fitHpCells,
   hpExamOf, hpHaystack, hpModalityOptions, hpOptionRowMinWidth, hpPartFieldGaps, hpPartTerms,
-  hpRuleMatches, hpRuleOrder, hpScreensFromMonitors, hpSettingsMinWidth,
+  hpRuleHasCondition, hpRuleMatches, hpRuleOrder, hpScreensFromMonitors, hpSettingsMinWidth,
   hpSlotCutoff, hpSlotDays, hpSlotIsPrior, hpSlotLabel, hpSlotStudies,
   matchHpRule, newHpRule, readHpDoc, readHpRule, readHpSlot, syncHpLegacy, writeHpDoc,
 } from "../src/lib/hangingProtocol.ts";
@@ -460,4 +460,24 @@ test("그리드는 1~10 으로 가둔다(0×0 이면 칸이 사라지고 100×10
   const r = readHpRule({ ...LEGACY_RULE, s: { r: 0, c: 99 }, i: { r: -3, c: 4 } });
   assert.deepEqual(r.s, { r: 1, c: 10 });
   assert.deepEqual(r.i, { r: 1, c: 4 });
+});
+
+/* ── 조건 없는 규칙의 자동 매칭 금지 — 계정별 '전 검사 1×1' 사고 ───────────────
+ * 실제 사고(sv70·계정별 재현): 방금 만든 '새 프로토콜'(모달리티·부위·촬영법 전부 비움)이
+ * 검사 열기(forExamOpen)에서 **모든 검사**에 자동 매칭돼, 그 계정만 전 검사가 HP 레이아웃
+ * (예: 1×1)이 됐다 — "Common 설정이 풀려" 보고의 한 갈래. HP 기본은 해제(CLAUDE.md)이므로
+ * 조건 없는 규칙은 HP 메뉴에서 **직접 고를 때만** 쓴다.
+ */
+test("★ 조건 없는 규칙은 검사 열기에서 자동 매칭되지 않는다 (수동 선택 전용)", () => {
+  const bare = { name: "새 프로토콜", modality: "", body_part: "", projection: "",
+                 s: { r: 1, c: 1 }, use_on_exam_open: true };
+  const exam = { modality: "CT", study_desc: "Brain CT", body_part: "HEAD" };
+  assert.equal(matchHpRule(exam, [bare], { forExamOpen: true }), null,
+    "조건 없는 규칙이 전 검사에 자동 적용되면 그 계정만 화면이 통째로 바뀐다");
+  // 수동 매칭(HP 메뉴)에서는 여전히 고를 수 있다
+  assert.equal(matchHpRule(exam, [bare])?.name, "새 프로토콜");
+  // 조건이 하나라도 있으면 자동 매칭 대상
+  const cond = { ...bare, modality: "CT" };
+  assert.equal(matchHpRule(exam, [cond], { forExamOpen: true })?.name, "새 프로토콜");
+  assert.ok(hpRuleHasCondition(cond) && !hpRuleHasCondition(bare));
 });
