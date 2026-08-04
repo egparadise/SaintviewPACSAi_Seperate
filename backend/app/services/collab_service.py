@@ -30,7 +30,11 @@ from app.models import (
     Hospital,
     Study,
 )
-from app.services.permissions import COLLAB_CAPS, sanitize_collab_caps
+from app.services.permissions import (
+    COLLAB_CAPS,
+    COLLAB_DEFAULT_CAPS,
+    sanitize_collab_caps,
+)
 
 logger = logging.getLogger("saintview.collab")
 
@@ -494,6 +498,23 @@ def open_session(db: Session, host: Account, study_id: int, title: str = "") -> 
     return sess
 
 
+def default_caps_for(db: Session, host: Account) -> list[str]:
+    """초대 시 자동 부여할 cap — Master 의 설정(viewer.prefs.collab.default_caps)을 따른다.
+
+    설정이 없으면 COLLAB_DEFAULT_CAPS(주석·글쓰기). 매번 손으로 승인하게 하면 다학제가
+    시작부터 막히므로 기본을 열어 두고, 세부 조정은 협진 페이지에서 사람별로 한다.
+    화이트리스트를 한 번 더 통과시키므로 설정에 이상한 값이 들어 있어도 새지 않는다.
+    """
+    try:
+        from app.services.settings_service import get_setting
+
+        prefs = get_setting(db, "viewer.prefs", user=host.username, default={}) or {}
+        raw = (prefs.get("collab") or {}).get("default_caps")
+    except Exception:  # noqa: BLE001 — 설정 조회 실패는 기본값으로 우아 강등
+        raw = None
+    return sanitize_collab_caps(raw) if raw is not None else list(COLLAB_DEFAULT_CAPS)
+
+
 def invite(db: Session, sess: CollabSession, host: Account, target_id: int) -> CollabParticipant:
     if sess.status != "open":
         raise LookupError("종료된 세션입니다")
@@ -510,14 +531,17 @@ def invite(db: Session, sess: CollabSession, host: Account, target_id: int) -> C
         return p
     if len(alive) >= MAX_PARTICIPANTS:
         raise PermissionError(f"세션 정원({MAX_PARTICIPANTS}명)을 초과했습니다")
+    caps = default_caps_for(db, host)
     if p is None:
         p = CollabParticipant(session_id=sess.id, account_id=target_id, role="guest",
-                              state="invited", invited_by=host.id, caps=[])
+                              state="invited", invited_by=host.id, caps=caps)
         db.add(p)
     else:
         p.state = "invited"
         p.invited_by = host.id
         p.left_at = None
+        if not p.caps:                 # 재초대 — 비어 있을 때만 기본값(수동 조정분 보존)
+            p.caps = caps
     _audit(db, host.id, "collab_invite", "collab_session", sess.code, {"target_id": target_id})
     db.commit()
     return p
@@ -661,7 +685,12 @@ def request_control(db: Session, sess: CollabSession, me: Account, caps) -> Coll
 
 def grant_control(db: Session, sess: CollabSession, host: Account, target_id: int,
                   caps=None, minutes: int = CONTROL_TTL_MIN) -> CollabParticipant:
-    """Master 승인 — 제어권을 게스트에게 넘긴다(세션당 1명, Master 는 관전으로 내려온다).
+    """Master 승인 — 발표자(뷰포트 송출자)를 넘기고, 그 사람의 cap 을 확정한다.
+
+    ⚠ **다른 참가자의 caps 는 건드리지 않는다.** 예전엔 여기서 전원의 caps 를 비웠는데,
+      그러면 '한 명만 작업 가능'(talking stick)이 되어 다학제가 성립하지 않는다.
+      뷰포트만 배타(발표자 1명)이고 주석·글쓰기는 동시 보유가 정상이다
+      (permissions.COLLAB_CONCURRENT_CAPS 주석 참조).
 
     caps 는 sanitize_collab_caps 를 통과한 collab.* 만 남는다. 즉 판독 수정·영상 삭제 같은
     권한은 **여기로 들어올 수 없다** — 애초에 화이트리스트에 없기 때문이다.
@@ -672,11 +701,9 @@ def grant_control(db: Session, sess: CollabSession, host: Account, target_id: in
     if target is None or target.state != "joined":
         raise LookupError("참가자를 찾을 수 없습니다")
     allowed = sanitize_collab_caps(caps if caps is not None else target.caps) or ["collab.viewport"]
-    for p in participants(db, sess.id):
+    for p in participants(db, sess.id):        # 발표자는 세션당 1명 — 그 축만 비운다
         p.control = "none"
         p.control_expires_at = None
-        if p.account_id != target_id:
-            p.caps = []
     target.control = "granted"
     target.caps = allowed
     target.control_expires_at = _now() + timedelta(minutes=max(1, int(minutes)))
@@ -686,16 +713,40 @@ def grant_control(db: Session, sess: CollabSession, host: Account, target_id: in
     return target
 
 
+def set_caps(db: Session, sess: CollabSession, host: Account, target_id: int, caps
+             ) -> CollabParticipant:
+    """Master 가 참가자 **한 사람의** cap 을 조정한다(발표자는 그대로).
+
+    다학제의 실제 조작면이다 — 협진 페이지에서 사람마다 체크박스를 켜고 끄는 것이 여기로 온다.
+    여러 사람이 같은 cap 을 동시에 갖는 것이 정상이므로 남의 것은 절대 건드리지 않는다.
+    """
+    if sess.host_id != host.id:
+        raise PermissionError("권한 조정은 Master 만 할 수 있습니다")
+    target = participant_of(db, sess.id, target_id)
+    if target is None or target.state != "joined":
+        raise LookupError("참가자를 찾을 수 없습니다")
+    allowed = sanitize_collab_caps(caps)
+    target.caps = allowed
+    if target.control == "requested":
+        target.control = "none"       # 요청은 이 조정으로 처리된 것으로 본다
+    _audit(db, host.id, "collab_caps_set", "collab_session", sess.code,
+           {"target_id": target_id, "caps": allowed})
+    db.commit()
+    return target
+
+
 def revoke_control(db: Session, sess: CollabSession, by: Account) -> CollabParticipant | None:
-    """제어권 회수 → Master 에게 되돌린다. Master 본인 또는 제어자 본인이 부를 수 있다."""
+    """발표자를 Master 에게 되돌린다. Master 본인 또는 현재 발표자가 부를 수 있다.
+
+    ⚠ caps 는 건드리지 않는다 — 발표를 넘겨받은 것과 '주석을 그릴 수 있는가'는 다른 축이다.
+      cap 을 빼려면 set_caps 를 쓴다(협진 페이지의 체크박스).
+    """
     cur = controller_of(db, sess.id)
     if cur is not None and by.id not in (sess.host_id, cur.account_id):
         raise PermissionError("제어권을 회수할 권한이 없습니다")
     for p in participants(db, sess.id):
         p.control = "none"
         p.control_expires_at = None
-        if p.role != "host":
-            p.caps = []
     host_p = participant_of(db, sess.id, sess.host_id)
     if host_p is not None:
         host_p.control = "granted"
@@ -706,13 +757,64 @@ def revoke_control(db: Session, sess: CollabSession, by: Account) -> CollabParti
 
 
 def can_control(db: Session, sess: CollabSession, account_id: int, cap: str) -> bool:
-    """이 사용자가 지금 그 조작을 할 수 있나 — WS state/anno 릴레이의 게이트."""
-    cur = controller_of(db, sess.id)
-    if cur is None or cur.account_id != account_id:
+    """이 사용자가 지금 그 조작을 할 수 있나 — WS state/anno 릴레이의 게이트.
+
+    축이 둘이다:
+      · collab.viewport = **발표자 1명**만. 전원이 뷰포트를 쏘면 마지막 사람으로 화면이
+        끌려가 아무도 못 쓴다(10Hz 왕복). 나머지는 각자 자유 보기라 막히는 게 아니다.
+      · 그 밖(annotate·text·navigate) = cap 보유자 **누구나 동시**. 이게 다학제다.
+    Master 는 자기 세션이므로 전부 가능하다.
+    """
+    p = participant_of(db, sess.id, account_id)
+    if p is None or p.state != "joined":
         return False
-    if cur.role == "host":
+    if cap in ("collab.viewport", "collab.present"):
+        # ⚠ Master 도 예외가 아니다. 발표를 남에게 넘긴 동안에는 Master 의 뷰포트도 나가면
+        #   안 된다 — 그러면 둘이 서로에게 화면을 쏘아 10Hz 로 오간다(발표자를 둔 이유가 사라진다).
+        #   되찾으려면 revoke_control(회수)로 명시적으로 가져온다.
+        cur = controller_of(db, sess.id)
+        return cur is not None and cur.account_id == account_id
+    # 나머지(annotate·text·navigate)는 동시 보유가 정상. Master 는 자기 세션이라 항상 가능.
+    if p.role == "host":
         return True
-    return cap in sanitize_collab_caps(cur.caps)
+    return cap in sanitize_collab_caps(p.caps)
+
+
+def adopt_annotations(db: Session, sess: CollabSession, host: Account, rows: list,
+                      author_name: str = "") -> int:
+    """세션 주석 → 정식 Annotation. **Master 만** 부른다(호출부가 확인).
+
+    책임 주체를 흐리지 않는 것이 요점이다: 저장은 Master 이름(created_by)으로 하되
+    text 앞에 원 작성자를 남긴다. 협진에서 나온 소견이라는 사실이 판독 기록에 보여야 한다.
+    """
+    from app.models import Annotation
+
+    n = 0
+    for r in rows:
+        pts = r.get("points") or []
+        if not isinstance(pts, list) or not pts:
+            continue
+        note = str(r.get("text") or "")
+        if author_name:
+            note = f"[{author_name}] {note}".strip()
+        db.add(Annotation(
+            study_id=sess.study_id,
+            series_uid=str(r.get("series_uid") or ""),
+            sop_uid=str(r.get("sop_uid") or ""),
+            kind=str(r.get("kind") or "line"),
+            points=pts,
+            value=r.get("value"),
+            unit=str(r.get("unit") or ""),
+            text=note[:512],
+            source="user",
+            created_by=host.username,
+        ))
+        n += 1
+    if n:
+        _audit(db, host.id, "collab_adopt_annos", "collab_session", sess.code,
+               {"count": n, "author": author_name, "study_id": sess.study_id})
+        db.commit()
+    return n
 
 
 # ── 임시 열람권 ──────────────────────────────────────────────────────────────

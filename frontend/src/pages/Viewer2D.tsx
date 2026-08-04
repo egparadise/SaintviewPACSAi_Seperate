@@ -731,6 +731,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // 순서가 뒤집힌다). ref 로 두는 이유: 키보드 핸들러가 effect 안에 갇혀 있어 최신 값을
   // dep 로 끌어오려면 그 effect 를 매번 재등록해야 하는데, 그건 뷰어 단축키 전체를 흔든다.
   const collabRO = useRef(false);
+  // 키보드 핸들러(effect 안)가 최신 detach 를 부르기 위한 통로 — collabRO 와 같은 이유.
+  const collabDetachRef = useRef<(() => void) | null>(null);
+  // 이 도구를 지금 쓸 수 있나(협진 cap). 세션 밖이면 항상 true.
+  const collabCanDrawRef = useRef<(kind: string) => boolean>(() => true);
+  // 협진 세션 주석을 Anno 모양으로 바꿔 둔 것 — renderPane 이 매 페인에서 읽는다.
+  // ref 인 이유는 collabRO 와 같다: renderPane 은 훅(useCollab) 선언보다 위에 있다.
+  // 협진 중 주석 송출기 — true 를 돌려주면 "세션으로 보냈으니 DB 주석에는 넣지 말라"는 뜻.
+  // 세션 밖이거나 권한이 없으면 false 라 기존 동작 그대로다.
+  const collabSendAnnoRef = useRef<((a: {
+    series_uid: string; sop_uid: string; kind: string; points: number[][];
+    value: number | null; unit: string; text: string;
+  }) => boolean) | null>(null);
   const [collabDockOpen, setCollabDockOpen] = useState(false);
   const [activePane, setActivePane] = useState("p0");
   const [panes, setPanes] = useState<Record<string, PaneState>>(
@@ -2112,9 +2124,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-      // 협진 관전 중(제어권 없음) — 단축키로 화면을 흔들 수 없다. Master 화면을 그대로 따라간다.
+      // 협진에서 발표자를 따라가는 중에 단축키를 쓰면 — 막지 않고 **자유 보기로 빠진다**.
+      // 막아 버리면 다학제에서 참가자가 자기 판단으로 확대·비교를 못 한다(요청의 핵심 불만).
+      // 빠지지 않고 그냥 적용하면 100ms 뒤 발표자 스냅샷이 되돌려 버려 조작이 무의미해진다.
       // (채팅 입력은 위 INPUT 예외로 이미 빠져나가므로 대화는 그대로 된다)
-      if (collabRO.current) return;
+      if (collabRO.current) collabDetachRef.current?.();
       if (e.key.toLowerCase() === "t") { tHeld.current = true; return; }  // T 홀드 시작
       if (e.key === "Delete" && tHeld.current) {  // T+Del = 오버레이 토글 (In Viewer 패리티)
         e.preventDefault();
@@ -2354,6 +2368,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const p = panes[pid];
     const inst = p.series?.instances[p.index];
     if (!tool || !p.series || !inst) return;
+    // 협진 중 권한이 없으면 **시작 자체를** 막는다. 그리기를 다 끝낸 뒤 pushAnno 에서
+    // 거절하면 사용자는 한참 그린 것이 사라지는 것으로 겪는다(pushAnno 의 가드는
+    // 마지막 방어선으로 남겨 둔다 — 그리기 경로가 여기 하나뿐이라는 보장이 없으므로).
+    if (!collabCanDrawRef.current(tool)) {
+      setStatus(tr("협진 — 이 도구를 쓸 권한이 없습니다. Master 에게 요청하세요"));
+      setTool(null);
+      return;
+    }
     const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
     const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
     const start = screenToImage(e.clientX, e.clientY, rect, mgAt(p, rect), aspect);
@@ -2487,10 +2509,15 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     d: { sop_uid: string; series_uid: string }, kind: string, points: number[][],
     m: { value: number | null; unit: string; text?: string } | null, text = "",
   ) => {
-    setAnnos((prev) => [...prev, {
+    const item = {
       series_uid: d.series_uid, sop_uid: d.sop_uid, kind, points,
-      value: m?.value ?? null, unit: m?.unit ?? "", text: m?.text ?? text, source: "user",
-    }]);
+      value: m?.value ?? null, unit: m?.unit ?? "", text: m?.text ?? text,
+    };
+    // 협진 중이면 **세션 주석으로 보낸다**(내 DB 주석에는 넣지 않는다).
+    // 그래야 (a) 전원이 즉시 보고 (b) 판독 기록에는 Master 가 [채택] 한 것만 남는다.
+    // 모든 도구가 이 함수 하나로 모이므로 여기 한 곳이면 툴이 늘어나도 새지 않는다.
+    if (collabSendAnnoRef.current?.(item)) return;
+    setAnnos((prev) => [...prev, { ...item, source: "user" }]);
     schedHist();   // TY-3(1): 주석 추가 — 히스토리 기록
   };
 
@@ -3127,7 +3154,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const cr = contentRect(size.w, size.h, cols / rows);
     const sx = (v: number) => v * cols, sy = (v: number) => v * rows;
     const fs = Math.max(cols, rows) * 0.022;
-    const items = annos.filter((a) =>
+    // 내 주석 + **협진 세션 주석**(다른 참가자가 지금 그리고 있는 것). 세션 주석은 DB 에
+    // 없고 메모리에만 있으며, by(작성자)가 붙어 있어 AnnoShape 가 그 사람 색으로 그린다.
+    // 좌표계가 같은 이미지 정규화(0~1)라 자유 보기로 각자 다른 배율을 봐도 제자리에 찍힌다.
+    const items = [...annos, ...collabAnnoItems].filter((a) =>
       a.sop_uid === inst.sop_uid || (!a.sop_uid && p.studyUid === detail.study_uid));
     const dr = draft && draft.pid === pid ? draft : null;
     // 교차선 — Ref 버튼 + Scout/All Lines. 소스 선택은 lib/scoutLines 한 곳에서만 정한다.
@@ -4453,6 +4483,49 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     applySnapshot,
   });
   useEffect(() => { collabRO.current = cl.readOnly; }, [cl.readOnly]);
+  useEffect(() => { collabDetachRef.current = cl.detach; }, [cl.detach]);
+
+  // ── 협진 세션 주석 ⇄ 뷰어 ────────────────────────────────────────────────
+  // 수신: 세션 주석을 Anno 모양으로 바꿔 ref 에 둔다. renderPane 이 내 주석과 함께 그리고,
+  //       AnnoShape 가 by 를 보고 그 사람 색으로 칠한다.
+  // renderPane 은 이 선언보다 **위**에 정의돼 있지만 실제 호출은 아래 JSX 평가 시점이라
+  // 이 바인딩을 그대로 읽어도 안전하다(ref 를 거칠 필요가 없다). 목록이 바뀌면 이 컴포넌트가
+  // 다시 렌더되고 renderPane 도 새 값으로 다시 돈다.
+  const collabAnnoItems = useMemo<Anno[]>(
+    () => cl.annos.map((a) => ({
+      series_uid: a.series_uid ?? "", sop_uid: a.sop_uid ?? "",
+      kind: a.kind, points: a.points, value: a.value ?? null, unit: a.unit ?? "",
+      text: a.text ?? "", source: "user" as const, by: a.by,
+    })),
+    [cl.annos]);
+
+  // 도구 종류 → 필요한 cap. 텍스트를 남기는 도구는 '글쓰기', 나머지는 '계측·주석'.
+  const capOfTool = useCallback((kind: string) =>
+    (kind === "text" || kind === "box" || kind === "marking" || kind === "spine")
+      ? "collab.text" : "collab.annotate", []);
+  useEffect(() => {
+    collabCanDrawRef.current = (kind: string) => !cl.session || cl.can(capOfTool(kind));
+  }, [cl, capOfTool]);
+
+  // 송신: 협진 중이고 주석 권한이 있으면 세션으로 보낸다(내 DB 주석에는 안 넣는다).
+  useEffect(() => {
+    collabSendAnnoRef.current = (item) => {
+      if (!cl.session) return false;
+      const cap = capOfTool(item.kind);
+      if (!cl.can(cap)) {
+        setStatus(cap === "collab.text"
+          ? tr("글쓰기 권한이 없습니다 — Master 에게 요청하세요")
+          : tr("주석 권한이 없습니다 — Master 에게 요청하세요"));
+        return true;   // true = 내 DB 주석에도 넣지 않는다(권한이 없으므로 아무 일도 없어야 한다)
+      }
+      cl.addAnno({
+        kind: item.kind, points: item.points, series_uid: item.series_uid,
+        sop_uid: item.sop_uid, text: item.text, value: item.value, unit: item.unit,
+      });
+      return true;
+    };
+    return () => { collabSendAnnoRef.current = null; };
+  }, [cl]);
 
   // Slave 따라가기 — Master 가 다른 검사로 옮기면 이 창도 그 검사를 연다.
   // 미러 스냅샷은 '한 검사 안의 화면 상태'만 담는다(시리즈 uid·줌·W/L…). 검사 자체가 바뀌는 것은
@@ -5169,17 +5242,27 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                if (!r.width || !r.height) return;
                cl.sendCursor(el.dataset.pid ?? "", (e.clientX - r.left) / r.width,
                              (e.clientY - r.top) / r.height);
-             }}>
-          {/* 협진 관전 중 — 조작 입력을 통째로 막는다.
-              왜 오버레이 한 장인가: 이 뷰어의 조작 진입점은 페인 mousedown·wheel·더블클릭·
-              컨텍스트메뉴·주석 드래그 등 수십 곳이다. 그 전부에 가드를 심으면 하나만 빠뜨려도
-              '가끔 먹는' 반쪽 잠금이 되고, 앞으로 추가되는 조작마다 다시 빠뜨린다.
-              위에 한 장 덮으면 지금도 앞으로도 새지 않는다(키보드는 onKey 의 collabRO 가 담당). */}
-          {cl.readOnly && (
-            <div data-sv-collab-lock="" title={tr("Master 의 화면을 따라가는 중입니다 — 조작하려면 권한을 요청하세요")}
-                 onContextMenu={(e) => e.preventDefault()}
-                 style={{ position: "absolute", inset: 0, zIndex: 40, cursor: "not-allowed",
-                          background: "transparent" }} />
+             }}
+             // ── 자유 보기 자동 전환 ────────────────────────────────────────
+             // 예전엔 여기에 '조작 통째 차단' 오버레이가 있었다. 다학제는 전원이 동시에
+             // 작업하는 것이 목적이라 차단이 아니라 **분리**가 맞다: 내가 화면을 건드리면
+             // 발표자 따라가기를 풀고 내 화면을 내가 본다(주석·커서는 계속 공유된다).
+             // 캡처 단계에서 한 번만 잡으면 페인의 수십 개 핸들러를 건드리지 않아도 된다.
+             onWheelCapture={() => cl.detach()}
+             onMouseDownCapture={() => { if (!tool) cl.detach(); }}>
+          {/* 자유 보기 배너 — 지금 남과 다른 화면을 보고 있다는 사실이 반드시 보여야 한다.
+              모르고 있으면 "같은 걸 보고 있다"고 착각한 채 논의하게 된다(판독 안전). */}
+          {cl.session && !cl.following && !cl.isPresenter && (
+            <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)",
+                          zIndex: 42, display: "flex", alignItems: "center", gap: 8,
+                          background: "rgba(251,191,36,0.92)", color: "#221a00", fontSize: 11.5,
+                          fontWeight: 600, padding: "3px 10px", borderRadius: 12,
+                          boxShadow: "0 2px 8px rgba(0,0,0,.4)" }}>
+              {tr("자유 보기 — 발표자와 다른 화면을 보고 있습니다")}
+              <button onClick={() => cl.follow()} style={{ fontSize: 11, padding: "1px 8px" }}>
+                {tr("발표자 따라가기")}
+              </button>
+            </div>
           )}
           {/* 원격 커서 — 참가자 색(비디오 타일 테두리와 같은 색)으로 표시 */}
           {cl.cursors.map((c) => {
@@ -5570,12 +5653,16 @@ function TitleMenu({ id, icon, title, items, menu, setMenu }: {
   );
 }
 
-/* 주석 1건 SVG 도형 — 사용자=노랑, AI=보라(생성물 전용 색) */
+/* 주석 1건 SVG 도형 — 사용자=노랑, AI=보라(생성물 전용 색), **협진 참가자=그 사람 색** */
 function AnnoShape({ a, sx, sy, fs }: {
   a: Anno; sx: (v: number) => number; sy: (v: number) => number; fs: number;
 }) {
-  // 보라(#a78bfa)=AI 전용 · 녹색=타사 PR(GSPS 불러오기) · 노랑=사용자
-  const color = a.source === "ai" ? "#a78bfa" : a.source === "external" ? "#67e8a0" : "#ffd54a";
+  // 협진(a.by)이 최우선 — 다학제에서 누가 그렸는지가 색으로 즉시 보여야 한다.
+  // 그 색은 커서·비디오 타일·참가자 목록과 **같은 colorOf** 라 한 사람이 한 색으로 통일된다.
+  // 그 밖: 보라(#a78bfa)=AI 전용 · 녹색=타사 PR(GSPS 불러오기) · 노랑=사용자
+  const color = a.by
+    ? colorOf(a.by)
+    : a.source === "ai" ? "#a78bfa" : a.source === "external" ? "#67e8a0" : "#ffd54a";
   const sw = fs * 0.08;
   const pts = a.points;
   if (!pts?.length) return null;

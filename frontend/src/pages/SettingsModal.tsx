@@ -70,6 +70,16 @@ function FolderIcon({ size = 15 }: { size?: number }) {
   );
 }
 
+/** 협진에서 **위임 가능한** capability — 백엔드 permissions.COLLAB_CAPS 와 같은 키.
+ *  collab.viewport·collab.present 는 여기 없다: 화면 조작은 '발표자 1명' 축이라
+ *  체크박스가 아니라 세션 중 [발표자 넘기기] 로 정한다.
+ *  판독 수정·영상 삭제는 COLLAB_NEVER_DELEGATE 라 애초에 목록에 오를 수 없다. */
+const COLLAB_CAP_ROWS: [string, string][] = [
+  ["collab.annotate", "계측·주석 그리기 (세션 한정 — 판독에는 Master 채택 시에만 저장)"],
+  ["collab.text", "텍스트·글쓰기 (세션 한정)"],
+  ["collab.navigate", "검사 탭 전환·과거 검사 열기"],
+];
+
 // labelKey 가 있으면 표기는 i18n(tr)을 따른다 — label 은 한국어 원문이자 폴백.
 const TREE: { key: string; label: string; labelKey?: string; admin?: boolean; scope: SettingsScope; parent?: string }[] = [
   // 시스템 — 서버 운영(시스템 관리자)
@@ -95,6 +105,7 @@ const TREE: { key: string; label: string; labelKey?: string; admin?: boolean; sc
   { key: "wlTy", label: "T-View", scope: "viewer", parent: "worklist" },
   { key: "report", label: "리포트", labelKey: "nav.report", scope: "viewer" },
   { key: "reading", label: "판독 (Reading)", labelKey: "nav.reading", scope: "viewer" },
+  { key: "collab", label: "협진 (Co-Reading)", labelKey: "nav.collab", scope: "viewer" },
   // 뷰어 설정 3분리 — 공통(선택/모드/OHIF) · TY Viewer 전용 · In Viewer 전용 (키 이름은 기존 유지 — 로밍 호환)
   { key: "viewer", label: "뷰어 공통", labelKey: "nav.viewerCommon", scope: "viewer" },
   { key: "viewerSv", label: "SaintView", scope: "viewer", parent: "viewer" },
@@ -367,6 +378,15 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   // 05 Mode Profile — 백엔드 mode.profiles JSON (S7 applyMode)
   const [modeProfiles, setModeProfiles] = useState<Record<string, ModeProfile>>({});
   const [modeSel, setModeSel] = useState("");   // 현재 적용된 모드(viewer.prefs.mode_key) — 콤보에 표시
+  // 협진(Co-Reading) — viewer.prefs.collab. 여기 값은 **기본값**이고, 세션 중에는
+  // 협진 페이지에서 Master 가 사람마다 조정한 것이 최종이다.
+  const [colCfg, setColCfg] = useState<{
+    default_caps: string[]; auto_grant: boolean; cursor_labels: boolean;
+    author_colors: boolean; follow_default: boolean; ice: string;
+  }>({
+    default_caps: ["collab.annotate", "collab.text"], auto_grant: false,
+    cursor_labels: true, author_colors: true, follow_default: true, ice: "",
+  });
   const [modeJson, setModeJson] = useState("");
   // UBPACS-Z Worklist 구성요소 표시/숨김 (Study List 제외 추가·삭제)
   const [wlPanels, setWlPanels] = useState<Record<string, boolean>>({
@@ -443,6 +463,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (cmp) setCmpCfg((p) => ({ ...p, ...cmp }));
       const mk = (v as { mode_key?: string }).mode_key;
       if (mk) setModeSel(mk);
+      const col = (v as { collab?: Partial<typeof colCfg> }).collab;
+      if (col) setColCfg((p) => ({ ...p, ...col }));
       const iv = v as { infi_sel_color?: string; infi_overlay_font?: number; infi_overlay_visible?: boolean;
                         infi_toolbar?: Record<string, boolean>;
                         infi_default_layout?: Record<string, { s?: { r: number; c: number } | null;
@@ -683,6 +705,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       overlay_by_modality: ovlCfg,
       client_viewer: clientViewer,
       compare: cmpCfg,
+      collab: colCfg,
       infi_sel_color: infSelColor, infi_overlay_font: infOvlFont, infi_overlay_visible: infOvlVisible,
       infi_toolbar: infTb,
       infi_tool_cols: infToolCols, infi_tool_labels: infToolLabels, infi_tool_size: infToolSize,
@@ -1575,6 +1598,76 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                   <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
                     {tr("테스트는 관리자 권한으로 백엔드 서버에서 수행됩니다 (Echo=AE Title 검증 포함, DB=현재 연결 엔진 SELECT 1).")}
                   </div>
+                </Group>
+              </>
+            )}
+
+            {page === "collab" && (
+              <>
+                <Group title={tr("초대 시 자동으로 줄 기본 권한")}>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginBottom: 6 }}>
+                    {tr("여기서 정한 것은 기본값입니다. 협진 중에는 협진 페이지에서 참가자마다 켜고 끌 수 있습니다.")}
+                  </div>
+                  {COLLAB_CAP_ROWS.map(([k, label]) => (
+                    <label key={k} style={{ display: "flex", gap: 6, alignItems: "flex-start",
+                                            fontSize: 12.5, padding: "2px 0" }}>
+                      <input type="checkbox" checked={colCfg.default_caps.includes(k)}
+                             onChange={(e) => setColCfg((p) => ({
+                               ...p,
+                               default_caps: e.target.checked
+                                 ? [...p.default_caps, k]
+                                 : p.default_caps.filter((x) => x !== k),
+                             }))} />
+                      <span>{tr(label)}</span>
+                    </label>
+                  ))}
+                  <div style={{ fontSize: 11.5, color: "var(--stat-emergency)", marginTop: 8,
+                                lineHeight: 1.6 }}>
+                    {tr("판독 수정·영상 삭제는 협진으로 절대 위임되지 않습니다 — 목록에 없는 이유입니다.")}
+                  </div>
+                </Group>
+
+                <Group title={tr("화면 조작 · 발표자")}>
+                  <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12.5 }}>
+                    <input type="checkbox" checked={colCfg.follow_default}
+                           onChange={(e) => setColCfg((p) => ({ ...p, follow_default: e.target.checked }))} />
+                    <span>{tr("참가 시 발표자 화면 따라가기 (내가 화면을 만지면 자유 보기로 전환)")}</span>
+                  </label>
+                  <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12.5,
+                                  marginTop: 4 }}>
+                    <input type="checkbox" checked={colCfg.auto_grant}
+                           onChange={(e) => setColCfg((p) => ({ ...p, auto_grant: e.target.checked }))} />
+                    <span>{tr("참가자의 권한 요청을 자동 승인")}</span>
+                  </label>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginTop: 6,
+                                lineHeight: 1.6 }}>
+                    {tr("화면 조작(줌·팬·W/L)은 발표자 1명만 전원에게 송출합니다. 나머지 참가자는 각자 자유롭게 보며, 주석·커서는 항상 전원에게 공유됩니다.")}
+                  </div>
+                </Group>
+
+                <Group title={tr("참여자 표시")}>
+                  <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12.5 }}>
+                    <input type="checkbox" checked={colCfg.cursor_labels}
+                           onChange={(e) => setColCfg((p) => ({ ...p, cursor_labels: e.target.checked }))} />
+                    <span>{tr("마우스 커서 옆에 참여자 아이디 표시")}</span>
+                  </label>
+                  <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12.5,
+                                  marginTop: 4 }}>
+                    <input type="checkbox" checked={colCfg.author_colors}
+                           onChange={(e) => setColCfg((p) => ({ ...p, author_colors: e.target.checked }))} />
+                    <span>{tr("참여자별 색으로 커서·툴·글자 구분")}</span>
+                  </label>
+                </Group>
+
+                <Group title={tr("화상·음성 네트워크 (STUN/TURN)")}>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginBottom: 6,
+                                lineHeight: 1.6 }}>
+                    {tr("병원 내부망은 비워 두면 됩니다. 인터넷을 건너는 협진에만 STUN/TURN 을 넣으세요 (JSON 배열).")}
+                  </div>
+                  <textarea value={colCfg.ice} rows={3} spellCheck={false}
+                            placeholder='[{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'
+                            onChange={(e) => setColCfg((p) => ({ ...p, ice: e.target.value }))}
+                            style={{ width: "100%", fontSize: 11.5, fontFamily: "monospace" }} />
                 </Group>
               </>
             )}

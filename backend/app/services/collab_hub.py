@@ -28,6 +28,10 @@ logger = logging.getLogger("saintview.collab")
 # 다만 무제한이면 창 누수·재연결 폭주가 그대로 메모리가 되므로 상한을 둔다.
 MAX_SOCKETS_PER_ACCOUNT = 8
 
+# 세션 주석 상한 — 검사당 500개인 DB 주석 상한(worklist.put_annotations)과 같은 값.
+# 세션 주석은 메모리에만 있으므로 상한이 없으면 긴 다학제 한 번이 그대로 누수가 된다.
+MAX_SESSION_ANNOS = 500
+
 
 class CollabHub:
     def __init__(self) -> None:
@@ -44,6 +48,12 @@ class CollabHub:
         # 게스트의 소켓이다. 캐시를 소켓 안에만 두면 게스트 쪽이 "나는 제어권 없음"을 TTL 만큼
         # 계속 믿어서, 승인 직후 몇 초간 화면 조작이 먹지 않는다(실제로 테스트가 이걸 잡았다).
         self._ctl_rev: dict[str, int] = {}
+        # 세션 code → 세션 주석 목록. **메모리에만 있고 DB 에 절대 안 간다** —
+        # 그것이 "세션 한정"(판독 기록의 책임 주체를 흐리지 않는다) 규정의 실체다.
+        # Master 가 [채택] 한 것만 별도로 정식 Annotation 으로 저장된다.
+        self._annos: dict[str, list[dict[str, Any]]] = {}
+        # 세션 code → 주석 id 시퀀스. DB 를 안 쓰므로 여기서 발번한다.
+        self._anno_seq: dict[str, int] = {}
 
     # ── 연결 수명 ────────────────────────────────────────────────────────────
     def attach(self, ws: WebSocket, *, account_id: int, username: str,
@@ -129,6 +139,57 @@ class CollabHub:
     def session_members(self, code: str) -> set[int]:
         return set(self._sessions.get(code, ()))
 
+    # ── 세션 주석 (메모리 전용) ──────────────────────────────────────────────
+    def annos(self, code: str) -> list[dict[str, Any]]:
+        """이 세션의 주석 전체 — 참가 직후 anno.sync 로 한 번에 내려 준다."""
+        return list(self._annos.get(code, ()))
+
+    def anno_add(self, code: str, item: dict[str, Any], by: int) -> dict[str, Any] | None:
+        """주석 1건 추가 → 서버가 확정한 항목(없으면 상한 초과로 None).
+
+        ⚠ id 와 by 는 **서버가 박는다.** 클라가 보낸 값은 버린다 — 안 그러면 남의 id 로
+          주석을 그려 놓을 수 있고(사칭), 그 색이 그 사람 색으로 나가서 오해가 된다.
+        """
+        rows = self._annos.setdefault(code, [])
+        if len(rows) >= MAX_SESSION_ANNOS:
+            return None
+        seq = self._anno_seq.get(code, 0) + 1
+        self._anno_seq[code] = seq
+        row = {**item, "id": f"s{seq}", "by": by}
+        rows.append(row)
+        return row
+
+    def anno_update(self, code: str, anno_id: str, item: dict[str, Any], by: int
+                    ) -> dict[str, Any] | None:
+        """주석 수정 → 확정 항목. **자기가 그린 것만** 고칠 수 있다(없거나 남의 것이면 None)."""
+        for i, r in enumerate(self._annos.get(code, ())):
+            if r.get("id") != anno_id:
+                continue
+            if r.get("by") != by:
+                return None
+            row = {**item, "id": anno_id, "by": by}
+            self._annos[code][i] = row
+            return row
+        return None
+
+    def anno_remove(self, code: str, anno_id: str, by: int, force: bool = False) -> bool:
+        """주석 삭제 — 자기 것만(force=True 는 Master 가 정리할 때)."""
+        rows = self._annos.get(code)
+        if not rows:
+            return False
+        for i, r in enumerate(rows):
+            if r.get("id") != anno_id:
+                continue
+            if not force and r.get("by") != by:
+                return False
+            rows.pop(i)
+            return True
+        return False
+
+    def annos_of(self, code: str, account_id: int) -> list[dict[str, Any]]:
+        """한 사람이 그린 것만 — Master 의 [채택] 이 이 목록을 DB 로 옮긴다."""
+        return [r for r in self._annos.get(code, ()) if r.get("by") == account_id]
+
     def control_rev(self, code: str) -> int:
         return self._ctl_rev.get(code, 0)
 
@@ -143,9 +204,15 @@ class CollabHub:
         return meta.get("session") if meta else None
 
     def drop_session(self, code: str) -> set[int]:
-        """세션 종료 — 멤버십만 비우고 소켓은 살려 둔다(사용자는 계속 로그인 상태다)."""
+        """세션 종료 — 멤버십만 비우고 소켓은 살려 둔다(사용자는 계속 로그인 상태다).
+
+        세션 주석도 여기서 사라진다. "세션 한정" 이 지켜지는 지점이다 —
+        Master 가 [채택] 한 것은 이미 DB 로 옮겨졌고, 나머지는 남지 않는다.
+        """
         members = self._sessions.pop(code, set())
         self._ctl_rev.pop(code, None)
+        self._annos.pop(code, None)
+        self._anno_seq.pop(code, None)
         for meta in self._meta.values():
             if meta.get("session") == code:
                 meta["session"] = None

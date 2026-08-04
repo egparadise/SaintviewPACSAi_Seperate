@@ -16,9 +16,13 @@ import { showToast } from "../lib/toast";
 const CAP_LABEL: Record<string, string> = {
   "collab.viewport": "화면 조작 (줌·팬·W/L·시리즈·레이아웃)",
   "collab.annotate": "계측·주석 (세션 한정)",
+  "collab.text": "텍스트·글쓰기 (세션 한정)",
   "collab.navigate": "검사 탭 전환",
+  "collab.present": "발표자 되기",
 };
 const ALL_CAPS = Object.keys(CAP_LABEL);
+/** 참가자가 '요청' 할 수 있는 것 — 발표자는 Master 가 넘겨 주는 것이라 요청 목록에서 뺀다 */
+const REQUESTABLE_CAPS = ALL_CAPS.filter((c) => c !== "collab.present");
 
 /** 접이식 구획.
  *  ⚠ 컴포넌트 **바깥**에 둬야 한다. 부모 렌더 안에서 정의하면 렌더마다 새 컴포넌트 타입이 되어
@@ -110,6 +114,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
   const [showChat, setShowChat] = useState(true);
   const [showVideo, setShowVideo] = useState(true);
   const [wantCaps, setWantCaps] = useState<string[]>(["collab.viewport"]);
+  const [capOpen, setCapOpen] = useState<number | null>(null);   // 허용 범위 패널을 연 참가자
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const room = sessionRoom(session.code);
 
@@ -165,6 +170,27 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
 
   const nameOf = (id: number) => joined.find((p) => p.id === id)?.name ?? `#${id}`;
 
+  /** 한 사람의 허용 범위 적용 — 서버가 화이트리스트로 한 번 더 거른다(UI 는 안내일 뿐). */
+  const applyCaps = async (targetId: number, caps: string[]) => {
+    try {
+      await api.collabSetCaps(session.code, targetId, caps);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : tr("권한 변경 실패"), "error");
+    }
+  };
+
+  /** [표시 채택] — 그 사람의 세션 주석을 정식 판독 주석으로 저장한다(Master 책임). */
+  const adopt = async (targetId: number, name: string) => {
+    try {
+      const r = await api.collabAdopt(session.code, targetId);
+      showToast(r.adopted
+        ? `${name} ${tr("님의 표시")} ${r.adopted}${tr("건을 판독 주석으로 채택했습니다")}`
+        : tr("채택할 표시가 없습니다"));
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : tr("채택 실패"), "error");
+    }
+  };
+
   return (
     <div style={{ width: 250, display: "flex", flexDirection: "column", height: "100%",
                   background: "var(--bg-panel)", borderLeft: "1px solid var(--border)" }}>
@@ -194,7 +220,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
         {!isHost && !iControl && (
           <div style={{ marginTop: 4 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 4 }}>
-              {ALL_CAPS.map((c) => (
+              {REQUESTABLE_CAPS.map((c) => (
                 <label key={c} style={{ display: "flex", gap: 4, alignItems: "flex-start", fontSize: 10.5 }}>
                   <input type="checkbox" checked={wantCaps.includes(c)}
                          onChange={(e) => setWantCaps((prev) =>
@@ -335,28 +361,81 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
         </div>
       </Section>
 
-      {/* ── 참가자 ── */}
+      {/* ── 참가자 · 허용 범위 ──
+          다학제의 조작면이다. Master 는 사람마다 체크박스로 즉시 켜고 끈다 —
+          여러 명이 같은 권한을 **동시에** 갖는 것이 정상이라 남의 것은 건드리지 않는다.
+          기본값은 Setting > 협진 에서 정하고, 여기서의 조정이 최종이다. */}
       <div style={{ overflowY: "auto", flexShrink: 0 }}>
         <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-secondary)",
-                      background: "var(--bg-canvas)" }}>{tr("참가자")}</div>
-        {session.participants.filter((p) => p.state !== "denied").map((p) => (
-          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px",
-                                   fontSize: 11.5, borderBottom: "1px solid var(--border)",
-                                   opacity: p.state === "joined" ? 1 : 0.5 }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: colorOf(p.id),
-                           flexShrink: 0 }} />
-            <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden",
-                           textOverflow: "ellipsis" }}>
-              {p.name}
-              <span style={{ color: "var(--text-secondary)", fontSize: 10 }}>
-                {" "}{p.hospital}
-              </span>
-            </span>
-            <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>
-              {p.seat === "host" ? "Master" : p.state === "joined" ? "Slave" : tr("초대됨")}
-            </span>
-          </div>
-        ))}
+                      background: "var(--bg-canvas)" }}>{tr("참가자 · 허용 범위")}</div>
+        {session.participants.filter((p) => p.state !== "denied").map((p) => {
+          const isMasterRow = p.seat === "host";
+          const open = capOpen === p.id;
+          return (
+            <div key={p.id} style={{ borderBottom: "1px solid var(--border)",
+                                     opacity: p.state === "joined" ? 1 : 0.5 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px",
+                            fontSize: 11.5 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: colorOf(p.id),
+                               flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden",
+                               textOverflow: "ellipsis" }}>
+                  {p.name}
+                  <span style={{ color: "var(--text-secondary)", fontSize: 10 }}>
+                    {" "}{p.hospital}
+                  </span>
+                </span>
+                {p.control === "granted" && (
+                  <span title={tr("발표자 — 이 사람의 화면이 전원에게 보입니다")}
+                        style={{ fontSize: 9.5, background: "var(--accent)", color: "#fff",
+                                 borderRadius: 7, padding: "0 5px" }}>{tr("발표")}</span>
+                )}
+                <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                  {isMasterRow ? "Master" : p.state === "joined" ? "Slave" : tr("초대됨")}
+                </span>
+                {isHost && !isMasterRow && p.state === "joined" && (
+                  <button onClick={() => setCapOpen(open ? null : p.id)}
+                          title={tr("허용 범위 설정")}
+                          style={{ fontSize: 10, padding: "1px 5px" }}>{open ? "▾" : "⚙"}</button>
+                )}
+              </div>
+              {open && isHost && !isMasterRow && (
+                <div style={{ padding: "2px 8px 6px 22px", background: "var(--bg-canvas)" }}>
+                  {ALL_CAPS.filter((c) => c !== "collab.present").map((c) => (
+                    <label key={c} style={{ display: "flex", gap: 4, alignItems: "flex-start",
+                                            fontSize: 10.5, padding: "1px 0" }}>
+                      <input type="checkbox" checked={(p.caps ?? []).includes(c)}
+                             disabled={c === "collab.viewport"}
+                             title={c === "collab.viewport"
+                               ? tr("화면 조작은 '발표자 넘기기' 로 정합니다 — 세션당 1명")
+                               : undefined}
+                             onChange={(e) => {
+                               const next = e.target.checked
+                                 ? [...(p.caps ?? []), c]
+                                 : (p.caps ?? []).filter((x) => x !== c);
+                               void applyCaps(p.id, next);
+                             }} />
+                      <span>{CAP_LABEL[c] ?? c}</span>
+                    </label>
+                  ))}
+                  <div style={{ display: "flex", gap: 4, marginTop: 5 }}>
+                    <button style={{ fontSize: 10.5, padding: "2px 6px", flex: 1 }}
+                            title={tr("이 사람의 화면을 전원에게 보여 줍니다")}
+                            onClick={() => collab.send({ t: "ctl.grant", target: p.id,
+                                                         caps: p.caps ?? [] })}>
+                      {tr("발표자 넘기기")}
+                    </button>
+                    <button style={{ fontSize: 10.5, padding: "2px 6px", flex: 1 }}
+                            title={tr("이 사람이 그린 표시를 정식 판독 주석으로 저장합니다")}
+                            onClick={() => void adopt(p.id, p.name)}>
+                      {tr("표시 채택")}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

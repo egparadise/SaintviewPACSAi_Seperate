@@ -327,6 +327,182 @@ def test_caps_cannot_smuggle_real_permissions(client, db, duo):
         assert svc.can_control(s, sess, duo["guest"].id, "report.write") is False
 
 
+# ═══════════════ ④-2 다학제 — 동시 작업 · 세션 주석 ═══════════════
+def _third(db, duo):
+    """세 번째 참가자 — 다학제(3명)의 최소 구성. 영상의 목표 상태와 같다."""
+    return _account(db, "collab_third", duo["hb"].id)
+
+
+def test_multiple_participants_hold_the_same_cap_at_once(client, db, duo):
+    """여러 명이 **동시에** collab.annotate 를 가질 수 있어야 한다 — 이게 다학제다.
+
+    예전 모델(talking stick)은 한 명에게 주는 순간 나머지 caps 를 비웠다. 그 상태로는
+    영상처럼 세 사람이 각자 색으로 동시에 그리는 일이 성립하지 않는다.
+    """
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    third = _third(db, duo)
+    code = _open_and_join(client, duo, _study(db, "mdt1", duo["ha"].id).id)
+    _befriend_pair(client, db, duo["host"], third, duo["hh"], _headers(db, third))
+    client.post(f"/api/collab/sessions/{code}/invite", headers=duo["hh"],
+                json={"target_id": third.id})
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        svc.join(s, sess, s.get(Account, third.id))
+        host = s.get(Account, duo["host"].id)
+        svc.set_caps(s, sess, host, duo["guest"].id, ["collab.annotate", "collab.text"])
+        svc.set_caps(s, sess, host, third.id, ["collab.annotate"])
+        # 둘 다 동시에 그릴 수 있어야 한다
+        assert svc.can_control(s, sess, duo["guest"].id, "collab.annotate") is True
+        assert svc.can_control(s, sess, third.id, "collab.annotate") is True
+        # 발표자(뷰포트)는 여전히 1명 — 그건 배타가 맞다
+        assert svc.can_control(s, sess, duo["guest"].id, "collab.viewport") is False
+        assert svc.can_control(s, sess, third.id, "collab.viewport") is False
+
+
+def test_set_caps_does_not_touch_other_participants(client, db, duo):
+    """한 사람의 권한을 바꿔도 남의 권한은 그대로여야 한다."""
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    third = _third(db, duo)
+    code = _open_and_join(client, duo, _study(db, "mdt2", duo["ha"].id).id)
+    _befriend_pair(client, db, duo["host"], third, duo["hh"], _headers(db, third))
+    client.post(f"/api/collab/sessions/{code}/invite", headers=duo["hh"],
+                json={"target_id": third.id})
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        svc.join(s, sess, s.get(Account, third.id))
+        host = s.get(Account, duo["host"].id)
+        svc.set_caps(s, sess, host, duo["guest"].id, ["collab.annotate"])
+        svc.set_caps(s, sess, host, third.id, ["collab.text"])
+        svc.set_caps(s, sess, host, third.id, [])          # third 만 회수
+        assert svc.can_control(s, sess, duo["guest"].id, "collab.annotate") is True, \
+            "남의 권한 조정이 내 권한을 지웠다"
+        assert svc.can_control(s, sess, third.id, "collab.text") is False
+
+
+def test_grant_control_no_longer_wipes_everyone_else(client, db, duo):
+    """발표자 전환이 다른 사람의 주석 권한까지 빼앗으면 안 된다(예전 동작의 회귀 방어)."""
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    third = _third(db, duo)
+    code = _open_and_join(client, duo, _study(db, "mdt3", duo["ha"].id).id)
+    _befriend_pair(client, db, duo["host"], third, duo["hh"], _headers(db, third))
+    client.post(f"/api/collab/sessions/{code}/invite", headers=duo["hh"],
+                json={"target_id": third.id})
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        svc.join(s, sess, s.get(Account, third.id))
+        host = s.get(Account, duo["host"].id)
+        svc.set_caps(s, sess, host, third.id, ["collab.annotate"])
+        svc.grant_control(s, sess, host, duo["guest"].id, caps=["collab.viewport"])
+        assert svc.can_control(s, sess, third.id, "collab.annotate") is True, \
+            "발표자를 넘겼더니 제3자의 주석 권한이 사라졌다"
+
+
+def test_session_annotations_never_reach_the_database(client, db, duo):
+    """세션 주석은 메모리에만 — 세션이 닫히면 DB 에 아무것도 남지 않는다."""
+    from sqlalchemy import select as _sel
+
+    from app.models import Annotation
+    from app.services.collab_hub import hub
+
+    code = _open_and_join(client, duo, _study(db, "mdt4", duo["ha"].id).id)
+    before = len(db.execute(_sel(Annotation)).scalars().all())
+    for i in range(3):
+        assert hub.anno_add(code, {"kind": "arrow", "points": [[0.1, 0.1], [0.2, 0.2]],
+                                   "text": f"fibrosis {i}"}, duo["guest"].id) is not None
+    assert len(hub.annos(code)) == 3
+    db.expire_all()
+    assert len(db.execute(_sel(Annotation)).scalars().all()) == before, \
+        "세션 주석이 DB 로 샜다"
+
+    assert client.post(f"/api/collab/sessions/{code}/close", headers=duo["hh"]).status_code == 200
+    assert hub.annos(code) == [], "세션이 닫혔는데 주석이 남아 있다"
+    db.expire_all()
+    assert len(db.execute(_sel(Annotation)).scalars().all()) == before
+
+
+def test_session_annotation_author_cannot_be_forged(client, db, duo):
+    """클라가 by/id 를 실어 보내도 서버가 자기 값으로 덮는다 — 남의 색·이름 사칭 방지."""
+    from app.services.collab_hub import hub
+
+    code = _open_and_join(client, duo, _study(db, "mdt5", duo["ha"].id).id)
+    row = hub.anno_add(code, {"kind": "arrow", "points": [[0, 0], [1, 1]],
+                              "by": duo["host"].id, "id": "s999"}, duo["guest"].id)
+    assert row["by"] == duo["guest"].id, "작성자 위조가 통과했다"
+    assert row["id"] != "s999", "id 위조가 통과했다"
+
+
+def test_session_annotation_edit_is_own_only_and_capped(client, db, duo):
+    from app.services.collab_hub import MAX_SESSION_ANNOS, hub
+
+    code = _open_and_join(client, duo, _study(db, "mdt6", duo["ha"].id).id)
+    mine = hub.anno_add(code, {"kind": "arrow", "points": [[0, 0], [1, 1]]}, duo["guest"].id)
+    # 남의 것은 못 고치고 못 지운다
+    assert hub.anno_update(code, mine["id"], {"kind": "arrow", "points": [[0, 0]]},
+                           duo["host"].id) is None
+    assert hub.anno_remove(code, mine["id"], duo["host"].id) is False
+    # Master 정리(force)는 된다 — [채택] 후 목록에서 빼는 경로
+    assert hub.anno_remove(code, mine["id"], duo["host"].id, force=True) is True
+
+    for _ in range(MAX_SESSION_ANNOS):
+        hub.anno_add(code, {"kind": "arrow", "points": [[0, 0], [1, 1]]}, duo["guest"].id)
+    assert hub.anno_add(code, {"kind": "arrow", "points": [[0, 0], [1, 1]]},
+                        duo["guest"].id) is None, f"세션 주석 상한({MAX_SESSION_ANNOS})이 안 걸렸다"
+
+
+def test_master_adopt_saves_with_original_author_noted(client, db, duo):
+    """[채택] — Master 이름으로 저장하되 원 작성자를 본문에 남긴다(책임 주체 유지)."""
+    from sqlalchemy import select as _sel
+
+    from app.models import Annotation
+    from app.services.collab_hub import hub
+
+    study = _study(db, "mdt7", duo["ha"].id)
+    code = _open_and_join(client, duo, study.id)
+    hub.anno_add(code, {"kind": "arrow", "points": [[0.3, 0.3], [0.4, 0.4]],
+                        "text": "fibrosis", "sop_uid": "1.2.3"}, duo["guest"].id)
+    r = client.post(f"/api/collab/sessions/{code}/adopt", headers=duo["hh"],
+                    json={"target_id": duo["guest"].id})
+    assert r.status_code == 200 and r.json()["adopted"] == 1, r.text
+
+    db.expire_all()
+    rows = db.execute(_sel(Annotation).where(Annotation.study_id == study.id)).scalars().all()
+    saved = [a for a in rows if "fibrosis" in (a.text or "")]
+    assert saved, "채택했는데 저장이 안 됐다"
+    assert saved[0].created_by == duo["host"].username, "저장 책임 주체가 Master 가 아니다"
+    assert "COLLAB_GUEST" in saved[0].text.upper() or "collab_guest" in saved[0].text.lower(), \
+        f"원 작성자가 본문에 안 남았다: {saved[0].text}"
+    assert hub.annos_of(code, duo["guest"].id) == [], "채택 후에도 세션 목록에 남아 중복 저장된다"
+
+
+def test_only_master_can_adopt_or_set_caps(client, db, duo):
+    code = _open_and_join(client, duo, _study(db, "mdt8", duo["ha"].id).id)
+    r = client.post(f"/api/collab/sessions/{code}/adopt", headers=duo["gh"],
+                    json={"target_id": duo["host"].id})
+    assert r.status_code == 403
+    r = client.post(f"/api/collab/sessions/{code}/caps", headers=duo["gh"],
+                    json={"target_id": duo["host"].id, "caps": ["collab.viewport"]})
+    assert r.status_code == 403
+
+
+def test_caps_endpoint_filters_dangerous_keys(client, db, duo):
+    code = _open_and_join(client, duo, _study(db, "mdt9", duo["ha"].id).id)
+    r = client.post(f"/api/collab/sessions/{code}/caps", headers=duo["hh"],
+                    json={"target_id": duo["guest"].id,
+                          "caps": ["collab.annotate", "report.write", "study.delete"]})
+    assert r.status_code == 200, r.text
+    seat = next(p for p in r.json()["participants"] if p["id"] == duo["guest"].id)
+    assert seat["caps"] == ["collab.annotate"], f"위험 권한이 통과했다: {seat['caps']}"
+
+
 def test_same_hospital_participant_keeps_their_own_rights(client, db, duo):
     """같은 병원 참가자는 협진 중에도 **원래 자기 권한 그대로**다 — 의도된 동작이다.
 

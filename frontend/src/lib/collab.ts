@@ -74,6 +74,10 @@ export type CollabEvent =
   | { t: "cursor"; from: number; d: unknown }
   | { t: "ctl.requested" | "ctl.granted" | "ctl.revoked"; d: CollabSession; by: number; target: number | null }
   | { t: "exam"; d: CollabSession; granted: number[] }
+  | { t: "anno.sync"; d: unknown[] }
+  | { t: "anno.add" | "anno.update"; d: unknown }
+  | { t: "anno.remove"; id: string; by: number }
+  | { t: "adopted"; target: number; n: number }
   | { t: "rtc.ready" | "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave"; from: number; d: unknown; room?: string }
   | { t: "session.closed"; code: string }
   | { t: "error"; detail: string };
@@ -90,6 +94,10 @@ export type CollabSend =
   | { t: "ctl.grant"; target: number; caps?: string[] }
   | { t: "ctl.revoke" }
   | { t: "exam.switch"; study_id: number }
+  // 세션 주석 — id·by 는 서버가 박는다(클라가 보낸 값은 버려진다)
+  | { t: "anno.add"; d: unknown }
+  | { t: "anno.update"; id: string; d: unknown }
+  | { t: "anno.remove"; id: string }
   | { t: "rtc.ready" | "rtc.offer" | "rtc.answer" | "rtc.ice" | "rtc.leave"; to: number; d: unknown; room?: string };
 
 export type CollabStatus = "idle" | "connecting" | "open" | "closed";

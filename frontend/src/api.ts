@@ -838,6 +838,14 @@ export const api = {
   /** 세션 종료(Master 전용) — 전 참가자의 임시 열람권이 이 시점에 무효화된다 */
   collabClose: (code: string) =>
     req<{ ok: boolean }>(`/api/collab/sessions/${code}/close`, { method: "POST" }),
+  /** 참가자 한 사람의 허용 범위 조정(Master 전용) — 남의 권한은 건드리지 않는다 */
+  collabSetCaps: (code: string, target_id: number, caps: string[]) =>
+    req<CollabSession>(`/api/collab/sessions/${code}/caps`,
+      { method: "POST", body: JSON.stringify({ target_id, caps }) }),
+  /** 참가자의 세션 주석을 정식 판독 주석으로 채택(Master 전용) */
+  collabAdopt: (code: string, target_id: number) =>
+    req<{ ok: boolean; adopted: number }>(`/api/collab/sessions/${code}/adopt`,
+      { method: "POST", body: JSON.stringify({ target_id }) }),
   /** 검사 관리 작업 (삭제/이동/매칭/언매칭/복제 — 유효 권한 강제, 403 시 안내) */
   studyAdminAction: (id: number, body: { action: StudyAdminActionKind; target_hid?: number; order_id?: number | string }) =>
     req<{ ok: boolean; detail?: string }>(`/api/studies/${id}/admin-action`, { method: "POST", body: JSON.stringify(body) }),
@@ -1521,6 +1529,9 @@ export interface Anno {
   source?: "user" | "ai" | "external";
   confidence?: number | null;
   verified?: boolean;
+  /** 협진 세션 주석의 작성자(account id) — 있으면 그 사람 색으로 그린다.
+   *  DB 에서 온 주석에는 없다(옵셔널이라 저장 경로에 영향이 없다). */
+  by?: number;
 }
 
 /** 저장 표시상태(시리즈별 적용 툴 값) — 재오픈 시 재현. 좌표는 정규화(0~1) */

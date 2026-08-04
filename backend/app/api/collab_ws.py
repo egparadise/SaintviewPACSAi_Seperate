@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from app.api.deps import WS_SUBPROTOCOL, ws_user
 from app.db import SessionLocal
 from app.services import collab_service as svc
-from app.services.collab_hub import hub
+from app.services.collab_hub import MAX_SESSION_ANNOS, hub
 
 logger = logging.getLogger("saintview.collab.ws")
 
@@ -46,6 +46,43 @@ _RTC_RELAY_TYPES = frozenset({"rtc.ready", "rtc.offer", "rtc.answer", "rtc.ice",
 # 제어권 캐시 수명(초). 짧게 잡는 이유: 만료·회수가 이 시간 안에는 반영되어야 한다.
 # 회수는 어차피 즉시 이벤트로 캐시를 깨므로, 이 값은 '이벤트를 놓쳤을 때의 상한'이다.
 _CTL_TTL = 3.0
+
+# 세션 주석에서 받아들이는 필드 — 화이트리스트다.
+# 클라가 보낸 dict 를 그대로 저장하면 (a) 아무 키나 실어 메모리를 불릴 수 있고
+# (b) id·by 를 위조해 남의 이름·색으로 그려 놓을 수 있다. 그 둘은 허브가 직접 박는다.
+_ANNO_FIELDS = ("kind", "points", "series_uid", "sop_uid", "text", "value", "unit", "pid")
+_ANNO_MAX_POINTS = 512      # open-ended 도구(폴리라인)도 이 안에서 끝난다
+_ANNO_TEXT_MAX = 200
+
+
+def _clean_anno(d) -> dict:
+    """세션 주석 정규화 — 화이트리스트 밖은 버리고 크기를 묶는다."""
+    if not isinstance(d, dict):
+        return {}
+    out: dict = {}
+    for k in _ANNO_FIELDS:
+        if k not in d:
+            continue
+        v = d[k]
+        if k == "points":
+            if not isinstance(v, list):
+                continue
+            pts = []
+            for p in v[:_ANNO_MAX_POINTS]:
+                if isinstance(p, (list, tuple)) and len(p) >= 2:
+                    try:
+                        pts.append([float(p[0]), float(p[1])])
+                    except (TypeError, ValueError):
+                        continue
+            out["points"] = pts
+        elif k in ("text", "kind", "series_uid", "sop_uid", "unit", "pid"):
+            out[k] = str(v)[:_ANNO_TEXT_MAX]
+        elif k == "value":
+            try:
+                out[k] = float(v) if v is not None else None
+            except (TypeError, ValueError):
+                out[k] = None
+    return out
 
 # 한 소켓이 보낼 수 있는 최대 프레임 크기(바이트). 뷰어 상태 스냅샷은 보통 2~8KB 다.
 _MAX_FRAME = 256 * 1024
@@ -212,8 +249,42 @@ async def collab_ws(websocket: WebSocket) -> None:
                 hub.join_session(websocket, code)
                 _ctl_cache.clear()
                 await websocket.send_json({"t": "session", "d": res["session"]})
+                # 지금까지 그려진 세션 주석을 한 번에 — 늦게 들어와도 남들 작업이 다 보인다
+                await websocket.send_json({"t": "anno.sync", "d": hub.annos(code)})
                 await hub.broadcast_session(code, {"t": "joined", "id": aid, "d": res["session"]},
                                             exclude_account=aid)
+                continue
+
+            # ── 세션 주석 — 다학제의 핵심. 여러 명이 **동시에** 그린다 ──────────
+            # DB 를 타지 않는다(허브 메모리). 그래서 고빈도여도 안전하고,
+            # "세션 한정"(판독 기록의 책임 주체를 흐리지 않는다) 규정이 구조로 지켜진다.
+            if t in ("anno.add", "anno.update", "anno.remove"):
+                code = hub.session_of(websocket)
+                if not code:
+                    continue
+                if not await _may_control(_ctl_cache, code, aid, "collab.annotate"):
+                    await websocket.send_json(
+                        {"t": "error", "detail": "주석 권한이 없습니다 — Master 에게 요청하세요"})
+                    continue
+                if t == "anno.add":
+                    row = hub.anno_add(code, _clean_anno(msg.get("d")), aid)
+                    if row is None:
+                        await websocket.send_json(
+                            {"t": "error", "detail": f"세션 주석이 상한({MAX_SESSION_ANNOS}건)을 넘었습니다"})
+                        continue
+                    out = {"t": "anno.add", "d": row}
+                elif t == "anno.update":
+                    row = hub.anno_update(code, str(msg.get("id") or ""),
+                                          _clean_anno(msg.get("d")), aid)
+                    if row is None:
+                        continue          # 없거나 남의 것 — 조용히 무시(경합에서 흔하다)
+                    out = {"t": "anno.update", "d": row}
+                else:
+                    if not hub.anno_remove(code, str(msg.get("id") or ""), aid):
+                        continue
+                    out = {"t": "anno.remove", "id": str(msg.get("id") or ""), "by": aid}
+                # 발신 창까지 포함해 세션 전 소켓에 — 다중 모니터의 내 다른 창도 따라와야 한다
+                await hub.send_session_socket(code, out)
                 continue
 
             if t == "session.exit":

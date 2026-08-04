@@ -101,10 +101,27 @@ COLLAB_NEVER_DELEGATE: frozenset[str] = frozenset({
 # '남에게 넘길 수 있는 조작'이 생겼으므로 별도 네임스페이스(collab.*)로 정의한다.
 COLLAB_CAPS: dict[str, str] = {
     "collab.viewport": "화면 조작(줌·팬·회전·반전·W-L·필터·시리즈 전환·레이아웃·시네)",
-    "collab.annotate": "계측·주석 (세션 한정 — DB 저장 아님)",
+    "collab.annotate": "계측·주석 그리기 (세션 한정 — DB 저장 아님)",
+    "collab.text": "텍스트·글쓰기 (세션 한정 — DB 저장 아님)",
     "collab.navigate": "검사 탭 전환·과거 검사 열기",
+    "collab.present": "발표자 되기 (내 화면을 전원에게)",
 }
 _COLLAB_ALL_CAPS = frozenset(COLLAB_CAPS.keys())
+
+# 여러 참가자가 **동시에** 가질 수 있는 cap. 다학제 협진의 실체다 —
+# 영상(CES 데모)에서 세 사람이 각자 색으로 동시에 주석을 그린다.
+#
+# collab.viewport 는 여기 없다: 뷰포트는 '발표자 1명'만 송출한다. 전원이 서로에게 뷰포트를
+# 쏘면 마지막에 움직인 사람으로 전원이 끌려가 10Hz 로 화면이 오간다(동시 조작이 아니라
+# 아무도 못 쓰는 상태). 대신 나머지는 각자 자기 화면을 자유롭게 본다(자유 보기) —
+# 그래서 "전부 동시" 가 실제로 성립한다. 막히는 사람은 없다.
+COLLAB_CONCURRENT_CAPS: frozenset[str] = frozenset({
+    "collab.annotate", "collab.text", "collab.navigate",
+})
+
+# 초대 시 자동으로 부여하는 기본 cap — 사용자 설정(viewer.prefs.collab.default_caps)이
+# 없을 때의 폴백. 다학제의 목적이 '같이 보며 표시하는 것'이라 주석·글쓰기를 기본으로 연다.
+COLLAB_DEFAULT_CAPS: tuple[str, ...] = ("collab.annotate", "collab.text")
 
 
 def sanitize_collab_caps(caps) -> list[str]:

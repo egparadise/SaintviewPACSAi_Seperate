@@ -44,6 +44,40 @@ export interface CollabCursor {
   x: number; y: number; // 페인 내 정규화 좌표(0~1) — 창 크기가 달라도 같은 지점을 가리킨다
 }
 
+/** 세션 주석 — 다학제에서 **여러 명이 동시에** 그리는 것.
+ *
+ *  DB 주석(Anno)과 다른 타입인 이유:
+ *   · id 가 문자열("s3")이다 — 서버 메모리 시퀀스라 DB 정수 id 와 섞이면 안 된다
+ *   · by(작성자 account id)가 필수다 — 색이 여기서 나온다
+ *   · 세션이 닫히면 사라진다. Master 가 [채택] 한 것만 정식 Anno 가 된다
+ *  좌표는 DB 주석과 같은 **이미지 정규화(0~1)** 라, 각자 줌·팬이 달라도 같은 해부학적
+ *  위치에 찍힌다(그래서 '자유 보기' 중에도 남의 주석이 제자리에 보인다). */
+export interface SessionAnno {
+  id: string;
+  by: number;
+  kind: string;
+  points: number[][];
+  series_uid?: string;
+  sop_uid?: string;
+  text?: string;
+  value?: number | null;
+  unit?: string;
+}
+
+/** 수신 이벤트를 목록에 반영하는 **순수 함수** — 서버가 진실이고 여기는 그대로 따른다.
+ *  같은 id 가 다시 오면 교체한다(add 가 재전송돼도 중복되지 않는다). */
+export function mergeAnno(list: SessionAnno[], row: SessionAnno): SessionAnno[] {
+  const i = list.findIndex((a) => a.id === row.id);
+  if (i < 0) return [...list, row];
+  const next = list.slice();
+  next[i] = row;
+  return next;
+}
+
+export function removeAnno(list: SessionAnno[], id: string): SessionAnno[] {
+  return list.filter((a) => a.id !== id);
+}
+
 /** 뷰어에서 이 인터페이스만 만족시키면 미러링이 된다(Viewer2D 내부 타입에 의존하지 않는다) */
 export interface MirrorSource {
   studyId: number;

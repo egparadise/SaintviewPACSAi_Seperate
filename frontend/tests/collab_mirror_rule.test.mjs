@@ -10,7 +10,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  applyPane, colorOf, dmRoom, encodeSnapshot, makeThrottle, sameSnapshot, sessionRoom,
+  applyPane, colorOf, dmRoom, encodeSnapshot, makeThrottle, mergeAnno, removeAnno,
+  sameSnapshot, sessionRoom,
 } from "../src/lib/collabState.ts";
 
 const pane = (over = {}) => ({
@@ -134,4 +135,43 @@ test("colorOf — 같은 id 는 항상 같은 색, 음수 id 도 안전", () => 
   assert.equal(colorOf(3), colorOf(3));
   assert.ok(colorOf(-1).startsWith("#"), "음수 id 에서 undefined 가 나오면 테두리가 사라진다");
   assert.ok(colorOf(0) !== colorOf(1));
+});
+
+/* ── 세션 주석 병합 — 다학제에서 여러 명이 동시에 그린 것을 한 목록으로 ── */
+const anno = (id, by, over = {}) => ({
+  id, by, kind: "arrow", points: [[0.1, 0.1], [0.2, 0.2]], text: "fibrosis", ...over,
+});
+
+test("mergeAnno — 새 id 는 추가, 같은 id 는 교체(add 재전송에도 중복되지 않는다)", () => {
+  let list = [];
+  list = mergeAnno(list, anno("s1", 7));
+  list = mergeAnno(list, anno("s2", 9));
+  assert.equal(list.length, 2);
+  list = mergeAnno(list, anno("s1", 7, { text: "고침" }));
+  assert.equal(list.length, 2, "같은 id 가 두 번 들어갔다");
+  assert.equal(list.find((a) => a.id === "s1").text, "고침");
+});
+
+test("mergeAnno — 원본 배열을 건드리지 않는다(React state 로 쓰므로 불변이어야 한다)", () => {
+  const before = [anno("s1", 7)];
+  const after = mergeAnno(before, anno("s2", 9));
+  assert.equal(before.length, 1, "입력 배열이 변형됐다 — 화면이 안 갱신된다");
+  assert.notEqual(before, after);
+});
+
+test("mergeAnno — 서로 다른 사람의 주석이 함께 남는다(동시 작업의 핵심)", () => {
+  let list = [];
+  for (const [id, by] of [["s1", 7], ["s2", 9], ["s3", 11]]) list = mergeAnno(list, anno(id, by));
+  assert.deepEqual(list.map((a) => a.by), [7, 9, 11]);
+  // 각자 다른 색이어야 누가 그렸는지 구분된다
+  const colors = new Set(list.map((a) => colorOf(a.by)));
+  assert.equal(colors.size, 3, "세 사람의 주석 색이 겹친다 — 누가 그렸는지 구분이 안 된다");
+});
+
+test("removeAnno — 그 id 만 빠지고 나머지는 그대로", () => {
+  const list = [anno("s1", 7), anno("s2", 9), anno("s3", 7)];
+  const out = removeAnno(list, "s2");
+  assert.deepEqual(out.map((a) => a.id), ["s1", "s3"]);
+  assert.equal(list.length, 3, "입력 배열이 변형됐다");
+  assert.deepEqual(removeAnno(list, "없는id").map((a) => a.id), ["s1", "s2", "s3"]);
 });

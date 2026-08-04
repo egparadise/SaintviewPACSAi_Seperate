@@ -269,3 +269,63 @@ async def session_close(code: str, db: Session = Depends(get_db),
     members = hub.drop_session(code)
     await hub.send_many(members, {"t": "session.closed", "code": code})
     return {"ok": True}
+
+
+class CapsBody(BaseModel):
+    target_id: int
+    caps: list[str] = Field(default_factory=list)
+
+
+@router.post("/sessions/{code}/caps")
+async def session_set_caps(code: str, body: CapsBody, db: Session = Depends(get_db),
+                           user: dict = Depends(current_user)):
+    """참가자 **한 사람의** 허용 범위 조정 — 협진 페이지의 체크박스가 여기로 온다.
+
+    남의 caps 는 건드리지 않는다(여러 명이 동시에 같은 cap 을 갖는 것이 다학제의 정상 동작).
+    caps 는 화이트리스트를 통과하므로 판독 수정·영상 삭제 같은 키는 들어올 수 없다.
+    """
+    me = _me(db, user)
+    sess = _sess_or_404(db, code)
+    try:
+        svc.set_caps(db, sess, me, body.target_id, body.caps)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    out = svc.session_brief(db, sess, online=hub.online_ids())
+    # 권한이 바뀌면 그 사람의 소켓이 즉시 알아야 한다(툴 활성/비활성이 바로 바뀐다)
+    hub.bump_control(code)
+    await hub.broadcast_session(code, {"t": "ctl.granted", "d": out,
+                                       "by": me.id, "target": body.target_id})
+    return out
+
+
+class AdoptBody(BaseModel):
+    target_id: int
+
+
+@router.post("/sessions/{code}/adopt")
+async def session_adopt(code: str, body: AdoptBody, db: Session = Depends(get_db),
+                        user: dict = Depends(current_user)):
+    """Master 가 참가자의 세션 주석을 **정식 판독 주석으로 채택**한다.
+
+    세션 주석은 메모리에만 있다가 세션이 닫히면 사라진다(설계상 "세션 한정").
+    남길 가치가 있는 것은 Master 가 자기 책임으로 채택한다 — 저장은 Master 이름으로 하되
+    text 앞에 원 작성자를 병기해 누가 낸 소견인지 기록에 남긴다.
+    """
+    me = _me(db, user)
+    sess = _sess_or_404(db, code)
+    if sess.host_id != me.id:
+        raise HTTPException(status_code=403, detail="채택은 개설자(Master)만 할 수 있습니다")
+    rows = hub.annos_of(code, body.target_id)
+    if not rows:
+        return {"ok": True, "adopted": 0}
+    author = db.get(Account, body.target_id)
+    name = svc.display_of(author)
+    saved = svc.adopt_annotations(db, sess, me, rows, author_name=name)
+    for r in rows:                       # 채택된 것은 세션 목록에서 뺀다(중복 저장 방지)
+        hub.anno_remove(code, str(r.get("id") or ""), body.target_id, force=True)
+        await hub.send_session_socket(code, {"t": "anno.remove", "id": r.get("id"),
+                                             "by": body.target_id})
+    await hub.broadcast_session(code, {"t": "adopted", "target": body.target_id, "n": saved})
+    return {"ok": True, "adopted": saved}
