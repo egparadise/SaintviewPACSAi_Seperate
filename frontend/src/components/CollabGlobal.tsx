@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 import { VIEWER_BASE, api, type CollabUser } from "../api";
 import { collab, type CollabEvent } from "../lib/collab";
+import { t as tr } from "../lib/i18n";
 import { CollabDock } from "./CollabDock";
 import { CollabInviteBanner } from "./CollabSessionPanel";
 import { showToast } from "../lib/toast";
@@ -36,7 +37,7 @@ export function CollabGlobal({ open, onClose }: { open: boolean; onClose: () => 
       // 이제서야 study_id 를 알 수 있다(타 병원 검사는 참가 전에는 조회조차 안 된다).
       setPendingCode(null);
       if (e.d.study_id) openViewerFor(e.d.study_id);
-      else showToast("협진에 참여했습니다 — 공유할 검사를 기다리는 중입니다");
+      else showToast(tr("협진에 참여했습니다 — 공유할 검사를 기다리는 중입니다"));
     } else if (e.t === "error" && pendingCode) {
       setPendingCode(null);
     }
