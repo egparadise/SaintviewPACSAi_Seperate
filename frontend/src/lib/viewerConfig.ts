@@ -60,22 +60,27 @@ export function normHang2d(v?: Hang2dVal): { s?: string; i?: string } | null {
   return s || i ? { s, i } : null;
 }
 
-/** 2D 행잉 선택 — 위 규정 ①②③④ 의 유일한 구현. 세 뷰어(Viewer2D=sv/ty, ViewerInfi=infi)가 이것만 부른다.
+/** 2D 분할 선택 — **불변 규정(CLAUDE.md)** 의 유일한 구현. 세 뷰어(Viewer2D=sv/ty, ViewerInfi=infi)가 이것만 부른다.
+ *
+ *  사용자 확정(2026-08-04, 이전 '체크박스 양자택일' 을 대체한다):
+ *    Common / 뷰어별 / 행잉(HP) / Mammo(MG) 는 **각기 독립**이고,
+ *    표 적용 순서는 **Common → 뷰어별**(캐스케이드)이다.
+ *    각 표 안에서는 전용 모달리티 행 → '*'(기타) 행 순으로 본다.
+ *    HP·MG 는 이 함수 밖 — **선택되었을 때만** 동작한다(resolveHang2d ①②).
+ *
+ *  ⚠ hanging2d_common_on(구 체크박스)은 더 이상 읽지 않는다 — 그 플래그가 false 로 저장된
+ *    계정에서 Common 표가 통째로 무시되던 것이 "CT 를 열면 Common 설정이 풀려" 증상이었다.
+ *    저장 필드는 구버전 호환으로만 남는다.
+ *
  *  반환 null = '설정 없음' → 호출부의 자동 규칙(1×1, CT/MR 3×3 등)으로 넘어간다. */
 export function pickHang2d(prefs: Hang2dPrefs | undefined, viewer: Hang2dViewer, modality: string):
   { s?: string; i?: string } | null {
   if (!prefs || !modality) return null;
-  if (modality === "MG") return null;                       // ① 맘모는 공통 mg_hang 규정 — 2D 행잉 표 밖
-  const commonOn = prefs.hanging2d_common_on ?? true;       // 미저장 계정 = 체크 on (구 계정 보호)
-  const src = commonOn ? (prefs.hanging2d ?? {})            // ② 공통만
-                       : (prefs.hanging2d_by_viewer?.[viewer] ?? {});   // ③ 그 뷰어만
-  return normHang2d(src[modality]) ?? normHang2d(src[HANG2D_ANY]);      // ④ 같은 맵 안의 '*' 만
-}
-
-/** 위 규정에서 '실제로 읽히는' 맵. 편집 대상 키 집합을 좁힐 때 쓴다(반대쪽 맵 키가 섞이면 ②③ 위반). */
-export function activeHang2dMap(prefs: Hang2dPrefs | undefined, viewer: Hang2dViewer): Record<string, Hang2dVal> {
-  if (!prefs) return {};
-  return (prefs.hanging2d_common_on ?? true) ? (prefs.hanging2d ?? {}) : (prefs.hanging2d_by_viewer?.[viewer] ?? {});
+  if (modality === "MG") return null;             // Mammo layout 은 별도 기능(2D-MG 선택 시만) — 표 밖
+  const c = prefs.hanging2d ?? {};
+  const v = prefs.hanging2d_by_viewer?.[viewer] ?? {};
+  return normHang2d(c[modality]) ?? normHang2d(c[HANG2D_ANY])
+      ?? normHang2d(v[modality]) ?? normHang2d(v[HANG2D_ANY]);
 }
 
 /** 2D 행잉 편집기에 뜨는 모달리티 — 설정 화면(공통 1 + 뷰어별 3)이 공유한다.
@@ -163,40 +168,12 @@ export function migrateHang2d(
       bv.infi[m] = cfg; moved++;
     }
   };
-  /** 이 정리 **전에** 그 뷰어 화면에 실제로 적용되던 값(배포본의 폴백 식 그대로).
-   *  sv/ty 는 뷰어별 맵만, infi 는 뷰어별 맵 → 구 infi_default_layout 순. 공통은 호출부에서 이미 걸렀다. */
-  const effOld = (vk: Hang2dViewer, m: string): Hang2dCell | null =>
-    byViewer[vk]?.[m] ?? (vk === "infi" ? legacy[m] ?? null : null);
-  const same = (a: Hang2dCell, b: Hang2dCell) => a.s === b.s && a.i === b.i;
-
-  if (commonOn) {                                               // ③ 공통만 읽힌다
-    foldLegacy();
-    const mods = new Set<string>();
-    for (const vk of H2D_VIEWERS) for (const m of Object.keys(bv[vk] ?? {})) mods.add(m);
-    for (const m of mods) {
-      if (c[m] || !HANG2D_MODS.includes(m)) continue;
-      const all = H2D_VIEWERS.map((v) => ({ v, val: effOld(v, m) }));
-      const have = all.filter((x) => x.val) as { v: Hang2dViewer; val: Hang2dCell }[];
-      if (!have.length) continue;
-      if (have.length === H2D_VIEWERS.length && have.every((x) => same(x.val, have[0].val))) {
-        c[m] = have[0].val; moved++;      // 세 뷰어가 같은 값 → 승격해도 어느 화면도 바뀌지 않는다
-      } else {
-        pending.push({ m,
-          cur: have.map((x) => ({ v: x.v, s: x.val.s, i: x.val.i })),
-          auto: all.filter((x) => !x.val).map((x) => x.v) });
-      }
-    }
-  } else {                                                      // ③ 각 뷰어 맵만 읽힌다
-    // 순서가 규칙이다 — 배포본의 infi 폴백은 `뷰어별 → 공통 → 구 infi_default_layout` 이었다.
-    // 구 값을 먼저 접으면 공통보다 구 값이 이겨서 I-View 만 다른 행잉이 된다.
-    for (const vk of H2D_VIEWERS) {
-      for (const [m, cfg] of Object.entries(c)) {
-        if (bv[vk][m] || !HANG2D_MODS.includes(m)) continue;
-        bv[vk][m] = cfg; moved++;
-      }
-    }
-    foldLegacy();
-  }
+  // 불변 규정(CLAUDE.md · 캐스케이드) 이후: 두 표가 **모두 읽히므로** 맵 간 이동·승격이
+  // 더 이상 필요 없다(양자택일 시절의 산물 — '안 읽히는 값 구제'가 목적이었다).
+  // 남는 정리는 ① MG 행 제거(위) ② 구 infi_default_layout 을 뷰어별 infi 로 접기 ③ dropped 뿐이다.
+  // commonOn 인자는 저장 형식 호환으로만 남는다(판정에 쓰지 않는다).
+  void commonOn;
+  foldLegacy();
   return { common: c, byViewer: bv, moved, pending, dropped };
 }
 
@@ -342,12 +319,12 @@ export function resolveHang2d(
   /** 지금 **행잉 프로토콜이 걸려 있는가**. 걸려 있으면 분할은 HP 가 정한다(사용자 확정 규정). */
   hpActive = false,
 ): Hang2dResolved {
-  // ── 우선순위 (사용자가 '결코 변하지 않는다' 고 못박은 규정) ──────────────
-  //   ① 행잉 프로토콜이 **선택**되어 있으면 그것이 이긴다. HP 기본은 해제다.
-  //   ② HP 해제 상태에서 '이 공통 설정을 모든 뷰어에 우선 적용' 이 **체크**면 공통 표.
-  //   ③ 그 체크가 **해제**면 그 뷰어(SaintView/I-View/T-View) 개별 표.
-  //   ④ MG 는 위 표 밖 — 언제나 맘모 규정(mg_hang).
-  //   ②③ 판정은 pickHang2d 한 곳에만 있다(폴백 없음). 여기서 다시 분기하지 않는다.
+  // ── 우선순위 (불변 규정 — CLAUDE.md · 2026-08-04 사용자 확정) ─────────────
+  //   네 기능(Common / 뷰어별 / 행잉 / Mammo)은 **각기 독립**이다.
+  //   ① 행잉(HP)은 **선택되었을 때만** 그것이 이긴다. HP 기본은 해제다.
+  //   ② Mammo(MG 검사 + 2D-MG 선택)도 **선택되었을 때만** 맘모 규정. 꺼져 있으면 강제하지 않는다.
+  //   ③ 표 적용 순서는 **Common → 뷰어별** 캐스케이드 — 판정은 pickHang2d 한 곳에만 있다.
+  //   ④ 아무 표에도 없으면 자동 규칙(1×1 등). 여기서 다시 분기하지 않는다.
   if (hpActive) return { s: null, i: null };      // ① HP 가 정한다 — 건드리지 않는다
   // ⚠ trim 이 필요하다 — 공백만 있는 값은 '모른다' 이지 '   ' 라는 모달리티가 아니다.
   //   trim 없이 넘기면 pickHang2d 가 '*'(기타 전체)로 폴백해, 모달리티를 못 읽은 상황에서

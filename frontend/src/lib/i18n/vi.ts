@@ -2623,5 +2623,12 @@ const d: Record<string, string> = {
   "계측·주석 그리기 (세션 한정 — 판독에는 Master 채택 시에만 저장)": "Vẽ đo đạc/chú thích (chỉ trong phiên — chỉ lưu vào kết quả đọc nếu Master chấp nhận)",
   "텍스트·글쓰기 (세션 한정)": "Văn bản và viết chữ (chỉ trong phiên)",
   "검사 탭 전환·과거 검사 열기": "Chuyển tab ca chụp / mở ca chụp trước",
+  "적용 순서(고정)": "Thứ tự áp dụng (cố định)",
+  ": ① 행잉(HP — 선택 시만) → ② Mammo(2D-MG — 선택 시만) → ③ 이 Common 표 → ④ 각 뷰어별 표 → ⑤ 자동 규칙(1×1 등).": ": ① Giao thức treo (HP — chỉ khi được chọn) → ② Mammo (2D-MG — chỉ khi được chọn) → ③ bảng Common này → ④ bảng theo trình xem → ⑤ quy tắc tự động (1×1, v.v.).",
+  "이 표에 해당 모달리티 행이 있으면 세 뷰어(SaintView/I-View/T-View) 모두 이 값을 씁니다. 행이 없으면 그 뷰어의 개별 표를 봅니다.": "Nếu bảng này có hàng cho modality đó, cả ba trình xem (SaintView/I-View/T-View) đều dùng giá trị này. Nếu không, sẽ xem bảng riêng của trình xem.",
+  "규정이 켜져 있을 때만 그 규정을 따릅니다(이 표에 MG 행이 없는 이유).": "chỉ áp dụng khi quy tắc đó được bật (vì vậy bảng này không có hàng MG).",
+  "행은 그 표에 행이 없는 나머지 모달리티에 적용됩니다 —": "áp dụng cho các modality còn lại không có trong bảng đó —",
+  "적용 순서(고정): Common 표에 그 모달리티 행이 있으면 Common 이 우선하고, 없을 때 이 표가 적용됩니다.": "Thứ tự (cố định): nếu bảng Common có hàng cho modality đó thì Common được ưu tiên; bảng này chỉ áp dụng khi không có.",
+  ")는 아래": ") tuân theo quy tắc",
 };
 export default d;

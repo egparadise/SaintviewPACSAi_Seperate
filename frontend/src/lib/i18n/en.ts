@@ -2623,5 +2623,12 @@ const d: Record<string, string> = {
   "계측·주석 그리기 (세션 한정 — 판독에는 Master 채택 시에만 저장)": "Draw measurements/annotations (session only — saved to the report only if the Master adopts them)",
   "텍스트·글쓰기 (세션 한정)": "Text and writing (session only)",
   "검사 탭 전환·과거 검사 열기": "Switch study tabs / open prior studies",
+  "적용 순서(고정)": "Application order (fixed)",
+  ": ① 행잉(HP — 선택 시만) → ② Mammo(2D-MG — 선택 시만) → ③ 이 Common 표 → ④ 각 뷰어별 표 → ⑤ 자동 규칙(1×1 등).": ": ① Hanging (HP — only when selected) → ② Mammo (2D-MG — only when selected) → ③ this Common table → ④ per-viewer table → ⑤ automatic rules (1×1 etc.).",
+  "이 표에 해당 모달리티 행이 있으면 세 뷰어(SaintView/I-View/T-View) 모두 이 값을 씁니다. 행이 없으면 그 뷰어의 개별 표를 봅니다.": "If this table has a row for the modality, all three viewers (SaintView/I-View/T-View) use it. If not, the viewer's own table is consulted.",
+  "규정이 켜져 있을 때만 그 규정을 따릅니다(이 표에 MG 행이 없는 이유).": "applies only while that rule is enabled (why this table has no MG row).",
+  "행은 그 표에 행이 없는 나머지 모달리티에 적용됩니다 —": "row applies to the remaining modalities that table lacks —",
+  "적용 순서(고정): Common 표에 그 모달리티 행이 있으면 Common 이 우선하고, 없을 때 이 표가 적용됩니다.": "Order (fixed): if the Common table has a row for the modality, Common wins; this table applies only when it doesn't.",
+  ")는 아래": ") follows the",
 };
 export default d;

@@ -57,14 +57,17 @@ test("설정이 없으면 강제하지 않는다 — 현재 분할을 유지하�
   assert.equal(resolveHang2d(PREFS, "ty", "").s, null);
 });
 
-test("공통 체크가 꺼지면 그 뷰어 표만 본다(폴백 없음)", () => {
+test("★ 구 체크 플래그는 무시 — Common 행이 있으면 언제나 Common (CLAUDE.md 캐스케이드)", () => {
+  // 이 플래그가 false 로 저장된 계정에서 Common 표가 통째로 무시되던 것이
+  // "CT 를 열면 Common 설정이 풀려" 증상(sv70)이었다.
   const p = {
-    hanging2d_common_on: false,
-    hanging2d: { CT: "2x2" },                       // 공통 — 보지 않는다
-    hanging2d_by_viewer: { ty: { CT: "1x2" } },
+    hanging2d_common_on: false,                     // ← 무시돼야 한다
+    hanging2d: { CT: "2x2" },
+    hanging2d_by_viewer: { ty: { CT: "1x2", MR: "3x3" } },
   };
-  assert.equal(resolveHang2d(p, "ty", "CT").s, "1x2");
-  assert.equal(resolveHang2d(p, "in", "CT").s, null, "다른 뷰어 표가 비면 강제하지 않는다");
+  assert.equal(resolveHang2d(p, "ty", "CT").s, "2x2", "Common 이 우선");
+  assert.equal(resolveHang2d(p, "ty", "MR").s, "3x3", "Common 에 없으면 뷰어별");
+  assert.equal(resolveHang2d(p, "in", "MR").s, null, "다른 뷰어 표로 새지 않는다");
 });
 
 /* ── MG — Image Layout 이 기본, 체크했을 때만 Series ─────────────────────── */
@@ -97,15 +100,14 @@ test("MG 기본 타일은 2×2 (CC/MLO 4뷰)", () => {
 
 /* ── 우선순위 — 사용자가 "결코 변하지 않는다" 고 못박은 규정 ─────────────────
  *   ① 행잉 프로토콜이 **선택**되면 그것이 이긴다 (HP 기본은 해제)
- *   ② HP 해제 + '이 공통 설정을 모든 뷰어에 우선 적용' **체크** → 공통 표
- *   ③ HP 해제 + 그 체크 **해제** → 그 뷰어 개별 표
- *   ④ MG 는 언제나 맘모 규정(mg_hang)
+ *   ② Mammo(2D-MG)는 **선택 시만** 맘모 규정(mg_hang)
+ *   ③ 표는 Common → 뷰어별 **캐스케이드** (구 체크 플래그는 판정에 쓰지 않는다 — CLAUDE.md)
  */
 
 const COMMON_ON = {
   hanging2d_common_on: true,
   hanging2d: { CT: "2x2", DR: "1x1", "*": "1x1" },
-  hanging2d_by_viewer: { ty: { CT: "1x2", DR: "2x2" } },   // 체크 상태에서는 무시돼야 한다
+  hanging2d_by_viewer: { ty: { CT: "1x2", DR: "2x2" } },   // Common 에 행이 있으므로 캐스케이드에서 밀린다
 };
 const COMMON_OFF = { ...COMMON_ON, hanging2d_common_on: false };
 
@@ -117,7 +119,7 @@ test("① HP 가 선택되면 공통·뷰어별을 **무시**한다 (분할을 �
   assert.equal(resolveHang2d(COMMON_ON, "ty", "MG", "2x2", true).s, null);
 });
 
-test("② 공통 체크 — 공통 표만 본다(뷰어별 값이 있어도 무시)", () => {
+test("② Common 우선 — Common 행이 있으면 뷰어별 값이 있어도 Common", () => {
   assert.equal(resolveHang2d(COMMON_ON, "ty", "CT").s, "2x2", "공통 2x2 가 이겨야 한다");
   assert.equal(resolveHang2d(COMMON_ON, "ty", "DR").s, "1x1");
   // 다른 뷰어도 같은 공통 표를 본다
@@ -125,11 +127,10 @@ test("② 공통 체크 — 공통 표만 본다(뷰어별 값이 있어도 무�
   assert.equal(resolveHang2d(COMMON_ON, "saint", "CT").s, "2x2");
 });
 
-test("③ 공통 해제 — 그 뷰어 개별 표만 본다(공통으로 폴백하지 않는다)", () => {
-  assert.equal(resolveHang2d(COMMON_OFF, "ty", "CT").s, "1x2", "뷰어별 1x2 가 이겨야 한다");
-  assert.equal(resolveHang2d(COMMON_OFF, "ty", "DR").s, "2x2");
-  // 개별 표가 없는 뷰어는 **강제하지 않는다** — 공통으로 새면 규정 위반
-  assert.equal(resolveHang2d(COMMON_OFF, "in", "CT").s, null);
+test("③ 구 체크 해제 계정도 결과가 같다 — 플래그는 판정에 쓰지 않는다", () => {
+  assert.equal(resolveHang2d(COMMON_OFF, "ty", "CT").s, "2x2", "Common 이 우선");
+  assert.equal(resolveHang2d(COMMON_OFF, "ty", "DR").s, "1x1");
+  assert.equal(resolveHang2d(COMMON_OFF, "in", "CT").s, "2x2");
 });
 
 test("④ MG 는 어느 표에도 안 걸리고 맘모 규정만 따른다", () => {

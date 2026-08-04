@@ -43,7 +43,7 @@ import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
 // 기하 헬퍼를 lib/scoutLines 로 추출할 때 이 둘만 import 에서 빠져 빌드가 깨져 있었다.
 import { axisOf, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment, vdot, vsub } from "../lib/scoutLines";
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
-import { activeHang2dMap, mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
+import { mammoAssign, mammoView, pickHang2d } from "../lib/viewerConfig";
 import {
   DEFAULT_MG_CFG, MG_LAYOUTS, isMg, mgApply, mgFit, mgFromEl, mgInstView, mgOrderIndexes,
   mgPaneIs, mgProbe, mgReadable,
@@ -591,10 +591,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       const defMap: Record<string, { s?: { r: number; c: number } | null; i?: { r: number; c: number } | null }> = {};
       {
         const toRC = (s?: string) => { if (!s) return null; const [rr, cc] = s.split("x").map(Number); return { r: rr || 1, c: cc || 1 }; };
-        const commonOn = prefsV.hanging2d_common_on ?? true;
-        // 읽히는 쪽 맵의 키만 순회한다(반대쪽 키가 섞이면 '무시'가 깨진다). MG 는 pickHang2d 가 null →
-        // defMap 에 안 들어간다 = 맘모는 언제나 뷰어 공통 규정(표준 2×2 + mg_hang). Viewer2D 와 동일.
-        for (const mm of Object.keys(activeHang2dMap(prefsV, "infi"))) {
+        // 불변 규정(CLAUDE.md): Common → 뷰어별 캐스케이드 — 두 표의 키를 모두 순회하고
+        // 값 판정은 pickHang2d 한 곳에만 맡긴다. MG 는 pickHang2d 가 null →
+        // defMap 에 안 들어간다 = 맘모는 2D-MG 선택 시만 규정 적용. Viewer2D 와 동일.
+        for (const mm of new Set([...Object.keys(prefsV.hanging2d ?? {}),
+                                  ...Object.keys(prefsV.hanging2d_by_viewer?.infi ?? {})])) {
           const h = pickHang2d(prefsV, "infi", mm);
           if (!h) continue;
           const s = toRC(h.s), i = toRC(h.i);
@@ -608,11 +609,10 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         //   표에는 DX 행과 '기타(전체)'('*') 행이 있으므로 구 편집기의 7행이 전부 되살아난다 —
         //   예전처럼 '저장본에는 남아 있는데 아무도 안 읽고 다시 지정할 수도 없는' 값은 없다.
         // 설정 화면을 한 번 열고 저장하면 hanging2d_by_viewer.infi 로 접혀 사라진다(SettingsModal 마이그레이션).
-        if (!commonOn) {
-          for (const [mm, cfg] of Object.entries(prefsV.infi_default_layout ?? {})) {
-            if (mm === "MG" || defMap[mm] || !cfg) continue;
-            defMap[mm] = { s: cfg.s ?? null, i: cfg.i ?? null };
-          }
+        // 캐스케이드 규정에서 구 infi_default_layout 은 두 표 모두에 행이 없는 모달리티에만 남긴다(하위호환).
+        for (const [mm, cfg] of Object.entries(prefsV.infi_default_layout ?? {})) {
+          if (mm === "MG" || defMap[mm] || !cfg) continue;
+          defMap[mm] = { s: cfg.s ?? null, i: cfg.i ?? null };
         }
       }
       // IN-2 ①: 규칙 기반 행잉 프로토콜(viewer.hp) — '가장 우선 적용' 규칙 → 그 외 순으로 첫 일치 자동 적용

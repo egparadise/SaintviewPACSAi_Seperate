@@ -170,16 +170,16 @@ interface DicomNode { name: string; role: "scu" | "scp" | "both"; ae_title: stri
 /** 2D 행잉 편집기 — 모달리티별 Series/Image 분할(공통·뷰어별 공용).
  *  ⚠ 모달리티 목록(HANG2D_MODS)·저장본 정리(migrateHang2d)는 규정과 같이 lib/viewerConfig.ts 에 있다.
  *     MG 는 그 목록에 없다 — 맘모는 언제나 '뷰어 공통' 단일 규정(표준 2×2 + 아래 mg_hang 전용 블록). */
-function Hanging2dEditor({ map, onChange, disabled }: {
+function Hanging2dEditor({ map, onChange }: {
   map: Record<string, { s: string; i: string }>;
   onChange: (m: string, next: { s: string; i: string }) => void;
-  disabled?: boolean;   // 공통 우선 적용 on 일 때 뷰어별 표 — '무시된다'를 화면에서 보이게
+  // disabled 프롭은 '공통 우선' 양자택일 시절의 것 — 캐스케이드 규정(CLAUDE.md)에서 두 표가
+  // 모두 읽히므로 '무시되는 표' 가 없다. 호출자 0 이 되어 삭제.
 }) {
   const parseG = (s: string) => { const [r, c] = s.split("x").map(Number); return { r: r || 1, c: c || 1 }; };
   const gStr = (g: { r: number; c: number }) => `${g.r}x${g.c}`;
   return (
-    <div style={disabled ? { opacity: 0.45, pointerEvents: "none" } : undefined}
-         aria-disabled={disabled || undefined}>
+    <div>
       {HANG2D_MODS.map((m) => {
         const cur = map[m] ?? { s: "1x1", i: "1x1" };
         return (
@@ -662,18 +662,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   }, [snDir, isAdmin, page]);
 
   /* ── 2D 행잉: 체크 상태가 바뀌면 그 자리에서 다시 정리한다 ──────────────────────────────
-     '공통 우선' 체크는 **어느 맵이 읽히는지**를 통째로 바꾼다. 로드 시점의 체크 상태로 한 번만
-     정리해 두면, 사용자가 체크를 뒤집고 OK 를 누른 순간 읽히는 쪽 맵이 비어 세 뷰어의 행잉이
-     전부 초기화된다(폴백을 없앴으므로 구제 경로가 없다). 그래서 토글 즉시 재정리해서
-     ① 값을 읽히는 쪽으로 옮기고 ② 옮기지 못한 값을 배너에 바로 보여 준다. */
-  const h2dRemigrate = (nextCommonOn: boolean) => {
-    const mig = migrateHang2d(h2dMap, h2dByViewer, nextCommonOn, {});
-    setH2dCommonOn(nextCommonOn);
-    setH2dMap(mig.common);
-    setH2dByViewer(mig.byViewer);
-    setH2dMigrated((n) => n + mig.moved);
-    setH2dPending(mig.pending);
-  };
+     캐스케이드 규정(CLAUDE.md) 이후 '공통 우선' 체크박스는 폐지됐다 — h2dRemigrate 도 함께
+     삭제(호출자 0). 두 표가 모두 읽히므로 토글로 값이 사라지는 경로 자체가 없다. */
   /** 배너의 [공통 표로 올리기] — 자동 승격을 막은 값을 사용자가 명시적으로 공통에 올린다. */
   const h2dPromote = (p: Hang2dPending) => {
     const val: Hang2dCell = { s: p.cur[0].s, i: p.cur[0].i };
@@ -2167,13 +2157,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
                   {tr("이 뷰어 전용 2D Layout. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.")}
                 </div>
-                {h2dCommonOn && (
-                  <div style={{ fontSize: 11, color: "#fbbf24", marginBottom: 5 }}>
-                    {tr("⚠ 뷰어 공통의")} <b>&lsquo;{tr("이 공통 설정을 모든 뷰어에 우선 적용")}&rsquo;</b>{tr("이 켜져 있어")}
-                    <b> {tr("이 설정은 무시")}</b>{tr("됩니다. 사용하려면 뷰어 공통에서 그 체크를 해제하세요.")}
-                  </div>
-                )}
-                <Hanging2dEditor map={h2dByViewer.infi ?? {}} disabled={h2dCommonOn} onChange={(m, next) =>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                  {tr("적용 순서(고정): Common 표에 그 모달리티 행이 있으면 Common 이 우선하고, 없을 때 이 표가 적용됩니다.")}
+                </div>
+                <Hanging2dEditor map={h2dByViewer.infi ?? {}} onChange={(m, next) =>
                   setH2dByViewer((p) => ({ ...p, infi: { ...(p.infi ?? {}), [m]: next } }))} />
               </Group>
               <Group title={tr("In Viewer 표시 (계정별 저장)")}>
@@ -2307,18 +2294,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             )}
             {page === "viewer" && (
               <Group title={"2D-Common Layout " + tr("(모달리티 → Series / Image 분할)")}>
-                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>
-                  {/* 체크만 바꾸고 끝내면 안 된다 — 읽히는 맵이 통째로 바뀌므로 그 자리에서 재정리 */}
-                  <input type="checkbox" checked={h2dCommonOn} onChange={(e) => h2dRemigrate(e.target.checked)} />
-                  {tr("이 공통 설정을 모든 뷰어에 우선 적용")}
-                </label>
+                {/* 불변 규정(CLAUDE.md · 2026-08-04): 네 기능은 각기 독립, 표 순서는 Common → 뷰어별.
+                    구 '공통 우선 적용' 체크박스(양자택일)는 폐지 — false 로 저장된 계정에서
+                    Common 표가 통째로 무시되던 것이 "CT 를 열면 설정이 풀려" 증상이었다. */}
                 <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5, lineHeight: 1.7 }}>
-                  <b>{tr("체크")}</b>{tr(": SaintView/I-View/T-View 각 뷰어의 개별 2D Layout 은")} <b>{tr("무시")}</b>{tr("됩니다 — 이 표만 적용(폴백 없음).")}<br />
-                  <b>{tr("해제")}</b>{tr(": 이 공통 표는 적용되지 않고 각 뷰어(뷰어 공통 > SaintView/I-View/T-View)의 개별 설정만 사용합니다.")}<br />
-                  {tr("어느 쪽이든 해당 모달리티 칸을 지정하지 않았으면")} <b>{tr("설정 없음")}</b> {tr("= 뷰어 자동 규칙(1×1, CT/MR 3×3 등)입니다.")}<br />
-                  {tr("맘모(")}<b>MG</b>{tr(")는 체크와 무관하게 언제나 아래")} <b>&lsquo;{tr("MG — 유방 사이 여백 제거")}&rsquo;</b> {tr("규정을 따릅니다(이 표에 MG 행이 없는 이유).")}<br />
-                  <b>{tr("기타(전체)")}</b> {tr("행은 이 표에 행이 없는 나머지 모달리티에 적용됩니다 —")} <b>{tr("같은 표 안에서만")}</b>
-                  {tr("(공통을 읽는 중이면 공통의 기타, 각 뷰어를 읽는 중이면 그 뷰어의 기타).")}<br />
+                  <b>{tr("적용 순서(고정)")}</b>{tr(": ① 행잉(HP — 선택 시만) → ② Mammo(2D-MG — 선택 시만) → ③ 이 Common 표 → ④ 각 뷰어별 표 → ⑤ 자동 규칙(1×1 등).")}<br />
+                  {tr("이 표에 해당 모달리티 행이 있으면 세 뷰어(SaintView/I-View/T-View) 모두 이 값을 씁니다. 행이 없으면 그 뷰어의 개별 표를 봅니다.")}<br />
+                  {tr("맘모(")}<b>MG</b>{tr(")는 아래")} <b>&lsquo;{tr("MG — 유방 사이 여백 제거")}&rsquo;</b> {tr("규정이 켜져 있을 때만 그 규정을 따릅니다(이 표에 MG 행이 없는 이유).")}<br />
+                  <b>{tr("기타(전체)")}</b> {tr("행은 그 표에 행이 없는 나머지 모달리티에 적용됩니다 —")} <b>{tr("같은 표 안에서만")}</b>.<br />
                   {tr("검사를 열 때 모달리티별 기본 분할 —")} <b>Series</b>{tr("(뷰포트 개수)")} + <b>Image</b>{tr("(페인 내 이미지 타일). 그리드에서 선택.")}
                 </div>
                 <Hanging2dEditor map={h2dMap} onChange={(m, next) => setH2dMap((p) => ({ ...p, [m]: next }))} />
@@ -2436,13 +2419,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
                         {tr("이 뷰어 전용 2D Layout. 맘모(MG)는 뷰어 공통 규정이라 여기 없습니다.")}
                       </div>
-                      {h2dCommonOn && (
-                        <div style={{ fontSize: 11, color: "#fbbf24", marginBottom: 5 }}>
-                          {tr("⚠ 뷰어 공통의")} <b>&lsquo;{tr("이 공통 설정을 모든 뷰어에 우선 적용")}&rsquo;</b>{tr("이 켜져 있어")}
-                          <b> {tr("이 설정은 무시")}</b>{tr("됩니다. 사용하려면 뷰어 공통에서 그 체크를 해제하세요.")}
-                        </div>
-                      )}
-                      <Hanging2dEditor map={vmap} disabled={h2dCommonOn} onChange={(m, next) =>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 5 }}>
+                        {tr("적용 순서(고정): Common 표에 그 모달리티 행이 있으면 Common 이 우선하고, 없을 때 이 표가 적용됩니다.")}
+                      </div>
+                      <Hanging2dEditor map={vmap} onChange={(m, next) =>
                         setH2dByViewer((p) => ({ ...p, [vk]: { ...(p[vk] ?? {}), [m]: next } }))} />
                     </Group>
                   );

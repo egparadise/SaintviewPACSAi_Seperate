@@ -2623,5 +2623,12 @@ const d: Record<string, string> = {
   "계측·주석 그리기 (세션 한정 — 판독에는 Master 채택 시에만 저장)": "Dibujar mediciones y anotaciones (solo en la sesión — se guardan solo si el Master las adopta)",
   "텍스트·글쓰기 (세션 한정)": "Texto y escritura (solo en la sesión)",
   "검사 탭 전환·과거 검사 열기": "Cambiar de pestaña de estudio / abrir estudios previos",
+  "적용 순서(고정)": "Orden de aplicación (fijo)",
+  ": ① 행잉(HP — 선택 시만) → ② Mammo(2D-MG — 선택 시만) → ③ 이 Common 표 → ④ 각 뷰어별 표 → ⑤ 자동 규칙(1×1 등).": ": ① Protocolo (HP — solo si está seleccionado) → ② Mamo (2D-MG — solo si está activado) → ③ esta tabla Common → ④ tabla por visor → ⑤ reglas automáticas (1×1, etc.).",
+  "이 표에 해당 모달리티 행이 있으면 세 뷰어(SaintView/I-View/T-View) 모두 이 값을 씁니다. 행이 없으면 그 뷰어의 개별 표를 봅니다.": "Si esta tabla tiene una fila para la modalidad, los tres visores (SaintView/I-View/T-View) la usan. Si no, se consulta la tabla propia del visor.",
+  "규정이 켜져 있을 때만 그 규정을 따릅니다(이 표에 MG 행이 없는 이유).": "solo se aplica mientras esa regla esté activada (por eso esta tabla no tiene fila MG).",
+  "행은 그 표에 행이 없는 나머지 모달리티에 적용됩니다 —": "se aplica a las demás modalidades que faltan en esa tabla —",
+  "적용 순서(고정): Common 표에 그 모달리티 행이 있으면 Common 이 우선하고, 없을 때 이 표가 적용됩니다.": "Orden (fijo): si la tabla Common tiene una fila para la modalidad, Common prevalece; esta tabla solo se aplica cuando no la hay.",
+  ")는 아래": ") sigue la regla de",
 };
 export default d;
