@@ -13,10 +13,13 @@ run_in_threadpool 로 감싼다(이벤트루프를 막지 않기 위해).
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -110,28 +113,77 @@ def user_brief(db: Session, acc: Account, hosp: dict[int, str] | None = None) ->
 
 
 # ── 디렉터리 검색 ────────────────────────────────────────────────────────────
+# Live 브리지가 켜진 배치(sv70)에서 사용자의 원천은 **원격 PACS(A)** 다. 로컬 accounts 는
+# 'A 로그인을 한 번이라도 한 사람'의 미러 부분집합이라, 로컬만 보여 주면 아직 우리 뷰어에
+# 들어온 적 없는 동료가 검색되지 않는다(실증상: sv70 등록자가 찾기에 안 뜸). 그래서 디렉터리는
+# A 의 사용자 목록을 병합한다.
+#
+# ⚠ 매 검색마다 A 를 때리지 않는다 — 30초 TTL + 단일비행(webpacs live_state 와 같은 패턴,
+#   §C 동시성 예산 보호). A 순단 시에는 **마지막 성공 목록(stale)** 으로 계속 검색된다 —
+#   협진 검색이 A 가용성의 볼모가 되면 안 된다.
+_A_USERS_TTL = 30.0
+_a_users_cache: dict = {"at": 0.0, "rows": []}
+_a_users_lock = threading.Lock()
+
+
+def _fetch_a_users(db: Session) -> list[dict] | None:
+    """A 사용자 목록 1회 조회 — 브리지 미사용/실패는 None(호출부가 stale 캐시로 강등).
+
+    비밀번호는 구조적으로 넘어올 수 없다(account_mirror 모듈 주석 — A 가 목록 응답에서
+    user_passwd 를 제거해 준다). 여기서 받는 것은 아이디·이름·구분·등급뿐이다.
+    """
+    try:
+        from app.services.webpacs_bridge import get_bridge_config
+        from app.services.webpacs_live import service_client
+
+        cfg = get_bridge_config(db)
+        if not cfg.get("enabled") or not cfg.get("base_url"):
+            return None
+        return service_client(db).list_users()
+    except Exception:  # noqa: BLE001 — A 순단이 협진 검색을 죽이면 안 된다
+        logger.debug("A 사용자 목록 조회 실패 — stale 캐시로 계속", exc_info=True)
+        return None
+
+
+def _a_users(db: Session) -> list[dict]:
+    """캐시된 A 사용자 목록. 실패 시 마지막 성공분(없으면 빈 목록)."""
+    now = time.monotonic()
+    with _a_users_lock:
+        if now - _a_users_cache["at"] < _A_USERS_TTL:
+            return list(_a_users_cache["rows"])
+        rows = _fetch_a_users(db)
+        if rows is None:
+            # 실패/브리지 꺼짐 — 5초 뒤에나 재시도(스탬피드 방지), 그동안 stale 로 응답
+            _a_users_cache["at"] = now - _A_USERS_TTL + 5.0
+            return list(_a_users_cache["rows"])
+        _a_users_cache["rows"] = rows
+        _a_users_cache["at"] = now
+        return list(rows)
 def directory(db: Session, me: Account, q: str = "", only_other_hospital: bool = False,
-              limit: int = DIRECTORY_LIMIT) -> list[dict]:
-    """친구 요청 대상 검색 — 같은 병원 + 타 병원 모두.
+              limit: int = DIRECTORY_LIMIT, _retried: bool = False) -> list[dict]:
+    """친구 요청 대상 검색 — 로컬 계정 + **원격 PACS(A) 등록 사용자**(브리지 사용 시).
 
     노출 범위는 이름·아이디·직책·역할·병원명뿐이다(연락처·생년 등 개인정보는 싣지 않는다).
-    제외 대상은 둘뿐이다: **비활성 계정**과 **병원 미소속 시스템 관리자**(협진 상대가 아니다).
+    제외 대상은 둘뿐이다: **비활성 계정**과 **우리 시스템 관리자 서비스 계정**.
 
     ⚠ 예전에 `hospital_id IS NOT NULL` 로 걸렀는데 그것이 사고였다 —
       원격 PACS(A) 로그인으로 만들어지는 **미러 계정**은 hospital_id 가 없다
       (auth.webpacs-login → ensure_mirror 가 병원을 넘기지 않는다. A 신원에는 병원 개념이 없다).
-      그래서 Live 모드 서버에서는 A 계정 사용자끼리 **서로를 절대 검색할 수 없었다**
-      ("Sunshin_lee 를 찾아도 결과가 없습니다"). 의도했던 것은 '시스템 관리자 제외' 였으므로
-      그 조건만 정확히 쓴다.
+      그래서 Live 모드 서버에서는 A 계정 사용자끼리 **서로를 절대 검색할 수 없었다**.
+      시스템 관리자 판정은 a_user_idx 없음까지 봐야 한다 — A 의 관리자급(group_level≥98)
+      미러는 role='admin'+병원 없음이지만 **실사용자**다.
 
     ⚠ `enabled IS TRUE` 가 아니라 `IS NOT FALSE` 다 — 레거시 행(_sync_columns 의 ALTER 로
       추가된 컬럼)은 NULL 이고, auth_service.authenticate 는 그것을 **활성으로 본다**.
       두 곳의 규칙이 갈리면 '로그인은 되는데 친구 검색에는 영원히 안 보이는' 계정이 생긴다.
+
+    only_other_hospital 은 로컬 계정에만 의미가 있다(미러는 병원 개념이 없다).
     """
     stmt = select(Account).where(
         Account.id != me.id,
         Account.enabled.isnot(False),
-        ~and_(Account.role == "admin", Account.hospital_id.is_(None)),
+        ~and_(Account.role == "admin", Account.hospital_id.is_(None),
+              or_(Account.a_user_idx.is_(None), Account.a_user_idx == 0)),
     )
     term = (q or "").strip()
     if term:
@@ -141,7 +193,55 @@ def directory(db: Session, me: Account, q: str = "", only_other_hospital: bool =
                               Account.title.ilike(like)))
     if only_other_hospital and me.hospital_id:
         stmt = stmt.where(Account.hospital_id != me.hospital_id)
-    rows = db.execute(stmt.order_by(Account.display_name, Account.username).limit(limit)).scalars().all()
+    rows = list(db.execute(
+        stmt.order_by(Account.display_name, Account.username).limit(limit)).scalars().all())
+
+    # ── A(sv70) 등록 사용자 병합 — 위 캐시 주석 참조 ──────────────────────────
+    # 목록에 올리는 사람은 **미러 행을 보장**한다(ensure_mirror, 멱등). 행이 있어야
+    # 친구 요청(target_id=Account.id)이 성립한다. 차단(user_status='D')은 올리지 않는다.
+    a_added = False
+    try:
+        from app.services.account_mirror import ensure_mirror, is_active, map_role
+
+        have = {a.username for a in rows} | {me.username}
+        term_l = term.lower()
+        for r in _a_users(db):
+            if len(rows) >= limit:
+                break
+            uid = str(r.get("user_id") or "").strip()
+            if not uid or uid in have or not is_active(r):
+                continue
+            name = str(r.get("user_name") or "").strip()
+            if term_l and term_l not in uid.lower() and term_l not in name.lower():
+                continue
+            try:
+                a_idx = int(r.get("user_idx"))
+            except (TypeError, ValueError):
+                a_idx = 0
+            acc = ensure_mirror(db, user_id=uid, name=name,
+                                role=map_role(r.get("user_type"), r.get("group_level")),
+                                a_user_idx=a_idx)
+            if acc.enabled is False:      # 동명 로컬 계정이 비활성 — 목록에 올리지 않는다
+                continue
+            have.add(uid)
+            rows.append(acc)
+            a_added = True
+        if a_added:
+            # 커밋해야 한다 — 안 하면 세션 종료 시 롤백되어, 방금 응답한 id 로 보낸
+            # 친구 요청이 "사용자를 찾을 수 없습니다" 가 된다.
+            db.commit()
+    except IntegrityError:
+        # 두 창이 동시에 같은 미러를 만들었다 — 남이 이겼다. 커밋된 행으로 다시 읽는다.
+        db.rollback()
+        if not _retried:
+            return directory(db, me, q=q, only_other_hospital=only_other_hospital,
+                             limit=limit, _retried=True)
+    except Exception:  # noqa: BLE001 — A 병합 실패가 로컬 검색까지 죽이면 안 된다
+        db.rollback()
+        logger.debug("A 사용자 병합 실패 — 로컬 결과만 반환", exc_info=True)
+        # 롤백으로 미커밋 미러는 transient(id=None)로 되돌아간다 — 응답에서 뺀다
+        rows = [a for a in rows if a.id is not None]
+
     hosp = _hospital_names(db, [a.hospital_id for a in rows])
     # 이미 맺어진(또는 대기 중인) 관계를 함께 실어 준다 — 프론트가 버튼 상태를 결정한다
     rel = {r.low_id if r.high_id == me.id else r.high_id: r

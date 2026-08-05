@@ -88,13 +88,17 @@ def ensure_mirror(db: Session, *, user_id: str, name: str, role: str,
             # 미러 행 — 이름·활성만 따라간다. 역할은 관리자가 손봤을 수 있어 덮지 않는다.
             if name and acc.title != name:
                 acc.title = name
+            # 실명 표시용 — 비어 있을 때만 채운다(관리자가 손본 표시명은 존중).
+            # 없으면 협진 목록·커서 라벨·메시지 발신자가 전부 로그인 아이디로 나온다.
+            if name and not acc.display_name:
+                acc.display_name = name
             if not acc.enabled:
                 acc.enabled = True          # A 가 방금 인증했다 — 차단이 풀린 계정이다
             if a_user_idx and not acc.a_user_idx:
                 acc.a_user_idx = a_user_idx
         return acc
     acc = Account(username=user_id, password_hash="", role=role, hospital_id=hospital_id,
-                  enabled=True, title=name, a_user_idx=a_user_idx or 0)
+                  enabled=True, title=name, display_name=name, a_user_idx=a_user_idx or 0)
     db.add(acc)
     db.flush()
     return acc
@@ -136,6 +140,7 @@ def sync_accounts(db: Session, rows: list[dict], *, hospital_id: int | None = No
                 hospital_id=hospital_id,
                 enabled=active,
                 title=name,
+                display_name=name,   # 협진 목록·커서 라벨이 실명으로 보이게(ensure_mirror 동일)
                 a_user_idx=a_idx,
             )
             db.add(acc)
@@ -154,6 +159,11 @@ def sync_accounts(db: Session, rows: list[dict], *, hospital_id: int | None = No
                 if not dry_run:
                     setattr(acc, attr, val)
                 changed = True
+        # 실명 표시 백필 — 비어 있을 때만(관리자가 손본 표시명은 존중, ensure_mirror 동일 규칙)
+        if name and not acc.display_name:
+            if not dry_run:
+                acc.display_name = name
+            changed = True
         if changed:
             res.updated += 1
             res.names.append(uid)

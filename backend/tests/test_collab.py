@@ -176,6 +176,105 @@ def test_directory_still_excludes_disabled_and_system_admin(client, db, duo):
             "병원 미소속 시스템 관리자는 협진 상대가 아니다"
 
 
+def _reset_a_cache():
+    from app.services import collab_service as svc
+
+    svc._a_users_cache.update({"at": 0.0, "rows": []})
+
+
+def test_directory_merges_sv70_registered_users(client, db, duo, monkeypatch):
+    """Live 브리지가 켜져 있으면 **A(sv70) 등록 사용자**가 검색의 원천이다.
+
+    실증상: sv70 배치에서 협진 찾기 목록이 실제 A 등록·로그인 사용자와 다르고,
+    아직 우리 뷰어에 로그인한 적 없는 동료는 검색조차 안 됐다 — 로컬 accounts 만
+    보고 있었기 때문이다(로컬에는 'A 로그인을 한 번 한 사람'의 미러만 생긴다).
+    """
+    from sqlalchemy import select as _sel
+
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    a_rows = [
+        {"user_id": "Sunshin_lee9", "user_name": "이순신", "user_type": "RP",
+         "group_level": 1, "user_idx": 9101, "user_status": "A"},
+        {"user_id": "blocked_a_user", "user_name": "차단됨", "user_type": "R",
+         "group_level": 1, "user_idx": 9102, "user_status": "D"},
+        {"user_id": "a_chief_admin", "user_name": "관리자급", "user_type": "MP",
+         "group_level": 99, "user_idx": 9103, "user_status": "A"},
+    ]
+    monkeypatch.setattr(svc, "_fetch_a_users", lambda _db: list(a_rows))
+    _reset_a_cache()
+
+    got = svc.directory(db, duo["host"], q="")
+    names = {u["username"] for u in got}
+    assert "Sunshin_lee9" in names, f"A 등록 사용자가 목록에 없다 — {sorted(names)}"
+    assert "blocked_a_user" not in names, "차단(user_status=D) 사용자가 목록에 올랐다"
+    assert "a_chief_admin" in names, \
+        "A 관리자급(group_level>=98) 미러는 실사용자다 — 시스템 관리자 제외 규칙에 걸리면 안 된다"
+
+    # 실명으로 보인다(아이디가 아니라) — 커서 라벨·메시지 발신자와 같은 표시 원천
+    row = next(u for u in got if u["username"] == "Sunshin_lee9")
+    assert row["name"] == "이순신", f"실명이 아니라 {row['name']!r} 로 보인다"
+
+    # 목록에 올린 사람은 미러 행이 **커밋까지** 되어 있어야 한다 — 이 id 로 친구 요청이 성립해야 하므로
+    db.expire_all()
+    acc = db.execute(_sel(Account).where(Account.username == "Sunshin_lee9")).scalar_one()
+    assert acc.a_user_idx == 9101 and acc.password_hash == "", "미러 계약(빈 해시) 위반"
+    r = client.post("/api/collab/friends/request", headers=duo["hh"],
+                    json={"target_id": row["id"]})
+    assert r.status_code == 200, f"목록의 id 로 친구 요청이 안 된다: {r.text}"
+
+    # 검색어(아이디 소문자·실명)로도 걸러진다
+    assert any(u["username"] == "Sunshin_lee9"
+               for u in svc.directory(db, duo["host"], q="sunshin_lee9"))
+    assert any(u["username"] == "Sunshin_lee9"
+               for u in svc.directory(db, duo["host"], q="이순신"))
+
+
+def test_directory_a_merge_is_idempotent(client, db, duo, monkeypatch):
+    """같은 목록으로 두 번 검색해도 미러 행은 1개, 응답에도 1번만."""
+    from sqlalchemy import select as _sel
+
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    a_rows = [{"user_id": "dup_check_user", "user_name": "중복확인", "user_type": "RP",
+               "group_level": 1, "user_idx": 9201, "user_status": "A"}]
+    monkeypatch.setattr(svc, "_fetch_a_users", lambda _db: list(a_rows))
+    _reset_a_cache()
+    svc.directory(db, duo["host"], q="dup_check")
+    got = svc.directory(db, duo["host"], q="dup_check")
+    assert [u["username"] for u in got].count("dup_check_user") == 1
+    db.expire_all()
+    rows = db.execute(_sel(Account).where(Account.username == "dup_check_user")).scalars().all()
+    assert len(rows) == 1, "미러 행이 중복 생성됐다"
+
+
+def test_directory_survives_a_outage(client, db, duo, monkeypatch):
+    """A 가 죽어도 검색은 로컬 결과로 계속된다 — 협진이 A 가용성의 볼모가 아니다."""
+    from app.services import collab_service as svc
+
+    monkeypatch.setattr(svc, "_fetch_a_users", lambda _db: None)   # 실패/브리지 꺼짐 계약
+    _reset_a_cache()
+    got = svc.directory(db, duo["host"], q="collab_guest")
+    assert any(u["username"] == "collab_guest" for u in got), "로컬 검색까지 죽었다"
+
+
+def test_directory_serves_stale_a_list_while_down(client, db, duo, monkeypatch):
+    """A 순단 중에는 마지막 성공 목록(stale)으로 응답한다."""
+    from app.services import collab_service as svc
+
+    a_rows = [{"user_id": "stale_kept_user", "user_name": "스테일", "user_type": "RP",
+               "group_level": 1, "user_idx": 9301, "user_status": "A"}]
+    monkeypatch.setattr(svc, "_fetch_a_users", lambda _db: list(a_rows))
+    _reset_a_cache()
+    svc.directory(db, duo["host"], q="stale_kept")          # 캐시 채움
+    monkeypatch.setattr(svc, "_fetch_a_users", lambda _db: None)  # A 다운
+    svc._a_users_cache["at"] = 0.0                           # TTL 만료 강제
+    got = svc.directory(db, duo["host"], q="stale_kept")
+    assert any(u["username"] == "stale_kept_user" for u in got), "stale 목록이 버려졌다"
+
+
 # ═══════════════════ ① 친구 — 중복·양방향·차단 ═══════════════════
 def test_friend_request_dedup_and_mutual_merge(client, db, duo):
     from app.models import CollabFriend
