@@ -333,6 +333,7 @@ interface ViewerPrefs {
   reportDock: boolean;
   paletteW: number;         // 팔레트 폭 (스플리터 조절, 계정 로밍)
   dockW: number;            // 판독 도크 폭
+  collabW: number;          // 협진 패널 폭 (스플리터 조절, 계정 로밍)
   toolbar: Record<string, boolean>;  // 툴바 버튼 표시 여부 (기본 모두 표시)
   wl_presets: { key: string; label: string; q: string }[];  // W/L Presetting
   close_mode: "ask" | "save_current" | "save_all" | "discard";  // 닫기 동작 (Setting>Viewer)
@@ -346,7 +347,7 @@ interface ViewerPrefs {
 const DEFAULT_PREFS: ViewerPrefs = {
   paletteSide: "left", thumbSide: "left", thumbSize: 128,
   thumbMode: "series", hanging2d: {}, reportDock: false,  // 판독 도크 기본 숨김(Setting>뷰어공통에서 표시)
-  paletteW: 200, dockW: 340, toolbar: {}, wl_presets: WL_PRESETS,
+  paletteW: 200, dockW: 340, collabW: 280, toolbar: {}, wl_presets: WL_PRESETS,
   close_mode: "ask",
   compare: { enabled: true, multi_monitor: true, labels: true, prior_mode: "layout" },
 };
@@ -873,6 +874,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     writeToolPanelOpen(toolPanelKind, open);
   }, [toolPanelKind]);
   const [reportCollapsed, setReportCollapsed] = useState(false);  // 판독창 오른쪽 접기/펼치기
+  const [collabCollapsed, setCollabCollapsed] = useState(false);  // 협진 패널 오른쪽 접기/펼치기
   const [overlayOn, setOverlayOn] = useState(true);
   // 키이미지 마크 — 열린 검사의 key_images SOP 집합(반응형). 페인에 🔑 마크 표시, 토글 시 즉시 갱신
   const [keyMarks, setKeyMarks] = useState<Set<string>>(new Set());
@@ -3447,7 +3449,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     api.getSetting("viewer.prefs").then((r) =>
       api.putSetting("viewer.prefs", {
         ...r.value, paletteW: prefsRef.current.paletteW,
-        dockW: prefsRef.current.dockW, thumbSize: prefsRef.current.thumbSize,
+        dockW: prefsRef.current.dockW, collabW: prefsRef.current.collabW,
+        thumbSize: prefsRef.current.thumbSize,
       }, "user")).catch(() => {});
   };
 
@@ -4499,6 +4502,24 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   useEffect(() => { collabRO.current = cl.readOnly; }, [cl.readOnly]);
   useEffect(() => { collabDetachRef.current = cl.detach; }, [cl.detach]);
 
+  // 협진 패널을 띄울 조건 — 세션 중이면 항상, 아니면 사용자가 [협진] 토글을 켰을 때.
+  const collabPanelOn = !!cl.session || collabDockOpen;
+  // 팝아웃 창 배치 features — **미리** 구해 둔다. window.open 은 클릭 핸들러 안에서
+  // 동기적으로 불려야 팝업 차단을 안 당하는데, 모니터 감지(screenFeaturesList)는 비동기다.
+  // Compare 창이 cmpSlotsRef 로 쓰는 것과 같은 방식(캐시 후 동기 사용).
+  const [collabPopoutFeatures, setCollabPopoutFeatures] = useState("width=960,height=600");
+  useEffect(() => {
+    if (!collabPanelOn) return;
+    const mons = prefsRef.current.monitor?.screens ?? [];
+    if (mons.length < 2) return;          // 단일 모니터 — 기본 크기 창이면 충분하다
+    // 뷰어가 쓰지 않는 **다른 모니터**를 고른다. 같은 모니터에 띄우면 판독 화면을 가린다.
+    void screenFeaturesList(mons).then((slots) => {
+      const mine = hpMonitorIndex(window.name, mons);
+      const other = slots.find((s) => s.index !== mine) ?? slots[0];
+      if (other?.features) setCollabPopoutFeatures(other.features);
+    }).catch(() => { /* 감지 실패 — 기본 크기 창으로 연다 */ });
+  }, [collabPanelOn]);
+
   // ── 협진 세션 주석 ⇄ 뷰어 ────────────────────────────────────────────────
   // 수신: 세션 주석을 Anno 모양으로 바꿔 ref 에 둔다. renderPane 이 내 주석과 함께 그리고,
   //       AnnoShape 가 by 를 보고 그 사람 색으로 칠한다.
@@ -5386,15 +5407,41 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {/* ── 협진 패널 — 세션 중이면 참가자·제어권·화상·룸채팅, 아니면 친구/메신저 도크 ──
             도크에서 [초대]를 누르면 세션이 없을 때 자동으로 먼저 연다(사용자가 '세션 만들기'와
             '초대'를 두 단계로 나눠 생각할 이유가 없다). */}
-        {cl.session
+        {/* 폭 조절 — 왼쪽 경계를 끌면 넓어진다. 판독 도크와 같은 규약(dx 부호 반대, 더블클릭 초기화) */}
+        {collabPanelOn && !collabCollapsed && (
+          <Splitter dir="v" onEnd={persistViewerSizes}
+                    onReset={() => setPrefs((p) => ({ ...p, collabW: DEFAULT_PREFS.collabW }))}
+                    onDrag={(dx) => setPrefs((p) => ({ ...p, collabW: clampSz(p.collabW - dx, 220, 720) }))} />
+        )}
+        {/* 오른쪽으로 접기 */}
+        {collabPanelOn && !collabCollapsed && (
+          <button title={tr("협진 패널 숨기기 (오른쪽으로 접기)")} onClick={() => setCollabCollapsed(true)}
+                  style={{ width: 16, padding: 0, borderRadius: 0, alignSelf: "stretch", fontSize: 12,
+                           background: "var(--bg-elevated)", border: "none",
+                           borderLeft: "1px solid var(--border)" }}>▸</button>
+        )}
+        {collabPanelOn && !collabCollapsed && (cl.session
           ? <CollabSessionPanel session={cl.session} isHost={cl.isHost} meId={cl.meId}
+                                width={prefs.collabW} popoutFeatures={collabPopoutFeatures}
                                 onLeave={() => void cl.leaveSession()} />
-          : <CollabDock open={collabDockOpen} onClose={() => setCollabDockOpen(false)}
+          : <CollabDock open onClose={() => setCollabDockOpen(false)}
+                        width={prefs.collabW} popoutFeatures={collabPopoutFeatures}
                         inviteLabel={tr("협진 초대")}
                         onInvite={(u) => {
                           const label = `${detail.modality} ${detail.body_part || detail.patient_name} ${detail.study_date}`;
                           void cl.startSession(label).then((s) => s && cl.inviteUser(u, s.code));
-                        }} />}
+                        }} />)}
+        {/* 접힘 상태 — 우측 세로 탭으로 다시 펼치기(세션 중이면 참가자 수를 함께 보여 준다) */}
+        {collabPanelOn && collabCollapsed && (
+          <button title={tr("협진 패널 펼치기")} onClick={() => setCollabCollapsed(false)}
+                  style={{ width: 24, padding: "8px 0", borderRadius: 0, alignSelf: "stretch",
+                           writingMode: "vertical-rl", fontSize: 12, fontWeight: 700,
+                           background: cl.session ? "var(--stat-final)" : "var(--bg-elevated)",
+                           color: cl.session ? "#04210f" : undefined,
+                           border: "none", borderLeft: "1px solid var(--border)" }}>
+            ◂ {tr("협진")}{cl.session ? ` ${cl.session.participants.filter((p) => p.state === "joined").length}` : ""}
+          </button>
+        )}
         {/* 접힘 상태 — 우측 세로 탭으로 다시 펼치기 */}
         {prefs.reportDock && reportCollapsed && (
           <button title={tr("판독창 펼치기")} onClick={() => setReportCollapsed(false)}

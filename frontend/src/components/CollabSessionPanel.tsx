@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type CollabMessage, type CollabSession, type CollabUser } from "../api";
 import { collab, type CollabEvent } from "../lib/collab";
 import { colorOf, sessionRoom } from "../lib/collabState";
+import { closeAllPopouts, popoutStream, syncPopout } from "../lib/collabPopout";
 import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { showToast } from "../lib/toast";
@@ -45,9 +46,11 @@ function Section({ title, open, onToggle, children }: {
   );
 }
 
-export function VideoTile({ id, name, stream, muted, color, label }: {
+export function VideoTile({ id, name, stream, muted, color, label, popoutFeatures }: {
   id: number; name: string; stream: MediaStream | null; muted?: boolean;
   color: string; label?: string;
+  /** 다중 모니터 배치용 window.open features — 호출부가 미리 계산해 둔 것(제스처 안에서 await 금지) */
+  popoutFeatures?: string;
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
   const [, setTrackRevision] = useState(0);
@@ -55,6 +58,9 @@ export function VideoTile({ id, name, stream, muted, color, label }: {
     const el = ref.current;
     if (!el) return;
     if (el.srcObject !== stream) el.srcObject = stream;
+    // 열려 있는 팝아웃도 같은 스트림으로 따라간다 — 화면 공유를 껐다 켜면 트랙이 새로 생겨
+    // 참조가 바뀐다. 이게 없으면 팝아웃 창만 옛 스트림(검은 화면)에 붙어 있게 된다.
+    syncPopout(String(id), stream);
     if (stream) void el.play().catch(() => { /* 자동재생 차단은 무시 — 사용자 조작 후 붙는다 */ });
     const changed = () => setTrackRevision((v) => v + 1);
     const tracks = stream?.getTracks() ?? [];
@@ -90,17 +96,37 @@ export function VideoTile({ id, name, stream, muted, color, label }: {
                     whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
         {name}{label ? ` · ${label}` : ""}
       </div>
+      {/* 별도 창으로 — 공유 화면은 이 4:3 축소판에서 글자를 읽을 수 없다.
+          다중 모니터가 기본인 판독 환경에서 "공유 화면은 옆 모니터에 크게" 가 실제 사용 방식이다.
+          ⚠ onClick 안에서 **동기적으로** 열어야 한다(팝업 차단기는 제스처 밖 window.open 을 막는다). */}
+      {hasVideo && (
+        <button title={tr("별도 창으로 크게 보기 (다른 모니터로 옮길 수 있습니다)")}
+                onClick={() => {
+                  if (!popoutStream(String(id), stream, name, popoutFeatures)) {
+                    showToast(tr("팝업이 차단되었습니다 — 이 사이트의 팝업을 허용해 주세요"), "error");
+                  }
+                }}
+                style={{ position: "absolute", right: 2, top: 2, fontSize: 10, lineHeight: 1,
+                         padding: "2px 5px", background: "rgba(0,0,0,.55)", color: "#fff",
+                         border: "1px solid rgba(255,255,255,.35)", borderRadius: 3,
+                         cursor: "pointer" }}>⧉</button>
+      )}
       {/* id 는 색과 짝지어 원격 커서와 대응시키는 값이라 화면에는 굳이 노출하지 않는다 */}
       <span hidden>{id}</span>
     </div>
   );
 }
 
-export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
+export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250,
+                                    popoutFeatures }: {
   /** 세션 상태의 소유자는 호출부(뷰어)다 — WS 이벤트로 갱신된 것을 내려받아 그리기만 한다 */
   session: CollabSession;
   onLeave: () => void;
   isHost: boolean;
+  /** 패널 폭 — 호출부가 Splitter 로 조절해 내려 준다(계정 로밍 저장) */
+  width?: number;
+  /** 팝아웃 창 배치 features — 다중 모니터. 제스처 안에서 await 할 수 없어 미리 받는다 */
+  popoutFeatures?: string;
   meId: number;
 }) {
   useLang();
@@ -138,7 +164,12 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
   // WebRTC — 세션 참가자 명단이 바뀔 때마다 연결을 맞춘다
   useEffect(() => {
     mesh.start(meId);
-    return () => mesh.stop();
+    return () => {
+      mesh.stop();
+      // 세션이 끝나면 팝아웃 창도 함께 닫는다 — 남겨 두면 환자 화면이 떠 있는 창이
+      // 주인 없이 방치된다(공용 판독 PC 에서 그건 PHI 노출이다).
+      closeAllPopouts();
+    };
   }, [meId]);
   useEffect(() => mesh.onChange(setPeers), []);
   useEffect(() => mesh.onMediaChange((s) => {
@@ -192,7 +223,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
   };
 
   return (
-    <div style={{ width: 250, display: "flex", flexDirection: "column", height: "100%",
+    <div style={{ width, flexShrink: 0, display: "flex", flexDirection: "column", height: "100%",
                   background: "var(--bg-panel)", borderLeft: "1px solid var(--border)" }}>
       {/* ── 헤더: 역할 · 종료 ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px",
@@ -299,11 +330,12 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId }: {
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
             <VideoTile id={meId} name={tr("나")} stream={mesh.localStream()} muted
-                       color={colorOf(meId)} label={screen ? tr("화면 공유")
+                       color={colorOf(meId)} popoutFeatures={popoutFeatures}
+                       label={screen ? tr("화면 공유")
                          : iControl ? tr("조작 중") : undefined} />
             {peers.map((p) => (
               <VideoTile key={p.id} id={p.id} name={nameOf(p.id)} stream={p.stream}
-                         color={colorOf(p.id)}
+                         color={colorOf(p.id)} popoutFeatures={popoutFeatures}
                          label={p.state !== "connected" ? tr("연결 중…")
                            : controller?.id === p.id ? tr("조작 중") : undefined} />
             ))}

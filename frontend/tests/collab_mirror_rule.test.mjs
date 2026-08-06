@@ -175,3 +175,117 @@ test("removeAnno — 그 id 만 빠지고 나머지는 그대로", () => {
   assert.equal(list.length, 3, "입력 배열이 변형됐다");
   assert.deepEqual(removeAnno(list, "없는id").map((a) => a.id), ["s1", "s2", "s3"]);
 });
+
+/* ── 영상 팝아웃 — 창 재사용·스트림 추적·정리 규칙 (lib/collabPopout.ts) ──
+   창을 여는 것은 브라우저 일이지만, **어떤 창을 언제 재사용/정리하는가** 는 순수 규칙이라
+   여기서 고정한다. 이게 틀리면 (a) 같은 사람 창이 여러 개 뜨거나 (b) 환자 화면이 떠 있는
+   창이 세션 종료 후에도 남는다(공용 판독 PC 에서는 PHI 노출이다). */
+const { closeAllPopouts, closePopout, isPopoutOpen, popoutStream, syncPopout } =
+  await import("../src/lib/collabPopout.ts");
+
+/** window.open 을 대신하는 가짜 창 — document.write/getElementById 만 흉내 낸다 */
+function fakeWindowFactory(opened) {
+  return (_url, name, features) => {
+    const video = { srcObject: null, play: () => Promise.resolve() };
+    const cap = { textContent: "" };
+    const win = {
+      name, features, closed: false,
+      focused: 0,
+      document: {
+        open() {}, close() {}, write() {},
+        getElementById: (id) => (id === "v" ? video : cap),
+      },
+      focus() { this.focused++; },
+      close() { this.closed = true; },
+      addEventListener() {},
+    };
+    opened.push(win);
+    return win;
+  };
+}
+
+function withFakeWindow(fn) {
+  const opened = [];
+  const g = globalThis;
+  const prev = g.window;
+  g.window = { open: fakeWindowFactory(opened), addEventListener() {} };
+  try { fn(opened); } finally { g.window = prev; closeAllPopouts(); }
+}
+
+test("popoutStream — 스트림이 없으면 창을 열지 않는다", () => {
+  withFakeWindow((opened) => {
+    assert.equal(popoutStream("7", null, "이순신"), false);
+    assert.equal(opened.length, 0, "빈 창이 떴다");
+  });
+});
+
+test("popoutStream — 같은 대상을 다시 누르면 새 창이 아니라 기존 창을 앞으로", () => {
+  withFakeWindow((opened) => {
+    const s1 = { id: "s1" };
+    assert.equal(popoutStream("7", s1, "이순신"), true);
+    assert.equal(opened.length, 1);
+    assert.equal(popoutStream("7", s1, "이순신"), true);
+    assert.equal(opened.length, 1, "같은 사람 창이 두 개 떴다");
+    assert.equal(opened[0].focused, 1, "기존 창을 앞으로 가져오지 않았다");
+  });
+});
+
+test("popoutStream — 사람이 다르면 창도 따로", () => {
+  withFakeWindow((opened) => {
+    popoutStream("7", { id: "a" }, "A");
+    popoutStream("9", { id: "b" }, "B");
+    assert.equal(opened.length, 2);
+    assert.ok(opened[0].name !== opened[1].name, "창 이름이 같아 서로 덮어쓴다");
+  });
+});
+
+test("popoutStream — 화면 공유를 껐다 켜면 새 트랙으로 갈아 끼운다", () => {
+  withFakeWindow((opened) => {
+    const before = { id: "before" }, after = { id: "after" };
+    popoutStream("7", before, "이순신");
+    const video = opened[0].document.getElementById("v");
+    assert.equal(video.srcObject, before);
+    popoutStream("7", after, "이순신");          // 재클릭
+    assert.equal(video.srcObject, after, "옛 스트림(검은 화면)에 그대로 붙어 있다");
+  });
+});
+
+test("syncPopout — 열린 창만 따라가고, 스트림이 끊기면 창을 닫는다", () => {
+  withFakeWindow((opened) => {
+    const s = { id: "s" };
+    popoutStream("7", s, "이순신");
+    const next = { id: "next" };
+    syncPopout("7", next);
+    assert.equal(opened[0].document.getElementById("v").srcObject, next);
+    syncPopout("7", null);                       // 상대가 공유 중지
+    assert.equal(opened[0].closed, true, "검은 창이 남았다");
+    assert.equal(isPopoutOpen("7"), false);
+  });
+});
+
+test("syncPopout — 열린 적 없는 대상은 창을 만들지 않는다(자동 팝업 금지)", () => {
+  withFakeWindow((opened) => {
+    syncPopout("42", { id: "x" });
+    assert.equal(opened.length, 0, "사용자가 누르지도 않았는데 창이 떴다");
+  });
+});
+
+test("closeAllPopouts — 세션 종료 시 전부 닫힌다(PHI 가 뜬 창을 남기지 않는다)", () => {
+  withFakeWindow((opened) => {
+    popoutStream("1", { id: "a" }, "A");
+    popoutStream("2", { id: "b" }, "B");
+    closeAllPopouts();
+    assert.deepEqual(opened.map((w) => w.closed), [true, true]);
+    assert.equal(isPopoutOpen("1"), false);
+    assert.equal(isPopoutOpen("2"), false);
+  });
+});
+
+test("closePopout — 사용자가 창을 직접 닫았어도 상태가 정리된다", () => {
+  withFakeWindow((opened) => {
+    popoutStream("7", { id: "a" }, "A");
+    opened[0].closed = true;                     // 사용자가 ✕ 로 닫음
+    assert.equal(isPopoutOpen("7"), false, "닫힌 창을 열린 것으로 본다");
+    closePopout("7");                            // 이미 닫힌 창에도 안전해야 한다
+  });
+});

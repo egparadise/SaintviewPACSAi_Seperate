@@ -75,12 +75,17 @@ function UserRow({ user, online, right }: {
   );
 }
 
-export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
+export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
+                            popoutFeatures }: {
   open: boolean;
   onClose: () => void;
   /** 협진 초대 — 뷰어에서 열었을 때만 준다(워크리스트에서는 초대할 검사가 없다) */
   onInvite?: (user: CollabUser) => void;
   inviteLabel?: string;
+  /** 패널 폭 — 호출부가 Splitter 로 조절해 내려 준다(계정 로밍 저장) */
+  width?: number;
+  /** 팝아웃 창 배치 features — 다중 모니터. 제스처 안에서 await 할 수 없어 미리 받는다 */
+  popoutFeatures?: string;
 }) {
   useLang();
   const [tab, setTab] = useState<Tab>("friends");
@@ -223,7 +228,7 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
   if (!open) return null;
 
   return (
-    <div style={{ width: 260, display: "flex", flexDirection: "column", height: "100%",
+    <div style={{ width, flexShrink: 0, display: "flex", flexDirection: "column", height: "100%",
                   background: "var(--bg-panel)", borderLeft: "1px solid var(--border)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px",
                     borderBottom: "1px solid var(--border)" }}>
@@ -392,10 +397,11 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel }: {
                 {(mic || cam || screen || peers.some((p) => (p.stream?.getTracks().length ?? 0) > 0)) && (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginTop: 6 }}>
                     <VideoTile id={meId} name={tr("나")} stream={mesh.localStream()} muted
-                               color={colorOf(meId)} label={screen ? tr("화면 공유") : undefined} />
+                               color={colorOf(meId)} popoutFeatures={popoutFeatures}
+                               label={screen ? tr("화면 공유") : undefined} />
                     {peers.map((p) => (
                       <VideoTile key={p.id} id={p.id} name={peer.name} stream={p.stream}
-                                 color={colorOf(p.id)}
+                                 color={colorOf(p.id)} popoutFeatures={popoutFeatures}
                                  label={p.state === "connected" ? undefined : tr("연결 중…")} />
                     ))}
                   </div>

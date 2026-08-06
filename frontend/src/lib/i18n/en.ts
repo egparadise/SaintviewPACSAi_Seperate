@@ -2630,5 +2630,10 @@ const d: Record<string, string> = {
   "행은 그 표에 행이 없는 나머지 모달리티에 적용됩니다 —": "row applies to the remaining modalities that table lacks —",
   "적용 순서(고정): Common 표에 그 모달리티 행이 있으면 Common 이 우선하고, 없을 때 이 표가 적용됩니다.": "Order (fixed): if the Common table has a row for the modality, Common wins; this table applies only when it doesn't.",
   ")는 아래": ") follows the",
+  "별도 창으로 크게 보기 (다른 모니터로 옮길 수 있습니다)": "Open in a separate window (movable to another monitor)",
+  "팝업이 차단되었습니다 — 이 사이트의 팝업을 허용해 주세요": "Pop-up blocked — please allow pop-ups for this site",
+  "협진 패널 숨기기 (오른쪽으로 접기)": "Hide co-reading panel (collapse to the right)",
+  "협진 패널 펼치기": "Show co-reading panel",
+  "드래그하면 폭이 바뀝니다 (더블클릭 = 기본 폭)": "Drag to resize (double-click = default width)",
 };
 export default d;

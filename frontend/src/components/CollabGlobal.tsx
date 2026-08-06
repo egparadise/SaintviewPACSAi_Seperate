@@ -16,6 +16,11 @@ import { showToast } from "../lib/toast";
 
 type Invite = { code: string; from: CollabUser; title: string; study_uid: string };
 
+/** 워크리스트 도크 폭 — 이 창(오리진) 로컬. 뷰어의 viewer.prefs.collabW 와는 별개다
+ *  (워크리스트는 뷰어 prefs 로밍 대상이 아니라 서버 저장 경로가 없다). */
+const DOCK_W_KEY = "sv_collab_dock_w";
+const DOCK_W_DEFAULT = 300;
+
 /** 뷰어 창 URL — Worklist.openV2 와 같은 계약(?viewer=2d&study=<id>).
  *  창 이름도 같은 규칙을 써서 이미 열려 있는 뷰어 창이 있으면 그 창이 재사용된다. */
 function openViewerFor(studyId: number) {
@@ -28,6 +33,10 @@ function openViewerFor(studyId: number) {
 export function CollabGlobal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [invite, setInvite] = useState<Invite | null>(null);
   const [pendingCode, setPendingCode] = useState<string | null>(null);
+  const [width, setWidth] = useState(() => {
+    const v = Number(localStorage.getItem(DOCK_W_KEY));
+    return Number.isFinite(v) && v >= 220 && v <= 720 ? v : DOCK_W_DEFAULT;
+  });
 
   useEffect(() => collab.on((e: CollabEvent) => {
     if (e.t === "invite") {
@@ -58,9 +67,31 @@ export function CollabGlobal({ open, onClose }: { open: boolean; onClose: () => 
           setInvite(null);
         }} />
       {open && (
+        // 워크리스트 쪽 도크도 폭을 조절한다. 다만 여기는 고정 오버레이라 뷰어처럼
+        // flex 형제 Splitter 를 쓸 수 없어, 왼쪽 경계에 세로 손잡이를 직접 얹는다.
+        // 폭은 이 창에만 남긴다(localStorage) — 워크리스트 창은 뷰어 prefs 로밍 대상이 아니다.
         <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, zIndex: 500,
-                      boxShadow: "-6px 0 20px rgba(0,0,0,.4)" }}>
-          <CollabDock open onClose={onClose} />
+                      display: "flex", boxShadow: "-6px 0 20px rgba(0,0,0,.4)" }}>
+          <div title={tr("드래그하면 폭이 바뀝니다 (더블클릭 = 기본 폭)")}
+               onDoubleClick={() => setWidth(DOCK_W_DEFAULT)}
+               onPointerDown={(e) => {
+                 e.preventDefault();
+                 let last = e.clientX;
+                 const move = (ev: PointerEvent) => {
+                   setWidth((w) => Math.min(720, Math.max(220, w - (ev.clientX - last))));
+                   last = ev.clientX;
+                 };
+                 const up = () => {
+                   window.removeEventListener("pointermove", move);
+                   window.removeEventListener("pointerup", up);
+                   setWidth((w) => { localStorage.setItem(DOCK_W_KEY, String(w)); return w; });
+                 };
+                 window.addEventListener("pointermove", move);
+                 window.addEventListener("pointerup", up);
+               }}
+               style={{ width: 8, cursor: "col-resize", background: "var(--bg-elevated)",
+                        borderRight: "1px solid var(--border)", flexShrink: 0 }} />
+          <CollabDock open onClose={onClose} width={width} />
         </div>
       )}
     </>
