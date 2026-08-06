@@ -1641,6 +1641,80 @@ do_nginx() {
     # 조용히 성공한 척 하지 않는다. 여기서 부분 적용임을 분명히 남긴다.
     warn "부분 적용(gzip 만) — brotli 는 비활성 상태입니다"
   fi
+
+  # 3) 협진 WebSocket 업그레이드 블록 — server 블록에 주입한다(드롭인으로는 불가능).
+  ensure_collab_ws
+}
+
+# ── 협진 WebSocket location 주입 ────────────────────────────────────────────
+# 왜 필요한가(실사고, sv70 2026-08-06): 기존 `location /api/` 는 keep-alive 를 위해
+# `proxy_set_header Connection "";` 를 쓰는데, 그 헤더가 WebSocket 업그레이드를 죽인다.
+# 결과: REST 는 전부 200 인데 WS 핸드셰이크만 404 — 협진 화면은 뜨는데 메시지 전송·
+# 프레즌스·미러가 전부 침묵한다("Message not sent — connection lost").
+# 개발(vite ws:true)에서는 멀쩡해서 이 누락은 **운영에서만** 드러난다.
+#
+# location 은 server 블록 안에만 올 수 있어 http 드롭인(patch_nginx.sh)으로는 못 고친다.
+# 그래서 여기서만 예외적으로 server 블록을 편집하되, 이 스크립트의 규약대로
+# 백업 → 주입 → nginx -t → 실패 시 원복 을 지킨다. 이미 있으면 아무것도 안 한다(멱등).
+ensure_collab_ws() {
+  say "협진 WebSocket 경로(/api/collab/ws) 점검"
+  # nginx -T = 실제 로드되는 전체 설정. 파일을 직접 grep 하면 include 안 된 사본에 속는다.
+  FULL="$("$NGINX" -T 2>/dev/null || true)"
+  if [ -z "$FULL" ]; then warn "nginx -T 실패 — WS 블록 점검을 건너뜁니다"; return 0; fi
+  if printf '%s' "$FULL" | grep -q 'location /api/collab/ws'; then
+    ok "WS 블록 이미 있음"; return 0
+  fi
+  if ! printf '%s' "$FULL" | grep -q 'location /api/'; then
+    warn "location /api/ 를 가진 server 블록이 없습니다 — 프록시 구성이 예상과 다릅니다"
+    return 0
+  fi
+  # `location /api/` 가 실제로 들어 있는 설정 파일을 찾는다(-T 덤프의 파일 마커 사용)
+  WSFILE="$(printf '%s' "$FULL" | awk '
+    /^# configuration file /{f=$4; sub(/:$/,"",f)}
+    /location \/api\/[ {]/{print f; exit}')"
+  if [ -z "$WSFILE" ] || [ ! -f "$WSFILE" ]; then
+    warn "location /api/ 선언 파일을 특정하지 못했습니다 — 수동 반영 필요(deploy/nginx-viewer.conf 참조)"
+    return 0
+  fi
+  # 그 블록의 proxy_pass 를 그대로 따른다(포트가 기본과 다른 배치 대응). 못 찾으면 8010.
+  WSPASS="$(awk '/location \/api\/[ {]/{f=1} f&&/proxy_pass/{print $2; exit}' "$WSFILE" | tr -d ';')"
+  [ -n "$WSPASS" ] || WSPASS="http://127.0.0.1:${PORT:-8010}"
+  BK="$WSFILE.bak-collabws-$(date +%Y%m%d%H%M%S)"
+  cp -p "$WSFILE" "$BK" || { warn "백업 실패 — 주입을 중단합니다"; return 0; }
+  # 첫 번째 `location /api/` 바로 앞에 삽입 — 더 구체적인 접두사가 이기므로 순서는 사실
+  # 무관하지만, 사람이 읽을 때 의도가 보이는 자리(기존 블록 위)에 둔다.
+  awk -v pass="$WSPASS" '
+    !done && /location \/api\/[ {]/ {
+      print "    # 협진 WebSocket — update_server.sh 가 주입(멱등). 아래 /api/ 의";
+      print "    # Connection \"\" 가 업그레이드를 깨므로 별도 블록이 반드시 필요하다.";
+      print "    location /api/collab/ws {";
+      print "        proxy_pass " pass ";";
+      print "        proxy_http_version 1.1;";
+      print "        proxy_set_header Upgrade $http_upgrade;";
+      print "        proxy_set_header Connection \"upgrade\";";
+      print "        proxy_set_header Host $host;";
+      print "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;";
+      print "        proxy_set_header X-Forwarded-Proto $scheme;";
+      print "        proxy_read_timeout 3600s;";
+      print "        proxy_send_timeout 3600s;";
+      print "        proxy_buffering off;";
+      print "    }";
+      done=1
+    }
+    {print}
+  ' "$BK" > "$WSFILE" || { cp -p "$BK" "$WSFILE"; warn "주입 실패 — 원복했습니다"; return 0; }
+  if "$NGINX" -t >/dev/null 2>&1; then
+    ok "WS 블록 주입 ($WSFILE, proxy_pass $WSPASS) — nginx -t 통과"
+    if "$NGINX" -s reload >/dev/null 2>&1 || systemctl reload nginx >/dev/null 2>&1; then
+      ok "nginx reload 완료"
+    else
+      warn "reload 실패 — 수동 실행:  nginx -s reload"
+    fi
+  else
+    cp -p "$BK" "$WSFILE"
+    warn "nginx -t 실패 — 원복했습니다. 수동 반영 필요(deploy/nginx-viewer.conf 의 WS 블록 참조)"
+    "$NGINX" -t 2>&1 | tail -2 || true
+  fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2118,6 +2192,27 @@ do_check() {
     401) vok "원격 /api/export/manifest = 401 (신규 백엔드)" ;;
     404) vng "원격 /api/export/manifest = 404 → 백엔드 구버전" ;;
     *)   vng "원격 /api/export/manifest = $ec" ;;
+  esac
+
+  # ── 협진 WebSocket 경로 — REST 가 멀쩡해도 WS 만 따로 죽는 사고가 실제로 났다(sv70) ──
+  # 판정 2단: ① REST /api/collab/presence 가 401 이면 백엔드에 협진이 있다.
+  #           ② WS 핸드셰이크가 404 면 nginx 가 Upgrade 를 전달하지 않는 것이다
+  #              (백엔드는 평범한 GET 을 받아 WS 전용 라우트 미매치 → 404).
+  cc="$(hcode -k --max-time 20 "$U/api/collab/presence")"
+  ws="$(hcode -k --max-time 20 \
+        -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+        -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==' \
+        -H 'Sec-WebSocket-Protocol: sv.bearer, probe' "$U/api/collab/ws")"
+  case "$cc" in
+    401) vok "협진 REST = 401 (백엔드에 협진 있음)" ;;
+    404) vng "협진 REST = 404 → 백엔드가 협진 이전 버전입니다" ;;
+    *)   warn "협진 REST = $cc (401 기대)" ;;
+  esac
+  case "$ws" in
+    101|403) vok "협진 WS 핸드셰이크 = $ws (nginx 업그레이드 전달 정상)" ;;
+    404) vng "협진 WS = 404 → nginx 가 Upgrade 를 전달하지 않습니다 (--apply 가 자동 주입, 또는 deploy/nginx-viewer.conf 의 /api/collab/ws 블록 수동 반영)" ;;
+    502|504) vng "협진 WS = $ws → 백엔드가 죽었거나 프록시 대상이 다릅니다" ;;
+    *)   warn "협진 WS = ${ws:-000} (101/403 기대)" ;;
   esac
 }
 
