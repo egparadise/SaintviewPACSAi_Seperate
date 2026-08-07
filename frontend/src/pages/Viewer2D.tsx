@@ -1629,12 +1629,18 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     const vis = PANE_IDS.slice(0, count ?? LAYOUTS[layout].count);
     setPanes((prev) => {
       const next = { ...prev };
+      const il = hang2dImgRef.current ?? undefined;
+      // ★ Image 타일이 걸린 페인은 **1번 이미지부터** — 가운데 장 시작은 스크롤 시리즈(CT/MR)의
+      //   편의인데, 타일(MG 2×2 등)에서는 3/4·4/4 만 첫 줄에 그려지고 아랫줄이 비는 실제 사고
+      //   (sv70 3번 화면: 다른 검사를 열었다 돌아오면 RMLO/LMLO 만 위에 뜸)가 됐다.
+      const tiled = !!il && (il.r > 1 || il.c > 1);
       for (const pid2 of PANE_IDS) {
         const i = vis.indexOf(pid2);
         const s = i >= 0 ? list[i] : undefined;
         next[pid2] = s
-          ? { ...initPane(uid), series: s, index: Math.floor(s.instances.length / 2),
-              il: hang2dImgRef.current ?? undefined }
+          ? { ...initPane(uid), series: s,
+              index: tiled || mgSeriesLooksMammo(s, "") ? 0 : Math.floor(s.instances.length / 2),
+              il }
           : initPane(uid);
       }
       return next;
@@ -3496,7 +3502,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
              (p.studyUid || detail.study_uid) === detail.study_uid ? detail.modality : "");
   /** 흉벽 방향: 탐지 결과 우선 → 검사명 laterality → 타일 열 위치 */
   const mgBoxFor = (p: PaneState, inst: InstanceNode, t: number, cols: number): MgBox | null => {
-    if (mgCfg.detect === "auto") {
+    // ★ 좌우 비율 무시(기본 켬) — 탐지와 무관하게 항상 같은 고정 비율로 가운데 제거.
+    //   auto 탐지가 영상마다 실패/지연해 배치가 들쭉날쭉하던 것(sv70 2번 화면)의 해법.
+    if (!mgCfg.center_cut && mgCfg.detect === "auto") {
       const pr = mgBoxes[inst.sop_uid];
       if (!pr) return null;                     // 아직 탐지 전 — 원본으로 두고 완료되면 반영
       if (pr.kind === "none") return null;      // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다

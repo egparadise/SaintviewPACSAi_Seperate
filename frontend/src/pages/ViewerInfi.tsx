@@ -1881,7 +1881,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   /** 탐지 결과가 있으면 그걸로, 없으면(canvas 오염·고정비율 모드) 검사명 laterality → 열 위치로 흉벽 추정 */
   /** 이 타일에 쓸 조직 상자 — 탐지 결과 우선, 못 읽었을 때만(설정 시) 고정 비율 */
   const mgBoxAt = (p: Pane, inst: InstanceNode, t: number): MgBox | null => {
-    if (mgCfg.detect === "auto") {
+    // ★ 좌우 비율 무시(기본 켬) — Viewer2D 와 같은 규칙(탐지 무관, 고정 비율 가운데 제거)
+    if (!mgCfg.center_cut && mgCfg.detect === "auto") {
       const pr = mgBoxes[inst.sop_uid];
       if (!pr) return null;                       // 아직 탐지 전 — 원본으로 두고 완료되면 반영
       if (pr.kind === "none") return null;        // 프레임이 이미 꽉 참 — 자르면 조직이 잘린다

@@ -2635,5 +2635,8 @@ const d: Record<string, string> = {
   "협진 패널 숨기기 (오른쪽으로 접기)": "Ẩn bảng hội chẩn (thu về bên phải)",
   "협진 패널 펼치기": "Mở bảng hội chẩn",
   "드래그하면 폭이 바뀝니다 (더블클릭 = 기본 폭)": "Kéo để đổi chiều rộng (nhấp đúp = mặc định)",
+  "좌우 비율 무시": "Bỏ qua tỉ lệ trái/phải",
+  "조직 탐지와 무관하게 항상 같은 고정 비율로 가운데 여백 제거 (기본 켬)": "Luôn cắt khoảng trống ở giữa theo cùng một tỉ lệ cố định, bất kể kết quả dò mô (bật mặc định)",
+  "자동 탐지가 영상마다 실패·지연하면 배치가 들쭉날쭉해집니다 — 켜 두면 항상 같은 모양으로 나옵니다. 해제하면 아래 흉벽 판정(자동 탐지) 규칙을 씁니다.": "Khi dò tự động thất bại hoặc chậm trên một số ảnh, bố cục sẽ không đều — giữ bật để luôn hiển thị giống nhau. Bỏ chọn để dùng quy tắc xác định thành ngực (dò tự động) bên dưới.",
 };
 export default d;

@@ -2347,6 +2347,17 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       {tr("⚠ T-View·SaintView 는 타일로 나뉜 페인에")} <b>{tr("계측·주석·오버레이를 표시하지 않습니다")}</b>{tr(". MG 에서 계측을 쓰신다면 이 체크를 켜서 Series Layout 으로 두세요(뷰 하나당 페인 하나 — W/L·확대·계측이 뷰마다 따로 동작합니다). I-View 는 타일에도 계측이 나오므로 영향이 없습니다.")}
                     </div>
                   </Row>
+                  <Row label={tr("좌우 비율 무시")}>
+                    <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="checkbox" checked={mgCfg.center_cut}
+                             onChange={(e) => setMgCfg({ ...mgCfg, center_cut: e.target.checked })} />
+                      {tr("조직 탐지와 무관하게 항상 같은 고정 비율로 가운데 여백 제거 (기본 켬)")}
+                    </label>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                      {tr("자동 탐지가 영상마다 실패·지연하면 배치가 들쭉날쭉해집니다 — 켜 두면 항상 같은 모양으로 나옵니다. 해제하면 아래 흉벽 판정(자동 탐지) 규칙을 씁니다.")}
+                    </span>
+                  </Row>
+                  {!mgCfg.center_cut && (
                   <Row label={tr("흉벽 판정")}>
                     <select value={mgCfg.detect}
                             onChange={(e) => setMgCfg({ ...mgCfg, detect: e.target.value === "ratio" ? "ratio" : "auto" })}>
@@ -2354,7 +2365,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       <option value="ratio">{tr("고정 비율 — 안쪽에서 정해진 비율만큼 잘라냄")}</option>
                     </select>
                   </Row>
-                  {mgCfg.detect === "auto" && (
+                  )}
+                  {!mgCfg.center_cut && mgCfg.detect === "auto" && (
                     <Row label={tr("배경 임계값")}>
                       <input type="number" min={1} max={80} step={1} value={mgCfg.thr}
                              onChange={(e) => setMgCfg({ ...mgCfg, thr: Number(e.target.value) || 12 })}
@@ -2364,6 +2376,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       </span>
                     </Row>
                   )}
+                  {!mgCfg.center_cut && (
                   <Row label={tr("탐지 불가 시")}>
                     <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                       <input type="checkbox" checked={mgCfg.blind_ratio}
@@ -2374,6 +2387,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       {tr("꺼 두면(권장) 근거가 없을 때")} <b>{tr("원본을 그대로")}</b> {tr("표시합니다 — 추정 크롭은 조직을 가릴 수 있습니다.")}
                     </span>
                   </Row>
+                  )}
                   <Row label={tr("고정 비율")}>
                     <input type="number" min={0} max={60} step={1} value={mgCfg.ratio}
                            onChange={(e) => setMgCfg({ ...mgCfg, ratio: Number(e.target.value) || 0 })}

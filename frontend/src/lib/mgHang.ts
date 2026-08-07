@@ -32,6 +32,14 @@ export interface MgCfg {
   // MONOCHROME1(공기가 흰색)처럼 반전된 영상도 그대로 처리된다.
   thr: number;
   detect: "auto" | "ratio";   // auto=픽셀에서 조직 경계 탐지, ratio=고정 비율(아래)
+  /** ★ 좌우 비율 무시(2026-08-07 사용자 확정 — **기본 켬**): 탐지 결과와 무관하게 언제나
+   *  고정 비율(ratio)로 가운데(흉벽 쪽) 여백을 **좌우 같은 비율**로 잘라낸다.
+   *  실제 사고(sv70): auto 탐지가 일부 영상에서 실패/지연 → 보정 없이 원본 fit 으로 남아
+   *  화면마다 배치가 들쭉날쭉했다("자주 2번 이미지처럼 나와"). 켜 두면 탐지 성공 여부와
+   *  무관하게 항상 같은 모양(1번 화면)이 나온다.
+   *  ⚠ 기존 계정 저장본에는 이 키가 없다 → readMgCfg 가 **true 로 기본** 처리해
+   *    설정을 다시 저장하지 않아도 새 기본이 적용된다(계정 데이터 잔재 면역 — Obsidian 22 §2). */
+  center_cut: boolean;
   // ⚠ 탐지 불가(타 출처 canvas 오염 등)일 때 고정 비율로 **추정 크롭**을 할지.
   //    기본 off — 근거 없이 맘모를 자르는 것은 조직을 숨길 수 있어 원본 유지가 안전하다.
   blind_ratio: boolean;
@@ -117,6 +125,7 @@ export function mgOrderIndexes(instances: readonly MgViewSource[]): number[] {
 
 export const DEFAULT_MG_CFG: MgCfg = {
   on: true, layout: "2x2", margin: 2, thr: 12, detect: "auto", blind_ratio: false, ratio: 38,
+  center_cut: true,          // 기본 켬 — 좌우 같은 고정 비율로 항상 가운데 제거(사용자 확정)
   series_layout: false,      // 기본은 **항상 uncheck** — Image 분할로 건다
 };
 
@@ -134,6 +143,8 @@ export function readMgCfg(v: unknown): MgCfg {
     detect: o.detect === "ratio" ? "ratio" : "auto",
     blind_ratio: typeof o.blind_ratio === "boolean" ? o.blind_ratio : DEFAULT_MG_CFG.blind_ratio,
     ratio: num(o.ratio, DEFAULT_MG_CFG.ratio, 0, 60),
+    // 구 저장본에는 이 키가 없다 → **true**(좌우 비율 무시가 새 기본 — 설정 재저장 없이도 적용)
+    center_cut: typeof o.center_cut === "boolean" ? o.center_cut : DEFAULT_MG_CFG.center_cut,
     // 구 저장본에는 이 키가 없다 → false(Image 분할). 기본이 uncheck 라는 요구와 일치한다.
     series_layout: typeof o.series_layout === "boolean" ? o.series_layout : DEFAULT_MG_CFG.series_layout,
   };

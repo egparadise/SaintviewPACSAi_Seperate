@@ -2635,5 +2635,8 @@ const d: Record<string, string> = {
   "협진 패널 숨기기 (오른쪽으로 접기)": "Masquer le panneau de co-lecture (replier à droite)",
   "협진 패널 펼치기": "Afficher le panneau de co-lecture",
   "드래그하면 폭이 바뀝니다 (더블클릭 = 기본 폭)": "Faites glisser pour redimensionner (double-clic = largeur par défaut)",
+  "좌우 비율 무시": "Ignorer le ratio G/D",
+  "조직 탐지와 무관하게 항상 같은 고정 비율로 가운데 여백 제거 (기본 켬)": "Toujours rogner l'espace central au même ratio fixe, indépendamment de la détection du tissu (activé par défaut)",
+  "자동 탐지가 영상마다 실패·지연하면 배치가 들쭉날쭉해집니다 — 켜 두면 항상 같은 모양으로 나옵니다. 해제하면 아래 흉벽 판정(자동 탐지) 규칙을 씁니다.": "Si la détection automatique échoue ou tarde sur certaines images, la disposition devient irrégulière — laissez activé pour un rendu constant. Décochez pour utiliser les règles de détection de la paroi thoracique ci-dessous.",
 };
 export default d;

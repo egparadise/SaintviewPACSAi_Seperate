@@ -11,9 +11,11 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
-  MG_HEADROOM, MG_MAX_V_ZOOM, MG_MAX_ZOOM, isMg, mgFit, mgInstView, mgOrderIndexes, mgPaneIs,
-  mgRatioBox, mgZoomOf,
+  DEFAULT_MG_CFG, MG_HEADROOM, MG_MAX_V_ZOOM, MG_MAX_ZOOM, isMg, mgFit, mgInstView,
+  mgOrderIndexes, mgPaneIs, mgRatioBox, mgZoomOf, readMgCfg,
 } from "../src/lib/mgHang.ts";
 
 const CFG = { margin: 0 };
@@ -177,4 +179,33 @@ test("mgInstView — 태그 정규화(소문자·공백·MLO 변형)", () => {
   assert.deepEqual(mgInstView(V("R", "XCCL")), { lat: "R", view: "" });
   assert.deepEqual(mgInstView(V("B", "CC")).lat, "", "R/L 이 아닌 laterality 는 버린다");
   assert.deepEqual(mgInstView(null), { lat: "", view: "" });
+});
+
+/* ── 좌우 비율 무시(center_cut) — 2026-08-07 사용자 확정 ──────────────────────
+ * 실제 사고(sv70): auto 탐지가 영상마다 실패·지연 → 보정 없이 원본 fit 으로 남아
+ * MG 배치가 열 때마다 들쭉날쭉("자주 2번 이미지처럼"). 해법: 탐지와 무관하게 항상
+ * 같은 고정 비율로 가운데 제거 — 그리고 이것이 **기본**이다.
+ */
+test("★ center_cut 기본 켬 — 구 저장본(키 없음)도 설정 재저장 없이 새 기본 적용", () => {
+  assert.equal(DEFAULT_MG_CFG.center_cut, true, "기본이 꺼지면 사용자 확정 위반");
+  assert.equal(readMgCfg({}).center_cut, true, "구 저장본(키 결손) → true 승격이어야 한다");
+  assert.equal(readMgCfg({ detect: "auto", blind_ratio: false }).center_cut, true,
+    "auto 탐지를 저장해 둔 기존 계정도 기본은 비율 무시");
+  assert.equal(readMgCfg({ center_cut: false }).center_cut, false, "명시적 해제만 존중");
+});
+
+test("center_cut 켬 → 뷰어 게이트가 탐지 분기를 건너뛴다 (소스 계약 — 두 뷰어 동일)", () => {
+  for (const f of ["Viewer2D.tsx", "ViewerInfi.tsx"]) {
+    const src = readFileSync(join(import.meta.dirname, "..", "src", "pages", f), "utf8");
+    assert.ok(src.includes('!mgCfg.center_cut && mgCfg.detect === "auto"'),
+      `${f}: center_cut 가 탐지 분기를 게이트하지 않는다 — 들쭉날쭉 배치 재발`);
+  }
+});
+
+test("★ 타일 페인은 1번 이미지부터 — 가운데 장 시작이 MG 재진입 화면을 비웠다", () => {
+  // hangAll 이 index 를 '가운데 장'으로 시작하면 MG 2×2 타일에서 3/4·4/4 만 첫 줄에
+  // 그려지고 아랫줄이 빈다(sv70 3번 화면). 타일(il>1)·맘모 시리즈는 0 에서 시작한다.
+  const src = readFileSync(join(import.meta.dirname, "..", "src", "pages", "Viewer2D.tsx"), "utf8");
+  assert.ok(/index: tiled \|\| mgSeriesLooksMammo\(s, ""\) \? 0 : Math\.floor/.test(src),
+    "hangAll 의 타일/맘모 index 0 규칙이 사라졌다");
 });
