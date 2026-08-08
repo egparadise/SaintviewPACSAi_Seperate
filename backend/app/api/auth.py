@@ -270,6 +270,11 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
         a_user_idx = udata.get("user_idx")
         a_name = str(udata.get("user_name") or udata.get("user_id") or body.user_id)
         group_level = udata.get("group_level")
+        # 의사 자격(판독 저장 게이트·서명 자동 채움) — A pacs_doctor 유래.
+        # doctor_id=의사 면허 번호 · doctor_major=전문의 번호(분류 신호)
+        doctor_idx = udata.get("doctor_idx")
+        doctor_id = str(udata.get("doctor_id") or "").strip()
+        doctor_major = str(udata.get("doctor_major") or "").strip()
     finally:
         client.close()
 
@@ -284,10 +289,14 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
     # 협진은 Account.id 기반이다 — A 신원도 미러 행이 있어야 쓸 수 있다. A 가 방금 검증한
     # 신원이므로 여기서 보장한다(멱등). 실패해도 로그인은 막지 않는다.
     try:
-        from app.services.account_mirror import ensure_mirror
+        from app.services.account_mirror import apply_doctor_profile, ensure_mirror
 
-        ensure_mirror(db, user_id=body.user_id, name=a_name, role=role,
-                      a_user_idx=int(a_user_idx or 0))
+        acc = ensure_mirror(db, user_id=body.user_id, name=a_name, role=role,
+                            a_user_idx=int(a_user_idx or 0))
+        # ★ 판독의 등록 자동 채움(사용자 확정) — A 에 의사로 등록된 계정이면
+        #   확정 서명용 이름·면허번호를 로그인 시점에 채운다(미러 계정만, 매 로그인 갱신).
+        if doctor_idx:
+            apply_doctor_profile(acc, name=a_name, license_no=doctor_id)
     except Exception:  # noqa: BLE001 — 미러는 부가 기능, 로그인 가용성이 우선
         db.rollback()
 
@@ -308,10 +317,16 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
         "base_url": base_url, "token": a.get("token"), "refresh": a.get("refresh_token"),
         "a_user_id": body.user_id, "a_user_idx": a_user_idx, "a_user_name": a_name,
         "group_level": group_level, "verify_ssl": bool(cfg.get("verify_ssl", True)), "sid": sid,
+        # 판독 저장 자격 게이트(webpacs_live.report_permission_error)가 이 세 값을 본다
+        "doctor_idx": doctor_idx, "doctor_id": doctor_id, "doctor_major": doctor_major,
     })
     set_pixel_cookie(response, sid)   # <img> 픽셀 GET 용 — deps.pixel_user 참조
     return {"token": token, "username": body.user_id, "role": role,
-            "a_user_name": a_name, "a_user_idx": a_user_idx}
+            "a_user_name": a_name, "a_user_idx": a_user_idx,
+            # 프론트 안내용 — radiologist=판독 저장 자격(의사 등록 + 전문의 번호)
+            "doctor": {"registered": bool(doctor_idx), "license_no": doctor_id,
+                       "major_no": doctor_major,
+                       "radiologist": bool(doctor_idx) and bool(doctor_major)}}
 
 
 class ProfileBody(BaseModel):

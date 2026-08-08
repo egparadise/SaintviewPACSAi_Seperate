@@ -98,9 +98,16 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
 
     # 등록 A 계정 — 서비스 계정(webpacs) + per-user 판독의 2명(user_idx 로 구분)
     accounts = {
-        user_id: {"password": password, "user_idx": 1, "user_name": "Mock User", "group_level": 99},
-        "dr_kim": {"password": "kim1234", "user_idx": 11, "user_name": "김판독", "group_level": 50},
-        "dr_lee": {"password": "lee1234", "user_idx": 12, "user_name": "이판독", "group_level": 50},
+        # 실제 A 계약: 판독하는 계정은 pacs_doctor 등록(doctor_idx) + 전문의 번호(doctor_major)가
+        # 있다 — B 의 판독 저장 자격 게이트(report_permission_error)가 이 세 값을 본다.
+        user_id: {"password": password, "user_idx": 1, "user_name": "Mock User", "group_level": 99,
+                  "doctor_idx": 1, "doctor_id": "10001", "doctor_major": "90001"},
+        "dr_kim": {"password": "kim1234", "user_idx": 11, "user_name": "김판독", "group_level": 50,
+                   "doctor_idx": 11, "doctor_id": "10011", "doctor_major": "90011"},
+        "dr_lee": {"password": "lee1234", "user_idx": 12, "user_name": "이판독", "group_level": 50,
+                   "doctor_idx": 12, "doctor_id": "10012", "doctor_major": "90012"},
+        # 전문의 미분류 계정 — 게이트 차단 케이스 검증용(판독 저장이 409 여야 한다)
+        "nurse_choi": {"password": "choi1234", "user_idx": 13, "user_name": "최간호", "group_level": 30},
     }
 
     def _auth(authorization: str | None) -> dict | None:
@@ -125,7 +132,10 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
         return {
             "user_data": {"user_idx": acc["user_idx"], "user_id": uid,
                           "user_name": acc["user_name"], "group_idx": 1,
-                          "group_level": acc["group_level"]},
+                          "group_level": acc["group_level"],
+                          "doctor_idx": acc.get("doctor_idx"),
+                          "doctor_id": acc.get("doctor_id"),
+                          "doctor_major": acc.get("doctor_major")},
             "token": tok, "refresh_token": refresh,
             "message": "user login successful", "status": 200,
         }

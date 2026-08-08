@@ -1155,6 +1155,25 @@ def live_reports(db: Session, vid: int, user: dict | None = None) -> dict:
     return {"items": [_report_out(vid, remote)]}
 
 
+def report_permission_error(sess: dict | None) -> str | None:
+    """판독 저장 자격(2026-08-07 사용자 확정) — None=허용, 문자열=차단 사유.
+
+    ① **A 계정 세션 필수** — 서비스 계정 폴백으로 저장하면 판독의가 서비스 계정 명의로
+       귀속된다(의료 기록 무결성 사고). A 자격 없는 로그인은 판독 저장을 아예 막는다.
+    ② A 에서 **의사로 등록**(pacs_doctor 행 = doctor_idx)되어 있어야 한다.
+    ③ **전문의 번호(doctor_major)** 까지 분류되어 있어야 한다 — "영상의학과 전문의로
+       분류된 사람만 판독 저장" 요구의 A 데이터상 신호가 이 필드다.
+    순수 함수로 분리한 이유: 게이트를 뷰어·테스트가 같은 진리표로 검증한다."""
+    if not sess or not sess.get("token"):
+        return "판독 저장 권한이 없습니다 — 원격 PACS 계정(의사)으로 로그인하세요"
+    if not sess.get("doctor_idx"):
+        return "판독 저장 권한이 없습니다 — A 계정이 의사로 등록되어 있지 않습니다"
+    if not str(sess.get("doctor_major") or "").strip():
+        return ("판독 저장 권한이 없습니다 — A 계정에 전문의 번호가 등록되어 있지 않습니다 "
+                "(원격 PACS 관리자에게 등록을 요청하세요)")
+    return None
+
+
 def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = False,
                      cvr: bool = False, user: dict | None = None) -> dict:
     """판독 저장(R/RR)/승인(A/RA) — A 로 되돌려 쓰기.
@@ -1166,6 +1185,14 @@ def live_save_report(db: Session, vid: int, sr_json: dict, *, approve: bool = Fa
     알림톡), study/refer 코멘트 왕복. 안전 규칙(적대검증, fail-closed) 유지.
     """
     from app.services.webpacs_bridge import WebPacsConflict
+
+    # ★ 자격 게이트가 **가장 먼저** — 자격 없는 저장은 A 호출·선점 전에 끊는다(fail-closed).
+    from app.services import webpacs_session
+
+    sess = webpacs_session.get(str((user or {}).get("sid") or ""))
+    perm_err = report_permission_error(sess)
+    if perm_err:
+        raise WebPacsConflict(perm_err)
 
     client = live_client(db, user)
     idx = to_remote_idx(vid)

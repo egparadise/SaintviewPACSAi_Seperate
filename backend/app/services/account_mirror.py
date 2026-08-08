@@ -63,6 +63,28 @@ def is_active(row: dict) -> bool:
     return str(row.get("user_status") or "A").upper() != "D"
 
 
+def apply_doctor_profile(account, *, name: str, license_no: str) -> bool:
+    """A 의사 정보 → 판독의 등록(설정>판독>기본 설정: 이름·면허번호) **자동 채움**.
+
+    2026-08-07 사용자 확정: 영상의학과 의사가 자기 A 계정(ID/PW)으로 로그인하면
+    확정 서명에 쓰는 이름·면허번호가 자동으로 채워져 있어야 한다.
+
+    ⚠ **미러 계정만** 건드린다(a_user_idx 있는 행) — 손으로 만든 로컬 계정의 프로필을
+      A 값으로 덮으면 관리자 표시명이 바뀌는 사고가 된다(ensure_mirror 의 보호 계약과 동일).
+    A 가 방금 인증해 준 값이므로 매 로그인 갱신이 맞다(A 가 진실의 원천).
+    반환: 실제로 값을 채웠는가."""
+    if getattr(account, "a_user_idx", None) is None:
+        return False
+    changed = False
+    if name:
+        account.display_name = str(name)[:64]
+        changed = True
+    if license_no:
+        account.license_no = str(license_no)[:32]
+        changed = True
+    return changed
+
+
 def ensure_mirror(db: Session, *, user_id: str, name: str, role: str,
                   a_user_idx: int = 0, hospital_id: int | None = None) -> "Account":
     """A 로그인 **성공 직후** 그 계정 하나의 미러 행을 보장한다(멱등).

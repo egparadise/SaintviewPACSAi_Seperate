@@ -200,7 +200,18 @@ def test_live_prefetch_and_decode_cache(client, auth_headers, live_ready, pixel_
     assert r.status_code == 200 and r.headers["content-type"].startswith("image/")
 
 
+
+def _a_doctor_headers(client, user="dr_kim", pw="kim1234"):
+    """A 의사 계정 로그인 토큰 — 판독 저장 자격 게이트(전문의 분류) 통과용.
+    2026-08-07 계약: B 로컬 토큰(서비스 계정 폴백)으로는 판독 저장이 409 로 막힌다."""
+    r = client.post("/api/auth/webpacs-login", json={"user_id": user, "user_passwd": pw})
+    assert r.status_code == 200, r.text
+    return {"Authorization": f"Bearer {r.json()['token']}"}
+
+
 def test_live_report_roundtrip_and_finalize(client, auth_headers, live_ready):
+    doc_tok = _a_doctor_headers(client)
+
     # 빈 초안(합성) — A 에 리포트 없음
     r = client.get(f"/api/webpacs/live/studies/{VID2}/reports", headers=auth_headers)
     assert r.status_code == 200
@@ -210,7 +221,7 @@ def test_live_report_roundtrip_and_finalize(client, auth_headers, live_ready):
     # 저장(R) — dock 계약: PUT /reports/{id} {sr_json}
     sr = {"findings": [{"organ": "판독", "observation": "폐야 청명", "severity": "normal"}],
           "impression": [{"rank": 1, "statement": "정상 소견", "confidence": "high"}]}
-    r = client.put(f"/api/webpacs/live/reports/{VID2}", headers=auth_headers,
+    r = client.put(f"/api/webpacs/live/reports/{VID2}", headers=doc_tok,
                    json={"sr_json": sr})
     assert r.status_code == 200, r.text
     saved = r.json()
@@ -225,7 +236,7 @@ def test_live_report_roundtrip_and_finalize(client, auth_headers, live_ready):
     assert row["impression_preview"] == "정상 소견"
 
     # 승인(A)
-    r = client.post(f"/api/webpacs/live/reports/{VID2}/finalize", headers=auth_headers)
+    r = client.post(f"/api/webpacs/live/reports/{VID2}/finalize", headers=doc_tok)
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "finalized"
     r = client.get(f"/api/webpacs/live/studies/{VID2}/state", headers=auth_headers)
@@ -277,9 +288,10 @@ def test_live_heartbeat_presence(client, auth_headers, live_ready):
 
 def test_live_empty_approve_blocked(client, auth_headers, live_ready):
     """빈 판독 승인 차단(적대검증 #3) — 합성 빈 초안이 A 에 승인으로 나가지 않게."""
+    doc_tok = _a_doctor_headers(client)
     # study 1 은 이미 앞 테스트에서 판독 저장됨 — 새로운 미판독 검사가 없으므로
     # finalize-with 에 빈 sr 을 명시적으로 넘겨 검증
-    r = client.post(f"/api/webpacs/live/reports/{VID2}/finalize-with", headers=auth_headers,
+    r = client.post(f"/api/webpacs/live/reports/{VID2}/finalize-with", headers=doc_tok,
                     json={"sr_json": {"findings": [], "impression": [{"statement": ""}]}})
     assert r.status_code == 409
     assert "빈 판독" in r.json()["detail"]
@@ -346,10 +358,11 @@ def test_live_report_attribution(client, live_ready):
 
 def test_live_cvr_and_comments(client, auth_headers, live_ready):
     """요구6: CVR 조건부 전송(critical) · 코멘트 왕복. VID3 는 앞 테스트에서 R 저장됨(수정 저장)."""
+    doc_tok = _a_doctor_headers(client)
     sr = {"findings": [{"organ": "폐", "observation": "종괴 의심", "severity": "critical"}],
           "impression": [{"statement": "악성 의심 — CVR"}],
           "clinical_info": "흉통 3일", "refer_comment": "의뢰: 흉부외과"}
-    r = client.put(f"/api/webpacs/live/reports/{VID3}", headers=auth_headers, json={"sr_json": sr})
+    r = client.put(f"/api/webpacs/live/reports/{VID3}", headers=doc_tok, json={"sr_json": sr})
     assert r.status_code == 200, r.text
     # 재조회 시 코멘트가 SR 에 실려 돌아옴(왕복)
     rep = client.get(f"/api/webpacs/live/studies/{VID3}/reports", headers=auth_headers).json()["items"][0]
@@ -682,3 +695,34 @@ def test_live_sr_matches_frontend_contract(client, auth_headers, live_ready):
     # 구 형식(단수 recommendation/{text})도 계속 받아준다 — 이미 저장된 판독 호환
     old_reading, _ = _reading_from_sr({"recommendation": [{"text": "구형식 권고"}]})
     assert "구형식 권고" in old_reading
+
+
+def test_live_report_blocked_for_non_radiologist(client, live_ready):
+    """★ 2026-08-07 계약 — 전문의 미분류 A 계정(doctor_major 없음)은 판독 저장이 막힌다."""
+    r = client.post("/api/auth/webpacs-login",
+                    json={"user_id": "nurse_choi", "user_passwd": "choi1234"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["doctor"]["radiologist"] is False, "로그인 응답이 자격 없음을 알려야 한다"
+    tok = {"Authorization": f"Bearer {body['token']}"}
+    sr = {"findings": [{"organ": "판독", "observation": "정상"}],
+          "impression": [{"statement": "무자격 저장 시도"}]}
+    r = client.put(f"/api/webpacs/live/reports/{VID3}", headers=tok, json={"sr_json": sr})
+    assert r.status_code == 409, r.text
+    assert "판독 저장 권한" in r.json()["detail"]
+
+
+def test_live_doctor_login_autofills_signature(client, live_ready, db):
+    """★ 전문의 A 로그인 → 판독의 등록(이름·면허번호)이 미러 계정에 자동 저장(확정 서명용)."""
+    r = client.post("/api/auth/webpacs-login",
+                    json={"user_id": "dr_kim", "user_passwd": "kim1234"})
+    assert r.status_code == 200, r.text
+    assert r.json()["doctor"] == {"registered": True, "license_no": "10011",
+                                  "major_no": "90011", "radiologist": True}
+    from sqlalchemy import select
+
+    from app.models import Account
+
+    acc = db.execute(select(Account).where(Account.username == "dr_kim")).scalar_one()
+    assert acc.display_name == "김판독"
+    assert acc.license_no == "10011", "면허번호가 자동으로 채워져야 한다(그림의 판독의 등록)"
