@@ -280,7 +280,7 @@ def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None)
     per-user 세션이 있으면 그 사용자 A 계정으로 조회(A 권한 스코프 그대로 적용)."""
     client = live_client(db, user)
     q: dict[str, str] = {
-        "limit": str(min(int(params.get("limit") or 100), 300)),
+        "limit": str(min(int(params.get("limit") or 1000), 1000)),   # 2026-08-10 — 1000건
         "offset": str(int(params.get("offset") or 0)),
         "order_json": json.dumps([{"key": "study_idx", "order": "desc"}]),
     }

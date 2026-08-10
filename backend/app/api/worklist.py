@@ -41,7 +41,7 @@ def worklist(
     emergency: bool = False,
     key: bool = Query(False, description="키이미지 등록 검사만 (F-16)"),
     hospital_id: int = Query(0, description="선택한 병원으로 스코프(0=자동)"),
-    limit: int = Query(100, le=500),
+    limit: int = Query(1000, le=1000),   # 2026-08-10 사용자 확정 — 워크리스트 1000건 표시
     offset: int = 0,
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),

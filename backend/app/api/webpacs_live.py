@@ -68,7 +68,7 @@ def _wrap(fn, *args, **kw):
 def worklist(
     q: str = "", pid: str = "", pname: str = "", modality: str = "",
     date_from: str = "", date_to: str = "",
-    limit: int = Query(100, le=300), offset: int = 0,
+    limit: int = Query(1000, le=1000), offset: int = 0,   # 2026-08-10 — 1000건(A 는 상한 없음)
     db: Session = Depends(get_db), user: dict = Depends(current_user),
 ):
     return _wrap(lambda: live.live_worklist(db, {
