@@ -446,6 +446,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [fsPickerOpen, setFsPickerOpen] = useState(false);
   // 상용구 관리 (DB 테이블)
   const [phrases, setPhrases] = useState<PhraseRow[]>([]);
+  const [svRows, setSvRows] = useState<PhraseRow[]>([]);   // SV70(원 서버) — Live, 읽기 전용
   const [phraseModal, setPhraseModal] = useState<PhraseRow | "new" | null>(null);
   // UBPACS-Z: 워크리스트 페이지 탭 + 검색 폴더 트리 (워크리스트 화면과 동일 데이터)
   const [wlTabs, setWlTabs] = useState<WorklistTab[]>([]);
@@ -626,6 +627,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       setHpRules(doc.rules);
       setHpMods(doc.modalities);
     }).catch(() => {});
+    api.livePhraseRows().then(setSvRows).catch(() => {});   // SV70 단축키·템플릿(하나처럼)
     api.getSetting("report.prefs").then((r) => {
       const v = r.value as { ai_panel?: boolean; auto_apply?: boolean } & Record<string, unknown>;
       if (v.ai_panel !== undefined) setRptAiPanel(v.ai_panel);
@@ -1992,11 +1994,11 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 )}
 
                 {rdTab === "shortcut" && (
-                  <ReadingItemEditor kind="phrase" items={phrases}
+                  <ReadingItemEditor kind="phrase" items={phrases} liveItems={svRows}
                                      reload={() => api.phrases().then((r) => setPhrases(r.items))} />
                 )}
                 {rdTab === "template" && (
-                  <ReadingItemEditor kind="template" items={phrases}
+                  <ReadingItemEditor kind="template" items={phrases} liveItems={svRows}
                                      reload={() => api.phrases().then((r) => setPhrases(r.items))} />
                 )}
               </>
@@ -3367,12 +3369,15 @@ function KeyCaptureInput({ value, onChange }: { value: string; onChange: (v: str
 }
 
 /* ── 판독 단축키/템플릿 편집기 (레퍼런스: 목록 | 추가 폼 — 모달리티·코드·이름·판독·결론) ── */
-function ReadingItemEditor({ kind, items, reload }: {
+function ReadingItemEditor({ kind, items, reload, liveItems }: {
   kind: "phrase" | "template";
   items: PhraseRow[];
   reload: () => void;
+  /** SV70(원 서버) 계정 항목 — Live 읽기 전용(A DB 에 추가되면 자동 반영). */
+  liveItems?: PhraseRow[];
 }) {
   const list = items.filter((p) => p.kind === kind);
+  const liveList = (liveItems ?? []).filter((p) => p.kind === kind);
   const label = kind === "phrase" ? "단축키" : "템플릿";
   const [sel, setSel] = useState<PhraseRow | null>(null);
   const empty = { name: "", modality: "", shortcut: "", reading_text: "", text: "" };
@@ -3426,6 +3431,28 @@ function ReadingItemEditor({ kind, items, reload }: {
             <div style={{ padding: 16, fontSize: 12, color: "var(--text-secondary)", textAlign: "center" }}>
               {tr("등록된")} {tr(label)}{tr("가 없습니다.")}
             </div>
+          )}
+          {/* SV70(원 서버) — Live 자동 연동(2026-08-10 사용자 확정). 클릭=폼으로 불러오기,
+              저장하면 내 계정 사본이 된다(원본은 SV70 이 관리 — 추가·수정 자동 반영). */}
+          {liveList.length > 0 && (
+            <>
+              <div style={{ padding: "4px 10px", fontSize: 11, fontWeight: 700,
+                            color: "var(--ai,#a78bfa)", background: "var(--bg-canvas)" }}>
+                SV70 {tr("(원 서버 — 자동 연동)")}
+              </div>
+              {liveList.map((p) => (
+                <div key={p.id} onClick={() => { setSel(null); setF({ name: p.name, modality: p.modality,
+                       shortcut: p.shortcut, reading_text: p.reading_text, text: p.text }); }}
+                     title={tr("클릭하면 내용을 불러옵니다 — 저장하면 내 계정 사본이 되고, 원본은 SV70에서 관리됩니다.")}
+                     style={{ padding: "6px 10px", fontSize: 12, cursor: "pointer",
+                              borderBottom: "1px solid #24282d", display: "flex", gap: 6, alignItems: "center" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>[{p.modality || tr("공통")}]</span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
+                  {p.shortcut && <span style={{ color: "var(--accent)" }}>{p.shortcut}</span>}
+                  <span style={{ fontSize: 10, color: "var(--ai,#a78bfa)", fontWeight: 700 }}>SV70</span>
+                </div>
+              ))}
+            </>
           )}
         </div>
       </div>

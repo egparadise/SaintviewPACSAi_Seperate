@@ -70,6 +70,12 @@ def my_pending(db: Session = Depends(get_db), user: dict = Depends(current_user)
     return _wrap(lambda: live.live_my_pending(db, user))
 
 
+@router.get("/phrases")
+def phrases(db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    """SV70 계정별 단축 상용구·판독 템플릿 — Live(복사 없음). A 세션 없으면 빈 목록."""
+    return _wrap(lambda: live.live_phrases(db, user))
+
+
 @router.get("/worklist")
 def worklist(
     q: str = "", pid: str = "", pname: str = "", modality: str = "",

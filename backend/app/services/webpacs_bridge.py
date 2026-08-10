@@ -297,6 +297,27 @@ class WebPacsClient:
         body = self._json(f"/api/study/{study_idx}")
         return body.get("study_data") or {}
 
+    def report_shortcuts(self) -> list[dict]:
+        """계정별 단축키·상용구 — `GET /api/shortcuts/`(A pacs_shortcuts, per-user 토큰 스코프).
+
+        A(SV70)가 원천이다 — 복사하지 않는다(Live). shortcut_type: workList/viewer/report/template.
+        A 응답: {message, status, data:[행…]}.
+        """
+        body = self._json("/api/shortcuts/")
+        data = body.get("data") if isinstance(body, dict) else body
+        return data or []
+
+    def report_templates(self) -> list[dict]:
+        """계정별 판독문 템플릿 — `GET /api/study/report/template`(A pacs_report_template).
+
+        A 응답: {…, data:{template_data:[행…]}}.
+        """
+        body = self._json("/api/study/report/template")
+        data = body.get("data") if isinstance(body, dict) else {}
+        if isinstance(data, dict):
+            return data.get("template_data") or []
+        return data or []
+
     def series_viewer(self, study_idx: int) -> list[dict]:
         """시리즈 + SOP 열거 — 각 항목에 series_instance_uid·images[].sop_instance_uid."""
         body = self._json(f"/api/study/{study_idx}/series/viewer")

@@ -296,6 +296,45 @@ def live_my_pending(db: Session, user: dict | None = None) -> dict:
     return {"pending": int(n)}
 
 
+def live_phrases(db: Session, user: dict | None = None) -> dict:
+    """SV70 계정별 단축 상용구·판독 템플릿 — 복사 없이 실시간 조회(2026-08-10 사용자 확정).
+
+    "이 기능 또한 SV70 DB 에 대한 Live 모드와 같이 하나처럼 동작되어야 해" — 그래서
+    가져오기(1회 복사)가 아니라 **읽기 경유**다: A DB 에 추가·수정되면 다음 조회에 그대로
+    나타난다. per-user A 토큰이라 A 가 그 계정 것만 준다. A 세션 없으면 빈 목록(부가 기능 —
+    판독창을 막지 않는다)."""
+    if not has_user_a_session(user):
+        return {"live": False, "shortcuts": [], "templates": []}
+    client = live_client(db, user)
+    try:
+        raw_sc = client.report_shortcuts()
+        raw_tp = client.report_templates()
+    except Exception:  # noqa: BLE001 — 부가 기능, 실패해도 판독창은 산다
+        return {"live": False, "shortcuts": [], "templates": []}
+    return {
+        "live": True,
+        "shortcuts": [{
+            "idx": int(s.get("shortcut_idx") or 0),
+            "type": s.get("shortcut_type") or "workList",
+            # A 의 'default' 는 전 장비 의미 — 우리 표기(공통='')로 정규화
+            "modality": "" if (s.get("shortcut_modality") or "default") == "default"
+                        else str(s.get("shortcut_modality")),
+            "key": s.get("shortcut_key") or "",
+            "name": s.get("shortcut_name") or "",
+            "text1": s.get("shortcut_text_filed1") or "",
+            "text2": s.get("shortcut_text_filed2") or "",
+            "description": s.get("shortcut_description") or "",
+        } for s in raw_sc],
+        "templates": [{
+            "idx": int(t.get("temp_idx") or 0),
+            "modality": t.get("temp_modality") or "",
+            "title": t.get("temp_title") or "",
+            "reading": t.get("temp_reading") or "",
+            "conclusion": t.get("temp_conclusion") or "",
+        } for t in raw_tp],
+    }
+
+
 def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None) -> dict:
     """A 워크리스트 실시간 조회 → StudyRow 배열(vid). 최신순.
     per-user 세션이 있으면 그 사용자 A 계정으로 조회(A 권한 스코프 그대로 적용)."""

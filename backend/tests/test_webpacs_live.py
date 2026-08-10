@@ -747,3 +747,41 @@ def test_my_pending_uses_a_no_reading_count(client, live_ready):
     r = client.get("/api/webpacs/live/my-pending", headers=tok)
     assert r.status_code == 200, r.text
     assert isinstance(r.json()["pending"], int), "A 세션인데 집계가 없다"
+
+
+# ── SV70 계정별 단축키·판독 템플릿 Live 연동(2026-08-10 사용자 확정 — "하나처럼 동작") ──
+# 가져오기(1회 복사)가 아니라 읽기 경유: A DB 에 추가되면 다음 조회에 그대로 나타난다.
+
+
+def test_live_phrases_doctor_gets_own_rows_normalized(client, live_ready):
+    """dr_kim(user_idx=11) — 자기 단축키 2건(report+viewer)·템플릿 1건, 필드 정규화."""
+    tok = _a_doctor_headers(client)
+    r = client.get("/api/webpacs/live/phrases", headers=tok)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["live"] is True
+    assert {s["name"] for s in j["shortcuts"]} == {"정상 소견", "뷰어 기능키"}
+    rep = next(s for s in j["shortcuts"] if s["name"] == "정상 소견")
+    assert rep["type"] == "report" and rep["modality"] == "CT" and rep["key"] == "ns"
+    assert rep["text1"] == "No significant abnormality." and rep["text2"] == "Normal study."
+    fn = next(s for s in j["shortcuts"] if s["name"] == "뷰어 기능키")
+    assert fn["modality"] == "", "A 의 'default' 모달리티는 공통('')으로 정규화"
+    assert [t["title"] for t in j["templates"]] == ["Abdomen CT 기본"]
+    t0 = j["templates"][0]
+    assert t0["reading"] == "Liver: unremarkable." and t0["conclusion"] == "No acute abnormality."
+
+
+def test_live_phrases_scope_is_per_account(client, live_ready):
+    """dr_lee(user_idx=12) — 남(dr_kim)의 단축키·템플릿이 보이면 안 된다."""
+    tok = _a_doctor_headers(client, user="dr_lee", pw="lee1234")
+    j = client.get("/api/webpacs/live/phrases", headers=tok).json()
+    assert j["live"] is True
+    assert [s["name"] for s in j["shortcuts"]] == ["Brain 정상"]
+    assert j["templates"] == []
+
+
+def test_live_phrases_local_account_gets_empty_not_error(client, auth_headers):
+    """A 세션이 없는 로컬 계정 — 오류가 아니라 live:false + 빈 목록(부가 기능)."""
+    r = client.get("/api/webpacs/live/phrases", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"live": False, "shortcuts": [], "templates": []}

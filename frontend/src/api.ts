@@ -704,6 +704,32 @@ export const api = {
           by_modality: boolean; by_body_part: boolean }>(
       (isLiveId(studyId) ? `${LIVE}/studies/${studyId}/compare-candidates`
                          : `/api/studies/${studyId}/compare-candidates`) + `?${query}`),
+  /** SV70 계정별 단축 상용구·판독 템플릿 — Live(복사 없음). A 세션 없으면 live:false */
+  livePhrases: () =>
+    req<{ live: boolean;
+          shortcuts: { idx: number; type: string; modality: string; key: string; name: string;
+                       text1: string; text2: string; description: string }[];
+          templates: { idx: number; modality: string; title: string; reading: string;
+                       conclusion: string }[] }>(`${LIVE}/phrases`),
+  /** SV70 항목 → PhraseRow(음수 id — 로컬과 충돌 방지) 변환 — 판독창·설정이 **같은 변환 한 곳**.
+   *  단축키는 report/template 타입만 문구로 쓴다(workList/viewer 는 기능키 — 문구 아님). */
+  livePhraseRows: async (): Promise<PhraseRow[]> => {
+    const r = await api.livePhrases().catch(() => null);
+    if (!r?.live) return [];
+    return [
+      ...r.shortcuts.filter((s) => s.type === "report" || s.type === "template").map((s) => ({
+        id: -(s.idx || 0), name: s.name, text: s.text2, reading_text: s.text1,
+        modality: s.modality, body_part: s.description, category: "SV70", shortcut: s.key,
+        kind: (s.type === "template" ? "template" : "phrase") as PhraseRow["kind"],
+        created_by: "SV70",
+      })),
+      ...r.templates.map((t) => ({
+        id: -(100000 + (t.idx || 0)), name: t.title, text: t.conclusion, reading_text: t.reading,
+        modality: t.modality, body_part: "", category: "SV70", shortcut: "",
+        kind: "template" as PhraseRow["kind"], created_by: "SV70",
+      })),
+    ];
+  },
   /** 배정의 판독 대기 배지 — A 세션 없으면 pending:null(숨김) */
   liveMyPending: () => req<{ pending: number | null }>(`${LIVE}/my-pending`),
   seriesTree: (studyId: number) =>

@@ -426,6 +426,38 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
         state["tokens"] = {}   # 전 계정 토큰 무효화 → 다음 요청은 401→재로그인/refresh
         return {"ok": True}
 
+    # 계정별 단축키(pacs_shortcuts)·판독 템플릿(pacs_report_template) — B 가 Live 로 읽는다
+    shortcut_rows = [
+        {"shortcut_idx": 1, "user_idx": 11, "shortcut_type": "report", "shortcut_modality": "CT",
+         "shortcut_description": "", "shortcut_key": "ns", "shortcut_name": "정상 소견",
+         "shortcut_text_filed1": "No significant abnormality.", "shortcut_text_filed2": "Normal study."},
+        {"shortcut_idx": 2, "user_idx": 11, "shortcut_type": "viewer", "shortcut_modality": "default",
+         "shortcut_description": "", "shortcut_key": "F2", "shortcut_name": "뷰어 기능키",
+         "shortcut_text_filed1": "", "shortcut_text_filed2": ""},
+        {"shortcut_idx": 3, "user_idx": 12, "shortcut_type": "report", "shortcut_modality": "MR",
+         "shortcut_description": "", "shortcut_key": "br", "shortcut_name": "Brain 정상",
+         "shortcut_text_filed1": "Unremarkable brain MRI.", "shortcut_text_filed2": ""},
+    ]
+    template_rows = [
+        {"temp_idx": 7, "user_idx": 11, "temp_modality": "CT", "temp_title": "Abdomen CT 기본",
+         "temp_reading": "Liver: unremarkable.", "temp_conclusion": "No acute abnormality."},
+    ]
+
+    @app.get("/api/shortcuts/")
+    def get_shortcuts(shortcut_type: str | None = None,
+                      authorization: str | None = Header(default=None)):
+        acc = _auth(authorization)
+        rows = [s for s in shortcut_rows if s["user_idx"] == acc["user_idx"]]
+        if shortcut_type:
+            rows = [s for s in rows if s["shortcut_type"] == shortcut_type]
+        return {"message": "ok", "status": 200, "data": rows}
+
+    @app.get("/api/study/report/template")
+    def get_report_templates(authorization: str | None = Header(default=None)):
+        acc = _auth(authorization)
+        rows = [t for t in template_rows if t["user_idx"] == acc["user_idx"]]
+        return {"message": "ok", "status": 200, "data": {"template_data": rows}}
+
     @app.get("/__test__/state")
     def test_state():
         return {"logins": state["logins"],

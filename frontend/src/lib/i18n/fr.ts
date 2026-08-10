@@ -2779,5 +2779,7 @@ const d: Record<string, string> = {
   "이미 앱으로 설치되어 있습니다": "Déjà installé comme application",
   "설치를 취소했습니다": "Installation annulée",
   "브라우저 메뉴(⋮) > 저장 및 공유 > '페이지를 앱으로 설치'를 이용하세요": "Utilisez le menu du navigateur (⋮) > Enregistrer et partager > « Installer la page comme application »",
+  "(원 서버 — 자동 연동)": "(serveur d'origine — synchronisé)",
+  "클릭하면 내용을 불러옵니다 — 저장하면 내 계정 사본이 되고, 원본은 SV70에서 관리됩니다.": "Cliquez pour charger le contenu — l'enregistrement crée une copie dans votre compte ; l'original est géré dans SV70.",
 };
 export default d;

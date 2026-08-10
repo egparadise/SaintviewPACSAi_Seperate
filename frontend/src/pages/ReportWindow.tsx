@@ -82,6 +82,18 @@ export function ReportWindow() {
   const dictation = useDictation(insertDictation);
   const [histView, setHistView] = useState<Report | null>(null);
   const [phrases, setPhrases] = useState<PhraseRow[]>([]);
+  // SV70(원 서버) 계정별 단축 상용구·템플릿 — Live 병합(2026-08-10 사용자 확정: 하나처럼).
+  // A DB 에 추가되면 다음 갱신(60초)에 그대로 나타난다 — 가져오기(복사)가 아니다.
+  const [svPhrases, setSvPhrases] = useState<PhraseRow[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const tick = () => api.livePhraseRows()
+      .then((rows) => { if (alive) setSvPhrases(rows); })
+      .catch(() => { if (alive) setSvPhrases([]); });
+    tick();
+    const t = window.setInterval(tick, 60_000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, []);
   const [rdOpts, setRdOpts] = useState<Record<string, unknown>>({});
   // Worklist 뷰어 도크(2026-08-10 사용자 확정) — 판독창 하단에 워크리스트를 붙여
   // '다음 판독 대상'을 보면서 판독한다. 체크·높이 모두 report.prefs 계정 로밍
@@ -542,7 +554,7 @@ export function ReportWindow() {
     color: on ? "var(--text-primary)" : "var(--text-secondary)",
     background: on ? undefined : "var(--bg-elevated)",
   });
-  const phraseList = [...phrases, ...localPhrases]
+  const phraseList = [...phrases, ...localPhrases, ...svPhrases]
     .filter((p) => p.kind === (rightTab === "std" ? "phrase" : "template"));
   // History 목록 — Same Compare 시 선택 기준(refExam)과 같은 장비·검사명(부위)만, 검사일 최신순
   const refExam = detail.related_exams.find((e) => e.id === selPast) ?? null;
