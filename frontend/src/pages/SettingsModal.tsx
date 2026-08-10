@@ -2378,18 +2378,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     {tr("페인 우측 이미지 위치 인디케이터(초록 바) 표시 — Scout line 과 무관한 현재 이미지 위치 표시(기본 꺼짐)")}
                   </label>
                 </Row>
-                <Row label={tr("닫기 동작")}>
-                  <select value={infCloseMode}
-                          onChange={(e) => setInfCloseMode(e.target.value as typeof infCloseMode)}>
-                    <option value="ask">{tr("항상 묻기 (닫기 다이얼로그)")}</option>
-                    <option value="save_current">{tr("현재 저장하고 닫기 (주석)")}</option>
-                    <option value="save_all">{tr("전체 저장하고 닫기 (주석+GSPS)")}</option>
-                    <option value="none">{tr("저장하지 않고 닫기")}</option>
-                  </select>
-                  <span style={{ fontSize: 11.5, color: "var(--text-secondary)", marginLeft: 8 }}>
-                    {tr('닫기 다이얼로그의 "기본으로" 체크 시 이 설정이 자동 변경됩니다 (viewer.prefs.infi_close_mode)')}
-                  </span>
-                </Row>
                 <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
                   {tr("단축키(뷰어):")} <b>{tr("T + 마우스 스크롤")}</b> {tr("= 글자 크기 조절 ·")} <b>T + Del</b> {tr("= 숨김/표시 토글 — 변경 즉시 계정에 저장됩니다.")}
                 </div>
@@ -2466,6 +2454,52 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           }} />
               </Group>
               </>
+            )}
+            {/* 뷰어 닫기 설정(2026-08-10 사용자 확정 — 위치는 **뷰어 공통**) — 닫기 다이얼로그의
+                "기본으로" 체크가 여기 저장되고, 체크를 해제하면 다시 다이얼로그가 나타난다(계정 로밍).
+                SaintView·T-View 는 close_mode 를 공유하고 I-View 는 infi_close_mode —
+                뷰어 닫기 규정의 설정 UI 는 이 그룹 **한 곳**뿐이다(하위 페이지에 복제 금지). */}
+            {page === "viewer" && (
+              <Group title={tr("뷰어 닫기 설정")}>
+                <Row label="SaintView · T-View">
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                      <input type="checkbox" checked={closeMode !== "ask"}
+                             onChange={(e) => setCloseMode(e.target.checked ? "save_current" : "ask")} />
+                      {tr("묻지 않고 기본 동작으로 닫기")}
+                    </label>
+                    <select value={closeMode === "ask" ? "save_current" : closeMode}
+                            disabled={closeMode === "ask"}
+                            onChange={(e) => setCloseMode(e.target.value as typeof closeMode)}>
+                      <option value="save_current">{tr("현재 화면 저장하고 닫기")}</option>
+                      <option value="save_all">{tr("전체 변경사항 저장하고 닫기 (주석+GSPS)")}</option>
+                      <option value="discard">{tr("저장하지 않고 닫기")}</option>
+                    </select>
+                  </span>
+                </Row>
+                <Row label="I-View">
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                      <input type="checkbox" checked={infCloseMode !== "ask"}
+                             onChange={(e) => setInfCloseMode(e.target.checked ? "save_current" : "ask")} />
+                      {tr("묻지 않고 기본 동작으로 닫기")}
+                    </label>
+                    <select value={infCloseMode === "ask" ? "save_current" : infCloseMode}
+                            disabled={infCloseMode === "ask"}
+                            onChange={(e) => setInfCloseMode(e.target.value as typeof infCloseMode)}>
+                      <option value="save_current">{tr("현재 저장하고 닫기 (주석)")}</option>
+                      <option value="save_all">{tr("전체 저장하고 닫기 (주석+GSPS)")}</option>
+                      <option value="none">{tr("저장하지 않고 닫기")}</option>
+                    </select>
+                  </span>
+                </Row>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                  {closeMode === "ask" && infCloseMode === "ask"
+                    ? tr('지금은 닫을 때마다 다이얼로그로 묻습니다. 다이얼로그에서 "기본으로"를 체크하면 그 동작이 여기에 저장됩니다.')
+                    : tr("닫기 다이얼로그 없이 위 동작으로 바로 닫습니다. 체크를 해제하면 다시 다이얼로그가 나타납니다.")}
+                  {" "}{tr("Exam 탭은 ✕/전체닫기 전까지 유지.")}
+                </div>
+              </Group>
             )}
             {page === "viewer" && (
               <Group title={"2D-Common Layout " + tr("(모달리티 → Series / Image 분할)")}>
@@ -2714,30 +2748,6 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       {tr("뷰어 우측에 리포트·과거검사 표시")}
                     </label>
                   </Row>
-                  {/* 뷰어 닫기 설정(2026-08-10 사용자 확정) — 다이얼로그 "기본으로" 체크가 여기
-                      저장되고, 체크를 해제하면 다시 닫기 다이얼로그가 나타난다(계정 로밍). */}
-                  <Row label={tr("뷰어 닫기 설정")}>
-                    <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
-                        <input type="checkbox" checked={closeMode !== "ask"}
-                               onChange={(e) => setCloseMode(e.target.checked ? "save_current" : "ask")} />
-                        {tr("묻지 않고 기본 동작으로 닫기")}
-                      </label>
-                      <select value={closeMode === "ask" ? "save_current" : closeMode}
-                              disabled={closeMode === "ask"}
-                              onChange={(e) => setCloseMode(e.target.value as typeof closeMode)}>
-                        <option value="save_current">{tr("현재 화면 저장하고 닫기")}</option>
-                        <option value="save_all">{tr("전체 변경사항 저장하고 닫기 (주석+GSPS)")}</option>
-                        <option value="discard">{tr("저장하지 않고 닫기")}</option>
-                      </select>
-                    </span>
-                  </Row>
-                  <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                    {closeMode === "ask"
-                      ? tr('지금은 닫을 때마다 다이얼로그로 묻습니다. 다이얼로그에서 "기본으로"를 체크하면 그 동작이 여기에 저장됩니다.')
-                      : tr("닫기 다이얼로그 없이 위 동작으로 바로 닫습니다. 체크를 해제하면 다시 다이얼로그가 나타납니다.")}
-                    {" "}{tr("Exam 탭은 ✕/전체닫기 전까지 유지.")}
-                  </div>
                 </Group>
                 <Group title={tr("Tools bar 구성 (UBPACS p.18~21 — 계정 로밍)")}>
                   {TOOLBAR_DEFS.map((sec) => (
