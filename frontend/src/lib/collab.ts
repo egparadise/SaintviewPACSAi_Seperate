@@ -93,6 +93,9 @@ export type CollabSend =
   | { t: "ctl.request"; caps?: string[] }
   | { t: "ctl.grant"; target: number; caps?: string[] }
   | { t: "ctl.revoke" }
+  // 발표권 **가져오기** — Master 승인을 기다리지 않는다. 서버가 collab.present 보유를
+  // 확인하고 전원에게 ctl.granted 를 뿌린다(회의에서 발언권이 넘어가는 방식).
+  | { t: "ctl.take" }
   | { t: "exam.switch"; study_id: number }
   // 세션 주석 — id·by 는 서버가 박는다(클라가 보낸 값은 버려진다)
   | { t: "anno.add"; d: unknown }

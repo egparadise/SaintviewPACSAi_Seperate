@@ -50,9 +50,19 @@ _CTL_TTL = 3.0
 # 세션 주석에서 받아들이는 필드 — 화이트리스트다.
 # 클라가 보낸 dict 를 그대로 저장하면 (a) 아무 키나 실어 메모리를 불릴 수 있고
 # (b) id·by 를 위조해 남의 이름·색으로 그려 놓을 수 있다. 그 둘은 허브가 직접 박는다.
-_ANNO_FIELDS = ("kind", "points", "series_uid", "sop_uid", "text", "value", "unit", "pid")
+_ANNO_FIELDS = ("kind", "points", "series_uid", "sop_uid", "text", "value", "unit", "pid",
+                "surface", "life")
 _ANNO_MAX_POINTS = 512      # open-ended 도구(폴리라인)도 이 안에서 끝난다
 _ANNO_TEXT_MAX = 200
+
+# 마크를 얹는 표면. 좌표계가 표면마다 **완전히 다르므로**(이미지 정규화 / 비디오 프레임 /
+# 화이트보드) 자유 문자열로 두면 안 된다 — 모르는 값이 오면 pane 으로 떨어져 DICOM 영상
+# 위에 엉뚱한 좌표로 그려진다. 프론트 lib/collabSurface.ts 의 Surface 와 같은 집합.
+_ANNO_SURFACES = frozenset({"pane", "screen", "wb"})
+# 마크 수명. laser = 잠깐 가리키는 것(받는 쪽이 자동 소멸), pin = 남겨 두는 것.
+_ANNO_LIVES = frozenset({"laser", "pin"})
+# 도착 시각(at)은 **받는 쪽이** 찍는다 — 좌석 간 시계가 어긋나면 레이저가 즉시 사라지거나
+# 영원히 안 사라진다. 그래서 서버도 클라도 at 을 전송하지 않는다(화이트리스트에 없다).
 
 
 def _clean_anno(d) -> dict:
@@ -75,6 +85,14 @@ def _clean_anno(d) -> dict:
                     except (TypeError, ValueError):
                         continue
             out["points"] = pts
+        elif k == "surface":
+            # 모르는 표면은 **버린다**(pane 으로 강등하지 않는다) — 좌표계가 다른 마크를
+            # 뷰포트에 올리는 것보다 안 그리는 편이 낫다. 없으면 수신측이 pane 으로 본다.
+            if str(v) in _ANNO_SURFACES:
+                out[k] = str(v)
+        elif k == "life":
+            if str(v) in _ANNO_LIVES:
+                out[k] = str(v)
         elif k in ("text", "kind", "series_uid", "sop_uid", "unit", "pid"):
             out[k] = str(v)[:_ANNO_TEXT_MAX]
         elif k == "value":
@@ -308,7 +326,7 @@ async def collab_ws(websocket: WebSocket) -> None:
                 await websocket.send_json(out)      # 발신자 본인 확정 에코(낙관적 UI 정정)
                 continue
 
-            if t in ("ctl.request", "ctl.grant", "ctl.revoke"):
+            if t in ("ctl.request", "ctl.grant", "ctl.revoke", "ctl.take"):
                 code = hub.session_of(websocket)
                 if not code:
                     continue
@@ -440,6 +458,9 @@ def _do_control(kind: str, account_id: int, code: str, msg: dict) -> dict:
             elif kind == "ctl.grant":
                 p = svc.grant_control(db, sess, me, int(msg.get("target") or 0),
                                       caps=msg.get("caps"))
+                event, target = "ctl.granted", p.account_id
+            elif kind == "ctl.take":
+                p = svc.take_control(db, sess, me)
                 event, target = "ctl.granted", p.account_id
             else:
                 p = svc.revoke_control(db, sess, me)

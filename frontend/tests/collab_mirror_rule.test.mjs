@@ -289,3 +289,67 @@ test("closePopout — 사용자가 창을 직접 닫았어도 상태가 정리�
     closePopout("7");                            // 이미 닫힌 창에도 안전해야 한다
   });
 });
+
+/* ── ⑨ React 를 얹는 팝아웃(무대 별도 창) — 2026-08-10 ──
+ *
+ * popoutStream 은 '보기 전용' 창이고, 이쪽은 그 위에서 **함께 그리는** 창이다.
+ * 자식 창이 부모의 스타일을 못 받으면 색·테마가 통째로 깨진 채 열린다(빈 검은 창처럼 보인다).
+ * 재사용할 때 이전 내용을 안 비우면 무대가 두 겹으로 겹친다.
+ */
+function withFakeDom(fn) {
+  const g = globalThis;
+  const prevWin = g.window;
+  const prevDoc = g.document;
+  const child = {
+    head: { children: [], appendChild(n) { this.children.push(n); } },
+    documentElement: { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+    body: { style: {} },
+    opened: 0, written: [], closedCount: 0,
+    open() { this.opened++; }, close() { this.closedCount++; },
+    write(html) { this.written.push(html); },
+  };
+  const win = { name: "", document: child, addEventListener() {}, closed: false };
+  const styleNodes = [
+    { tag: "style", cloneNode: () => ({ tag: "style", clone: true }) },
+    { tag: "link", cloneNode: () => ({ tag: "link", clone: true }) },
+  ];
+  g.document = {
+    head: { querySelectorAll: () => styleNodes },
+    documentElement: { attributes: [{ name: "data-theme", value: "dark" }] },
+  };
+  g.window = { open: () => win, addEventListener() {} };
+  try { fn(win, child); } finally { g.window = prevWin; g.document = prevDoc; }
+}
+
+test("openPortalWindow — 부모 스타일과 테마를 자식 문서로 복제한다", async () => {
+  const { openPortalWindow } = await import("../src/lib/collabPopout.ts");
+  withFakeDom((win, child) => {
+    const w = openPortalWindow("stage", "협진 무대");
+    assert.equal(w, win);
+    assert.equal(child.head.children.length, 2, "부모의 <style>/<link> 가 복제되지 않았다");
+    assert.equal(child.documentElement.attrs["data-theme"], "dark",
+                 "테마 속성이 안 넘어가 자식 창만 다른 테마가 된다");
+    assert.equal(child.body.style.margin, "0");
+  });
+});
+
+test("openPortalWindow — 다시 열면 이전 내용을 비운다(무대가 겹치지 않게)", async () => {
+  const { openPortalWindow } = await import("../src/lib/collabPopout.ts");
+  withFakeDom((_win, child) => {
+    openPortalWindow("stage", "협진 무대");
+    openPortalWindow("stage", "협진 무대");
+    assert.equal(child.opened, 2, "document.open 으로 초기화하지 않았다");
+    assert.ok(child.written.every((h) => h.includes("<body></body>")),
+              "빈 body 로 시작하지 않으면 portal 이 이전 DOM 위에 겹친다");
+  });
+});
+
+test("openPortalWindow — 팝업이 차단되면 null (호출부가 안내한다)", async () => {
+  const { openPortalWindow } = await import("../src/lib/collabPopout.ts");
+  const g = globalThis;
+  const prev = g.window;
+  g.window = { open: () => null, addEventListener() {} };
+  try {
+    assert.equal(openPortalWindow("stage", "협진 무대"), null);
+  } finally { g.window = prev; }
+});

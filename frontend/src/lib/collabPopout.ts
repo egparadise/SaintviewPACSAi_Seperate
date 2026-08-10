@@ -100,6 +100,49 @@ export function closeAllPopouts(): void {
   for (const key of [...OPEN.keys()]) closePopout(key);
 }
 
+// ── React 를 얹을 수 있는 팝아웃 ─────────────────────────────────────────────
+//
+// 위 popoutStream 은 '보기 전용' 창이다(부모가 <video> 하나를 심고 끝). 무대처럼 **그 위에서
+// 함께 그려야** 하는 창은 React 트리가 살아 있어야 한다.
+//
+// 두 번째 React root 를 만들지 않고 **createPortal** 로 부모 트리에서 자식 창의 body 에
+// 그린다. 같은 출처라 DOM 을 직접 만질 수 있고, 이렇게 하면 부모 상태(마크·커서·권한)가
+// 바뀔 때 자식 창이 **자동으로** 다시 그려진다 — 별도 root 였다면 props 를 손으로 밀어
+// 넣어야 하고, 그 동기화를 빠뜨리는 순간 두 창이 다른 그림을 보여 준다.
+
+/** 부모의 스타일을 자식 문서로 복제 — 번들이 주입한 <style> 과 CSS 변수(:root)가 없으면
+ *  자식 창의 색·테마가 통째로 깨진다. 인라인 스타일만으로는 var(--…) 를 못 채운다. */
+function cloneStyles(win: Window): void {
+  const d = win.document;
+  for (const node of Array.from(document.head.querySelectorAll('style, link[rel="stylesheet"]'))) {
+    d.head.appendChild(node.cloneNode(true));
+  }
+  // 테마는 <html data-theme> 에 걸려 있다 — 복제하지 않으면 자식만 다른 테마가 된다.
+  for (const attr of Array.from(document.documentElement.attributes)) {
+    try { d.documentElement.setAttribute(attr.name, attr.value); } catch { /* 무시 */ }
+  }
+  d.body.style.margin = "0";
+  d.body.style.height = "100vh";
+  d.body.style.background = "#000";
+  d.body.style.overflow = "hidden";
+}
+
+/** React 를 그릴 수 있는 빈 팝아웃 창을 연다. 반환된 창의 document.body 에 createPortal 한다.
+ *  ⚠ popoutStream 과 같은 규칙 — **클릭 핸들러 안에서 동기적으로** 불러야 차단당하지 않는다. */
+export function openPortalWindow(name: string, title: string,
+                                 features = "width=1100,height=760"): Window | null {
+  let win: Window | null;
+  try { win = window.open("", `sv_collab_portal_${name}`, features); } catch { return null; }
+  if (!win) return null;
+  // 재사용된 창이면 이전 내용을 비운다(같은 이름으로 다시 열 수 있다)
+  win.document.open();
+  win.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${
+    title.replace(/[<&]/g, "")}</title></head><body></body></html>`);
+  win.document.close();
+  cloneStyles(win);
+  return win;
+}
+
 if (typeof window !== "undefined") {
   // 부모 창이 닫히면 자식도 함께 닫는다(고아 창 방지 — PHI 가 떠 있는 창이다)
   window.addEventListener("pagehide", closeAllPopouts);

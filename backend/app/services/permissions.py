@@ -116,12 +116,24 @@ _COLLAB_ALL_CAPS = frozenset(COLLAB_CAPS.keys())
 # 아무도 못 쓰는 상태). 대신 나머지는 각자 자기 화면을 자유롭게 본다(자유 보기) —
 # 그래서 "전부 동시" 가 실제로 성립한다. 막히는 사람은 없다.
 COLLAB_CONCURRENT_CAPS: frozenset[str] = frozenset({
-    "collab.annotate", "collab.text", "collab.navigate",
+    "collab.annotate", "collab.text", "collab.navigate", "collab.present",
 })
+# collab.present 가 여기 있는 이유: '발표자가 될 수 있는 자격'은 여러 명이 동시에 가진다.
+# 배타인 것은 자격이 아니라 **역할**(발표자 1명)이다. 자격 보유자는 아무 때나 [발표하기]로
+# 가져올 수 있고, 마지막에 누른 사람이 발표자가 된다(collab_service.take_control).
 
 # 초대 시 자동으로 부여하는 기본 cap — 사용자 설정(viewer.prefs.collab.default_caps)이
-# 없을 때의 폴백. 다학제의 목적이 '같이 보며 표시하는 것'이라 주석·글쓰기를 기본으로 연다.
-COLLAB_DEFAULT_CAPS: tuple[str, ...] = ("collab.annotate", "collab.text")
+# 없을 때의 폴백.
+#
+# **위임 가능한 것 전부**가 기본이다(2026-08-10 사용자 확정: "판독 작성·영상 삭제만 제외하고
+# 모든 것"). 예전엔 주석·글쓰기 둘뿐이라 참가자가 화면을 돌리거나 검사를 넘기지 못했고,
+# 그래서 다학제가 '발표를 구경하는 것'이 되어 있었다.
+#
+# 이렇게 열어도 판독 작성·영상 삭제는 **닿지 않는다** — 그 둘은 애초에 COLLAB_CAPS 에
+# 없어서 sanitize_collab_caps 를 통과할 수 없고, 서버 쓰기 엔드포인트는 임시 열람권을
+# 아예 보지 않는다(worklist._require_study 의 allow_collab opt-in). 이 목록을 늘리는 것과
+# 그 금지선은 서로 독립이다 — 그렇게 설계한 이유가 바로 오늘 같은 확장 때문이다.
+COLLAB_DEFAULT_CAPS: tuple[str, ...] = tuple(sorted(COLLAB_CAPS))
 
 
 def sanitize_collab_caps(caps) -> list[str]:

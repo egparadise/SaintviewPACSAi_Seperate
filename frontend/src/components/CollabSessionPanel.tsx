@@ -46,11 +46,18 @@ function Section({ title, open, onToggle, children }: {
   );
 }
 
-export function VideoTile({ id, name, stream, muted, color, label, popoutFeatures }: {
+const tileBtn: React.CSSProperties = {
+  fontSize: 10, lineHeight: 1, padding: "2px 5px", background: "rgba(0,0,0,.55)",
+  color: "#fff", border: "1px solid rgba(255,255,255,.35)", borderRadius: 3, cursor: "pointer",
+};
+
+export function VideoTile({ id, name, stream, muted, color, label, popoutFeatures, onStage }: {
   id: number; name: string; stream: MediaStream | null; muted?: boolean;
   color: string; label?: string;
   /** 다중 모니터 배치용 window.open features — 호출부가 미리 계산해 둔 것(제스처 안에서 await 금지) */
   popoutFeatures?: string;
+  /** 무대로 올리기 — 뷰어에서만 준다(워크리스트 도크에는 무대가 없다) */
+  onStage?: () => void;
 }) {
   const ref = useRef<HTMLVideoElement | null>(null);
   const [, setTrackRevision] = useState(0);
@@ -76,14 +83,17 @@ export function VideoTile({ id, name, stream, muted, color, label, popoutFeature
         track.removeEventListener("ended", changed);
       }
     };
-  }, [stream]);
+  }, [stream, id]);      // id 는 타일당 고정이지만 syncPopout 키라 dep 에 넣는다
   const hasVideo = !!stream?.getVideoTracks().some(
     (t) => t.enabled && !t.muted && t.readyState === "live");
   return (
     <div style={{ position: "relative", border: `2px solid ${color}`, borderRadius: 4,
                   overflow: "hidden", background: "#000", aspectRatio: "4 / 3" }}>
+      {/* ⚠ contain 이다(cover 아님). cover 는 4:3 타일에 맞추려고 가장자리를 **잘라 낸다** —
+          공유 화면에서는 창 끝의 도구막대·표가 통째로 사라지고, 그 위에 마크를 찍으면
+          상대 화면에 없는 곳을 가리키게 된다. 잘리는 것보다 여백이 낫다(팝아웃도 같은 규칙). */}
       <video ref={ref} muted={muted} autoPlay playsInline
-             style={{ width: "100%", height: "100%", objectFit: "cover",
+             style={{ width: "100%", height: "100%", objectFit: "contain",
                       display: hasVideo ? "block" : "none" }} />
       {!hasVideo && (
         <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center",
@@ -100,16 +110,20 @@ export function VideoTile({ id, name, stream, muted, color, label, popoutFeature
           다중 모니터가 기본인 판독 환경에서 "공유 화면은 옆 모니터에 크게" 가 실제 사용 방식이다.
           ⚠ onClick 안에서 **동기적으로** 열어야 한다(팝업 차단기는 제스처 밖 window.open 을 막는다). */}
       {hasVideo && (
-        <button title={tr("별도 창으로 크게 보기 (다른 모니터로 옮길 수 있습니다)")}
-                onClick={() => {
-                  if (!popoutStream(String(id), stream, name, popoutFeatures)) {
-                    showToast(tr("팝업이 차단되었습니다 — 이 사이트의 팝업을 허용해 주세요"), "error");
-                  }
-                }}
-                style={{ position: "absolute", right: 2, top: 2, fontSize: 10, lineHeight: 1,
-                         padding: "2px 5px", background: "rgba(0,0,0,.55)", color: "#fff",
-                         border: "1px solid rgba(255,255,255,.35)", borderRadius: 3,
-                         cursor: "pointer" }}>⧉</button>
+        <div style={{ position: "absolute", right: 2, top: 2, display: "flex", gap: 2 }}>
+          {/* 무대 — 별도 창과 달리 **그 위에 함께 그릴 수 있다**(팝아웃은 보기 전용). */}
+          {onStage && (
+            <button title={tr("무대에 크게 — 이 화면 위에 함께 표시할 수 있습니다")}
+                    onClick={onStage} style={tileBtn}>⛶</button>
+          )}
+          <button title={tr("별도 창으로 크게 보기 (다른 모니터로 옮길 수 있습니다)")}
+                  onClick={() => {
+                    if (!popoutStream(String(id), stream, name, popoutFeatures)) {
+                      showToast(tr("팝업이 차단되었습니다 — 이 사이트의 팝업을 허용해 주세요"), "error");
+                    }
+                  }}
+                  style={tileBtn}>⧉</button>
+        </div>
       )}
       {/* id 는 색과 짝지어 원격 커서와 대응시키는 값이라 화면에는 굳이 노출하지 않는다 */}
       <span hidden>{id}</span>
@@ -118,7 +132,7 @@ export function VideoTile({ id, name, stream, muted, color, label, popoutFeature
 }
 
 export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250,
-                                    popoutFeatures }: {
+                                    popoutFeatures, onStage, onTakePresent }: {
   /** 세션 상태의 소유자는 호출부(뷰어)다 — WS 이벤트로 갱신된 것을 내려받아 그리기만 한다 */
   session: CollabSession;
   onLeave: () => void;
@@ -127,6 +141,10 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
   width?: number;
   /** 팝아웃 창 배치 features — 다중 모니터. 제스처 안에서 await 할 수 없어 미리 받는다 */
   popoutFeatures?: string;
+  /** 무대로 올리기(뷰어에서만). peerId = 그 사람의 화면, null = 화이트보드 */
+  onStage?: (peerId: number | null, name: string) => void;
+  /** 발표권 가져오기 — Master 승인을 기다리지 않는다 */
+  onTakePresent?: () => void;
   meId: number;
 }) {
   useLang();
@@ -248,6 +266,23 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
             {controller ? (controller.id === meId ? tr("나") : controller.name) : tr("없음")}
           </b>
         </div>
+        {/* 발표권 **가져오기** — 승인을 기다리지 않는다. 회의에서 발언권이 넘어가듯,
+            자격(collab.present)이 있는 사람은 아무 때나 잡을 수 있다. Master 가 자리를
+            비운 순간 다학제가 멈추는 것을 막는 장치다. 서버가 자격을 다시 확인한다. */}
+        {!iControl && onTakePresent && (isHost || (mySeat?.caps ?? []).includes("collab.present")) && (
+          <button className="primary" onClick={onTakePresent}
+                  title={tr("내 화면을 전원에게 보여 줍니다 — 지금 발표 중인 사람에게서 넘겨받습니다")}
+                  style={{ fontSize: 11, padding: "3px 8px", width: "100%", marginTop: 4 }}>
+            🎤 {tr("발표하기")}
+          </button>
+        )}
+        {onStage && (
+          <button onClick={() => onStage(null, "")}
+                  title={tr("빈 화면에 함께 도식을 그립니다 — 영상을 붙여 놓고 그릴 수도 있습니다")}
+                  style={{ fontSize: 11, padding: "3px 8px", width: "100%", marginTop: 4 }}>
+            🖍 {tr("공유 화이트보드")}
+          </button>
+        )}
         {!isHost && !iControl && (
           <div style={{ marginTop: 4 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 4 }}>
@@ -331,11 +366,13 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
             <VideoTile id={meId} name={tr("나")} stream={mesh.localStream()} muted
                        color={colorOf(meId)} popoutFeatures={popoutFeatures}
+                       onStage={onStage && (() => onStage(meId, tr("내 화면")))}
                        label={screen ? tr("화면 공유")
                          : iControl ? tr("조작 중") : undefined} />
             {peers.map((p) => (
               <VideoTile key={p.id} id={p.id} name={nameOf(p.id)} stream={p.stream}
                          color={colorOf(p.id)} popoutFeatures={popoutFeatures}
+                         onStage={onStage && (() => onStage(p.id, nameOf(p.id)))}
                          label={p.state !== "connected" ? tr("연결 중…")
                            : controller?.id === p.id ? tr("조작 중") : undefined} />
             ))}

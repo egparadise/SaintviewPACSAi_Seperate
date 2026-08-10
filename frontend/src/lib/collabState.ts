@@ -62,6 +62,14 @@ export interface SessionAnno {
   text?: string;
   value?: number | null;
   unit?: string;
+  /** 어느 표면에 그린 것인가 — 없으면 "pane"(구버전 호환). lib/collabSurface 참조.
+   *  좌표계가 표면마다 다르므로 이 값이 없으면 엉뚱한 곳에 그려진다. */
+  surface?: string;
+  /** "laser" = 잠깐 가리키는 것(자동 소멸) · "pin" = 남겨 두는 것. 없으면 남는다. */
+  life?: string;
+  /** 도착 시각 — **받는 쪽이** 찍는다. 전송하지 않는다(좌석 간 시계 어긋남 때문에
+   *  보낸 시각을 믿으면 레이저가 즉시 사라지거나 영원히 안 사라진다). */
+  at?: number;
 }
 
 /** 수신 이벤트를 목록에 반영하는 **순수 함수** — 서버가 진실이고 여기는 그대로 따른다.

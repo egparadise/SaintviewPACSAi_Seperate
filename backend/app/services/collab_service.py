@@ -873,22 +873,56 @@ def can_control(db: Session, sess: CollabSession, account_id: int, cap: str) -> 
     축이 둘이다:
       · collab.viewport = **발표자 1명**만. 전원이 뷰포트를 쏘면 마지막 사람으로 화면이
         끌려가 아무도 못 쓴다(10Hz 왕복). 나머지는 각자 자유 보기라 막히는 게 아니다.
-      · 그 밖(annotate·text·navigate) = cap 보유자 **누구나 동시**. 이게 다학제다.
+      · 그 밖(annotate·text·navigate·present) = cap 보유자 **누구나 동시**. 이게 다학제다.
     Master 는 자기 세션이므로 전부 가능하다.
+
+    ⚠ collab.present 는 viewport 와 **같이 두면 안 된다**. present 는 '발표자가 될 수 있는
+      자격'이고 viewport 는 '지금 발표자인가'다. 예전엔 둘을 한 분기에 묶어서
+      can_control("collab.present") 가 "이미 발표자인가"를 되묻는 순환이 됐고, 그 결과
+      발표자가 아닌 사람은 영원히 발표권을 가져올 수 없었다(Master 승인만이 유일한 길).
     """
     p = participant_of(db, sess.id, account_id)
     if p is None or p.state != "joined":
         return False
-    if cap in ("collab.viewport", "collab.present"):
+    if cap == "collab.viewport":
         # ⚠ Master 도 예외가 아니다. 발표를 남에게 넘긴 동안에는 Master 의 뷰포트도 나가면
         #   안 된다 — 그러면 둘이 서로에게 화면을 쏘아 10Hz 로 오간다(발표자를 둔 이유가 사라진다).
-        #   되찾으려면 revoke_control(회수)로 명시적으로 가져온다.
+        #   되찾으려면 revoke_control(회수) 또는 take_control 로 명시적으로 가져온다.
         cur = controller_of(db, sess.id)
         return cur is not None and cur.account_id == account_id
-    # 나머지(annotate·text·navigate)는 동시 보유가 정상. Master 는 자기 세션이라 항상 가능.
+    # 나머지(annotate·text·navigate·present)는 동시 보유가 정상. Master 는 자기 세션이라 항상 가능.
     if p.role == "host":
         return True
     return cap in sanitize_collab_caps(p.caps)
+
+
+def take_control(db: Session, sess: CollabSession, actor: Account) -> CollabParticipant:
+    """참가자가 **스스로** 발표권을 가져온다 — Master 승인을 기다리지 않는다.
+
+    "판독 작성·영상 삭제만 빼고 전부"(사용자 확정) 에서 발표 전환도 예외가 아니다. 승인을
+    거쳐야만 발표할 수 있으면 Master 가 자리를 비운 순간 다학제가 멈춘다.
+
+    역할은 여전히 1명이므로 '요청'이 아니라 '가져오기'로 구현한다 — 마지막에 누른 사람이
+    발표자가 되고 호출부가 전원에게 알린다. 회의에서 발언권이 넘어가는 방식 그대로다.
+    Master 는 언제든 revoke_control 로 회수할 수 있다.
+
+    ⚠ grant_control 과 달리 **caps 를 건드리지 않는다**. 발표권을 가져오는 것과 그 사람이
+      무엇을 할 수 있는가는 별개 축이고, 여기서 caps 를 덮으면 Master 가 개별 조정해 둔
+      설정이 발표 전환 한 번에 날아간다.
+    """
+    p = participant_of(db, sess.id, actor.id)
+    if p is None or p.state != "joined":
+        raise LookupError("참가자를 찾을 수 없습니다")
+    if p.role != "host" and "collab.present" not in sanitize_collab_caps(p.caps):
+        raise PermissionError("발표 권한이 없습니다")
+    for other in participants(db, sess.id):        # 발표자는 세션당 1명 — 그 축만 비운다
+        other.control = "none"
+        other.control_expires_at = None
+    p.control = "granted"
+    p.control_expires_at = _now() + timedelta(minutes=CONTROL_TTL_MIN)
+    _audit(db, actor.id, "collab_control_take", "collab_session", sess.code, {})
+    db.commit()
+    return p
 
 
 def adopt_annotations(db: Session, sess: CollabSession, host: Account, rows: list,
@@ -897,11 +931,18 @@ def adopt_annotations(db: Session, sess: CollabSession, host: Account, rows: lis
 
     책임 주체를 흐리지 않는 것이 요점이다: 저장은 Master 이름(created_by)으로 하되
     text 앞에 원 작성자를 남긴다. 협진에서 나온 소견이라는 사실이 판독 기록에 보여야 한다.
+
+    ⚠ **뷰포트(pane) 마크만 채택한다.** 화이트보드·공유 화면 마크는 좌표계가 완전히 다르다
+      (화이트보드 정규화 / 비디오 프레임 정규화 vs 이미지 정규화). 그대로 저장하면 영상
+      위 엉뚱한 자리에 도형이 박히고, sop_uid 도 없어서 어느 슬라이스 것인지조차 없다.
+      '남길 가치가 있는 것'은 영상 위에 그린 것뿐이다 — 화이트보드는 논의용 스케치다.
     """
     from app.models import Annotation
 
     n = 0
     for r in rows:
+        if str(r.get("surface") or "pane") != "pane":
+            continue
         pts = r.get("points") or []
         if not isinstance(pts, list) or not pts:
             continue

@@ -985,3 +985,133 @@ def test_ws_non_controller_state_is_dropped(client, db, duo):
             gw.send_json({"t": "state", "d": {"zoom": 3}})
             _drain_to_pong(gw)                      # 위와 같은 이유 — 먼저 송신 소켓에서 왕복
             assert "state" in _drain_to_pong(host_ws), "제어권자의 state 는 전달되어야 한다"
+
+
+# ═══════════════ 공유 표면(surface) · 발표권 가져오기 — 2026-08-10 ═══════════════
+def test_anno_surface_and_life_are_enum_not_free_text():
+    """표면은 자유 문자열이 아니다 — 모르는 값은 **버린다**(pane 으로 강등하지 않는다).
+
+    좌표계가 표면마다 완전히 다르다(이미지 정규화 / 비디오 프레임 / 화이트보드).
+    모르는 표면을 pane 으로 떨어뜨리면 화이트보드 낙서가 DICOM 영상 위에 엉뚱한
+    좌표로 그려진다 — 안 그리는 편이 낫다.
+    """
+    from app.api.collab_ws import _clean_anno
+
+    for s in ("pane", "screen", "wb"):
+        assert _clean_anno({"kind": "pen", "surface": s})["surface"] == s
+    for bad in ("Pane", "viewport", "", "wb; drop", "x" * 300):
+        assert "surface" not in _clean_anno({"kind": "pen", "surface": bad}), \
+            f"모르는 표면 {bad!r} 이 통과했다"
+
+    for lf in ("laser", "pin"):
+        assert _clean_anno({"kind": "pen", "life": lf})["life"] == lf
+    assert "life" not in _clean_anno({"kind": "pen", "life": "forever"})
+
+    # 도착 시각은 **받는 쪽이** 찍는다 — 좌석 간 시계가 어긋나면 레이저가 즉시 사라지거나
+    # 영원히 안 사라진다. 그래서 at 은 전송 대상이 아니다.
+    assert "at" not in _clean_anno({"kind": "pen", "at": 12345})
+
+
+def test_default_caps_are_everything_delegable_and_still_cannot_smuggle():
+    """기본 caps = 위임 가능한 것 **전부**. 그래도 판독 작성·영상 삭제는 닿지 않는다.
+
+    2026-08-10 사용자 확정("판독 작성·영상 삭제만 제외하고 모든 것")으로 기본값을 열었다.
+    이 테스트는 '열었다'와 '금지선'이 서로 독립이라는 설계를 고정한다 — 기본값을 더 늘려도
+    아래 교집합이 비어 있는 한 안전하다.
+    """
+    from app.services.permissions import (
+        COLLAB_CAPS, COLLAB_DEFAULT_CAPS, COLLAB_NEVER_DELEGATE, sanitize_collab_caps,
+    )
+
+    assert set(COLLAB_DEFAULT_CAPS) == set(COLLAB_CAPS), "위임 가능한 것이 전부 열려 있지 않다"
+    assert set(COLLAB_DEFAULT_CAPS) & COLLAB_NEVER_DELEGATE == set(), \
+        "기본 caps 에 절대 위임 금지 권한이 섞였다"
+    assert sanitize_collab_caps(list(COLLAB_DEFAULT_CAPS)) == sorted(COLLAB_DEFAULT_CAPS)
+    # 금지 권한을 섞어 보내도 통과하지 않는다(기본값이 넓어져도 이 성질은 그대로)
+    smuggled = list(COLLAB_DEFAULT_CAPS) + ["report.write", "study.delete", "image.add"]
+    assert set(sanitize_collab_caps(smuggled)) == set(COLLAB_DEFAULT_CAPS)
+
+
+def test_participant_can_take_presentation_without_master_approval(client, db, duo):
+    """참가자가 스스로 발표권을 가져온다 — Master 가 자리를 비워도 다학제가 멈추지 않는다."""
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    code = _open_and_join(client, duo, _study(db, "mdt_take1", duo["ha"].id).id)
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        guest = s.get(Account, duo["guest"].id)
+        host = s.get(Account, duo["host"].id)
+
+        # 기본 caps 에 collab.present 가 들어 있으므로 승인 없이 가져올 수 있다
+        svc.take_control(s, sess, guest)
+        assert svc.controller_of(s, sess.id).account_id == duo["guest"].id
+        assert svc.can_control(s, sess, duo["guest"].id, "collab.viewport") is True
+        # 발표를 넘긴 동안에는 **Master 의 뷰포트도** 나가면 안 된다(10Hz 왕복 방지)
+        assert svc.can_control(s, sess, duo["host"].id, "collab.viewport") is False
+
+        # Master 는 언제든 회수한다
+        svc.revoke_control(s, sess, host)
+        assert svc.can_control(s, sess, duo["host"].id, "collab.viewport") is True
+        assert svc.can_control(s, sess, duo["guest"].id, "collab.viewport") is False
+
+
+def test_take_control_needs_the_present_cap_and_keeps_other_caps(client, db, duo):
+    """cap 이 없으면 못 가져온다. 가져와도 **다른 사람의 caps 는 그대로**."""
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services import collab_service as svc
+
+    code = _open_and_join(client, duo, _study(db, "mdt_take2", duo["ha"].id).id)
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        guest = s.get(Account, duo["guest"].id)
+        host = s.get(Account, duo["host"].id)
+
+        # Master 가 게스트의 발표 자격을 끈다 → 가져올 수 없다
+        svc.set_caps(s, sess, host, duo["guest"].id, ["collab.annotate", "collab.text"])
+        with pytest.raises(PermissionError):
+            svc.take_control(s, sess, guest)
+
+        # 자격을 돌려주고 가져오면 — 주석·글쓰기 cap 이 발표 전환에 날아가지 않아야 한다
+        svc.set_caps(s, sess, host, duo["guest"].id,
+                     ["collab.annotate", "collab.text", "collab.present"])
+        svc.take_control(s, sess, guest)
+        p = svc.participant_of(s, sess.id, duo["guest"].id)
+        assert set(p.caps) >= {"collab.annotate", "collab.text"}, \
+            "발표권을 가져왔더니 Master 가 조정해 둔 caps 가 날아갔다"
+
+
+def test_adopt_takes_viewport_marks_only(client, db, duo):
+    """[채택]은 뷰포트 마크만 DB 로 옮긴다 — 화이트보드·화면 마크는 좌표계가 다르다.
+
+    화이트보드 정규화·비디오 프레임 정규화 좌표를 이미지 주석으로 저장하면 영상 위
+    엉뚱한 자리에 도형이 박힌다(sop_uid 도 없어 어느 슬라이스인지조차 모른다).
+    """
+    from sqlalchemy import select as _sel
+
+    from app.models import Annotation
+    from app.services.collab_hub import hub
+
+    study = _study(db, "mdt_surface_adopt", duo["ha"].id)
+    code = _open_and_join(client, duo, study.id)
+    gid = duo["guest"].id
+    hub.anno_add(code, {"kind": "arrow", "points": [[0.3, 0.3], [0.4, 0.4]],
+                        "surface": "pane", "sop_uid": "1.2.3", "text": "영상 소견"}, gid)
+    hub.anno_add(code, {"kind": "pen", "points": [[0.1, 0.1], [0.9, 0.9]],
+                        "surface": "wb", "text": "화이트보드 낙서"}, gid)
+    hub.anno_add(code, {"kind": "rect", "points": [[0.2, 0.2], [0.5, 0.5]],
+                        "surface": "screen", "text": "공유 화면 표시"}, gid)
+
+    r = client.post(f"/api/collab/sessions/{code}/adopt", headers=duo["hh"],
+                    json={"target_id": gid})
+    assert r.status_code == 200, r.text
+    assert r.json()["adopted"] == 1, "뷰포트 밖 마크까지 채택됐다"
+
+    db.expire_all()
+    saved = db.execute(_sel(Annotation).where(Annotation.study_id == study.id)).scalars().all()
+    texts = " ".join(a.text or "" for a in saved)
+    assert "영상 소견" in texts
+    assert "낙서" not in texts and "공유 화면" not in texts, \
+        "다른 좌표계의 마크가 판독 주석으로 저장됐다"

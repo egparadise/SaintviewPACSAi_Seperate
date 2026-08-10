@@ -31,6 +31,8 @@ import { AnatomyIcon } from "../lib/anatomyIcons";
 import { ReportDock } from "../components/ReportDock";
 import { CollabDock } from "../components/CollabDock";
 import { CollabInviteBanner, CollabSessionPanel } from "../components/CollabSessionPanel";
+import { CollabStage, type StageMode } from "../components/CollabStage";
+import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { useCollab } from "../lib/useCollab";
 import { applyPane, colorOf, type CollabSnapshot } from "../lib/collabState";
 import { useDictation } from "../lib/useDictation";
@@ -4528,19 +4530,52 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     }).catch(() => { /* 감지 실패 — 기본 크기 창으로 연다 */ });
   }, [collabPanelOn]);
 
+  // ── 협진 무대(Stage) ─────────────────────────────────────────────────────
+  // 공유 화면·화이트보드를 뷰어 본문 자리에 크게 띄운다(MPR 임베드와 같은 자리).
+  // 4:3 타일에서는 공유 화면의 글자를 읽을 수도, 그 위에 정확히 그릴 수도 없다.
+  const [stage, setStage] = useState<StageMode | null>(null);
+  const [stagePeers, setStagePeers] = useState<PeerView[]>([]);
+  const [stageSnap, setStageSnap] = useState<string | null>(null);
+  // mesh 는 CollabSessionPanel 이 start/stop 을 관리한다. 여기서는 **구독만** 한다 —
+  // 양쪽에서 start 하면 세션 참가자 동기화가 두 번 돌아 통화가 끊겼다 붙는다.
+  useEffect(() => (stage ? mesh.onChange(setStagePeers) : undefined), [stage]);
+  const stageStream = stage?.kind === "screen"
+    ? (stage.peerId === cl.meId ? mesh.localStream()
+                                : stagePeers.find((p) => p.id === stage.peerId)?.stream ?? null)
+    : null;
+  // 무대를 열면 뷰어 본문이 가려지므로, **열기 직전에** 지금 화면을 찍어 둔다
+  // (화이트보드 '영상 붙여넣기' 배경). 실패는 무해 — 그 배경 버튼만 비활성이 된다.
+  const openStage = useCallback((m: StageMode) => {
+    const el = vpRef.current;
+    setStage(m);
+    if (!el) return;
+    // html2canvas 는 무겁다 — 캡처 기능과 같이 **쓸 때만** 동적으로 불러온다.
+    void import("../lib/capturePane")
+      .then(({ capturePaneToDataUrl }) => capturePaneToDataUrl(el, 1))
+      .then(setStageSnap)
+      .catch(() => setStageSnap(null));
+  }, []);
+  // 세션이 끝나면 무대도 닫는다(남겨 두면 죽은 스트림을 계속 보여 준다)
+  useEffect(() => { if (!cl.session) { setStage(null); setStageSnap(null); } }, [cl.session]);
+
   // ── 협진 세션 주석 ⇄ 뷰어 ────────────────────────────────────────────────
   // 수신: 세션 주석을 Anno 모양으로 바꿔 ref 에 둔다. renderPane 이 내 주석과 함께 그리고,
   //       AnnoShape 가 by 를 보고 그 사람 색으로 칠한다.
   // renderPane 은 이 선언보다 **위**에 정의돼 있지만 실제 호출은 아래 JSX 평가 시점이라
   // 이 바인딩을 그대로 읽어도 안전하다(ref 를 거칠 필요가 없다). 목록이 바뀌면 이 컴포넌트가
   // 다시 렌더되고 renderPane 도 새 값으로 다시 돈다.
+  //
+  // 🔴 **표면(surface)으로 먼저 거른다.** 화이트보드·공유 화면 마크는 sop_uid 가 없어서,
+  //    안 거르면 아래 renderPane 의 `(!a.sop_uid && 같은 검사)` 조건을 통과해 DICOM 영상
+  //    위에 쏟아진다 — 게다가 좌표계가 달라(비디오 프레임 / 화이트보드) 위치도 전부 틀린다.
+  //    표면이 늘어날 때마다 여기를 고쳐야 하는 구조를 피하려고 annosOf 한 곳으로 묶었다.
   const collabAnnoItems = useMemo<Anno[]>(
-    () => cl.annos.map((a) => ({
+    () => cl.annosOf("pane").map((a) => ({
       series_uid: a.series_uid ?? "", sop_uid: a.sop_uid ?? "",
       kind: a.kind, points: a.points, value: a.value ?? null, unit: a.unit ?? "",
       text: a.text ?? "", source: "user" as const, by: a.by,
     })),
-    [cl.annos]);
+    [cl.annosOf]);      // annosOf 는 annos 가 바뀔 때만 새로 생긴다(useCallback dep)
 
   // 도구 종류 → 필요한 cap. 텍스트를 남기는 도구는 '글쓰기', 나머지는 '계측·주석'.
   const capOfTool = useCallback((kind: string) =>
@@ -4564,6 +4599,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       cl.addAnno({
         kind: item.kind, points: item.points, series_uid: item.series_uid,
         sop_uid: item.sop_uid, text: item.text, value: item.value, unit: item.unit,
+        // 표면을 명시한다 — 없으면 수신측이 pane 으로 보긴 하지만(구버전 호환), 여기서
+        // 빠뜨리면 나중에 표면이 늘 때 "왜 이것만 안 붙지"를 다시 찾게 된다.
+        surface: "pane",
       });
       return true;
     };
@@ -5259,8 +5297,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                     onDrag={(dx) => setPrefs((p) => ({ ...p, thumbSize: clampSz(p.thumbSize + dx, 48, 260) }))} />
         )}
 
-        {/* 뷰포트 영역 — MPR 모드면 내장 3D(Axial/Sagittal/Coronal+MIP)로 전환 */}
-        {mprOn ? (
+        {/* 뷰포트 영역 — 협진 무대 > MPR > 일반 뷰포트 순으로 자리를 차지한다.
+            무대가 가장 앞인 이유: 무대는 "지금 다 같이 이걸 봅시다" 라는 명시적 조작이다. */}
+        {stage ? (
+          <CollabStage mode={stage} stream={stageStream} cl={cl} snapshot={stageSnap}
+                       popoutFeatures={collabPopoutFeatures}
+                       onMode={openStage} onClose={() => setStage(null)} />
+        ) : mprOn ? (
           <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex" }}>
             <Suspense fallback={
               <div style={{ flex: 1, display: "grid", placeItems: "center", color: "var(--text-secondary)" }}>
@@ -5307,8 +5350,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               </button>
             </div>
           )}
-          {/* 원격 커서 — 참가자 색(비디오 타일 테두리와 같은 색)으로 표시 */}
-          {cl.cursors.map((c) => {
+          {/* 원격 커서 — 참가자 색(비디오 타일 테두리와 같은 색)으로 표시.
+              pid 가 페인 id 인 것만. 무대(screen·wb)의 커서는 그쪽 오버레이가 그린다 —
+              좌표계가 달라 여기서 그리면 엉뚱한 자리에 뜬다. */}
+          {cl.cursors.filter((c) => c.pid !== "screen" && c.pid !== "wb").map((c) => {
             const el = vpRef.current?.querySelector<HTMLElement>(`[data-pid="${c.pid}"]`);
             const box = el?.getBoundingClientRect();
             const host = vpRef.current?.getBoundingClientRect();
@@ -5431,6 +5476,9 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {collabPanelOn && !collabCollapsed && (cl.session
           ? <CollabSessionPanel session={cl.session} isHost={cl.isHost} meId={cl.meId}
                                 width={prefs.collabW} popoutFeatures={collabPopoutFeatures}
+                                onTakePresent={cl.takePresent}
+                                onStage={(peerId, name) => openStage(
+                                  peerId === null ? { kind: "wb" } : { kind: "screen", peerId, name })}
                                 onLeave={() => void cl.leaveSession()} />
           : <CollabDock open onClose={() => setCollabDockOpen(false)}
                         width={prefs.collabW} popoutFeatures={collabPopoutFeatures}

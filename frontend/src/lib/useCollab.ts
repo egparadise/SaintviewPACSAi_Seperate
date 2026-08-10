@@ -11,6 +11,8 @@ import {
   encodeSnapshot, makeThrottle, mergeAnno, removeAnno, sameSnapshot,
   type CollabCursor, type CollabSnapshot, type MirrorSource, type SessionAnno,
 } from "./collabState";
+import { LASER_TTL, navKey, onSurface, pruneLaser, type Surface } from "./collabSurface";
+import { t as tr } from "./i18n";
 import { showToast } from "./toast";
 
 /** 미러 송출 주기(ms) — 10Hz. 사람이 마우스로 움직이는 화면에는 충분히 매끄럽고,
@@ -54,11 +56,19 @@ export interface UseCollab {
    *  ⚠ 예전엔 '조작 전체 잠금'이었지만 이제는 **뷰포트 축만**이다.
    *    주석·글쓰기는 caps 로 따로 판정한다(can) — 그래야 여러 명이 동시에 그린다. */
   readOnly: boolean;
-  /** 세션 주석 — 여러 명이 동시에 그린 것. 작성자(by)별 색으로 그린다 */
+  /** 세션 주석 — 여러 명이 동시에 그린 것. 작성자(by)별 색으로 그린다.
+   *  ⚠ 표면이 섞여 있다. 뷰포트에 그릴 때는 반드시 `annosOf("pane")` 을 쓴다 —
+   *  화이트보드·화면 마크는 좌표계가 달라서 그대로 그리면 엉뚱한 곳에 찍힌다. */
   annos: SessionAnno[];
+  /** 그 표면의 것만. 레이저 만료분은 이미 걸러져 있다. */
+  annosOf: (s: Surface) => SessionAnno[];
   addAnno: (a: Omit<SessionAnno, "id" | "by">) => void;
   updateAnno: (id: string, a: Omit<SessionAnno, "id" | "by">) => void;
   removeAnno: (id: string) => void;
+  /** 그 표면의 마크를 전부 지운다 — 내 것만(Master 는 전원 것). 화면 공유 재시작 시 자동 호출. */
+  clearSurfaceMarks: (s: Surface) => void;
+  /** 발표권을 **가져온다** — Master 승인을 기다리지 않는다(collab.present 보유자 누구나). */
+  takePresent: () => void;
   cursors: RemoteCursor[];
   invite: CollabInvite | null;
   /** 세션 개설 → 만들어진 세션(실패 시 null). 곧바로 초대하려면 이 반환값의 code 를 쓴다
@@ -100,6 +110,9 @@ export function useCollab(opts: {
   const followRef = useRef(true);
   useEffect(() => { followRef.current = following; }, [following]);
   const lastSent = useRef<CollabSnapshot | null>(null);
+  // 발표자가 마지막으로 보여 준 '무엇을'(검사·시리즈·레이아웃). 이 값이 바뀌면 전환이다.
+  // null = 아직 한 장도 못 받음 → 첫 스냅샷을 전환으로 오인해 토스트를 띄우지 않는다.
+  const lastNav = useRef<string | null>(null);
   // 수신 직후에는 송출하지 않는다 — 받은 상태를 적용한 렌더가 다시 '변경됨'으로 잡혀
   // 되돌아가는 에코 루프가 생긴다. 제어권자만 송출하므로 실제로는 잘 안 생기지만,
   // 제어권이 넘어가는 찰나에 양쪽이 잠깐 송출자가 되는 순간이 있어 방어한다.
@@ -172,6 +185,19 @@ export function useCollab(opts: {
         case "state": {
           const snap = e.d as CollabSnapshot;
           if (!snap || snap.v !== 1) break;
+          // ── 발표 '전환' 은 자유 보기도 끌어온다 (2026-08-10 사용자 확정) ──
+          // 발표자가 검사·시리즈·레이아웃을 바꾼 것은 "이제 이걸 봅시다"라는 신호다.
+          // 자유 보기로 빠진 사람을 두고 가면 서로 다른 검사를 같은 것으로 믿고 논의하게
+          // 된다 — 오진 경로다. 반대로 팬·줌까지 끌어오면 남의 화면을 뺏는 것이라
+          // 아무도 작업을 못 한다. navKey 가 그 둘을 가른다(lib/collabSurface).
+          const key = navKey(snap);
+          const switched = lastNav.current !== null && lastNav.current !== key;
+          lastNav.current = key;
+          if (switched && !followRef.current) {
+            followRef.current = true;   // ref 를 먼저 — 아래 적용이 같은 틱에 일어난다
+            setFollowing(true);
+            showToast(tr("발표자가 화면을 전환했습니다 — 같은 화면으로 돌아갑니다"));
+          }
           // 자유 보기 중이면 발표자 화면을 **적용하지 않는다**. 적용하면 내가 방금 움직인
           // 화면이 100ms 뒤 되돌아가서 조작 자체가 불가능해진다("전부 동시"가 성립하는 지점).
           if (!followRef.current) break;
@@ -181,13 +207,17 @@ export function useCollab(opts: {
           break;
         }
         // ── 세션 주석 — 여러 명이 동시에 그린다. 서버가 진실이고 여기는 따라간다 ──
+        // ⚠ at(도착 시각)은 **여기서** 찍는다. 보낸 쪽 시계를 쓰면 좌석 간 시계 차이만큼
+        //   레이저가 즉시 사라지거나 영원히 안 사라진다(그래서 서버도 at 을 안 나른다).
         case "anno.sync":
-          setAnnos(Array.isArray(e.d) ? (e.d as SessionAnno[]) : []);
+          setAnnos(Array.isArray(e.d)
+            ? (e.d as SessionAnno[]).map((a) => ({ ...a, at: Date.now() }))
+            : []);
           break;
         case "anno.add":
         case "anno.update": {
           const row = e.d as SessionAnno;
-          if (row?.id) setAnnos((prev) => mergeAnno(prev, row));
+          if (row?.id) setAnnos((prev) => mergeAnno(prev, { ...row, at: Date.now() }));
           break;
         }
         case "anno.remove":
@@ -283,6 +313,42 @@ export function useCollab(opts: {
     collab.send({ t: "anno.remove", id });
   }, [session]);
 
+  // ── 표면별 분리 ──────────────────────────────────────────────────────────
+  // 🔴 이 셀렉터를 거치지 않고 annos 를 그대로 뷰포트에 그리면, 화이트보드·화면 마크는
+  //    sop_uid 가 없어서 Viewer2D 의 "sop_uid 없으면 이 검사 것" 필터를 통과해 **DICOM
+  //    영상 위로 쏟아진다**. 좌표계가 다르므로 위치도 전부 틀린다.
+  const annosOf = useCallback(
+    (s: Surface) => onSurface(annos, s), [annos]);
+
+  const clearSurfaceMarks = useCallback((s: Surface) => {
+    if (!session) return;
+    // 내 것만 지운다(서버가 소유자 검사). Master 는 서버 쪽에서 force 로 남의 것도 지운다.
+    for (const a of onSurface(annos, s)) {
+      if (isHost || a.by === meId) collab.send({ t: "anno.remove", id: a.id });
+    }
+  }, [session, annos, isHost, meId]);
+
+  // 레이저 소멸 — 화면에서 지우기만 한다(서버에 remove 를 보내지 않는다).
+  // 보내면 N명이 같은 삭제를 동시에 쏘고, 소유자가 아니면 서버가 거절해 로그만 더러워진다.
+  // 각자 자기 화면에서 시간이 지나면 지우는 것으로 충분하다 — 결과가 모두 같다.
+  useEffect(() => {
+    if (!annos.some((a) => a.life === "laser")) return;
+    const id = window.setInterval(() => {
+      setAnnos((prev) => {
+        const next = pruneLaser(prev, Date.now());
+        return next.length === prev.length ? prev : next;
+      });
+    }, Math.max(200, LASER_TTL / 6));
+    return () => window.clearInterval(id);
+  }, [annos]);
+
+  /** 발표권 가져오기 — 요청이 아니라 '가져오기'다(회의에서 발언권이 넘어가듯).
+   *  서버가 collab.present 보유 여부를 확인하고, 전원에게 ctl.granted 를 뿌린다. */
+  const takePresent = useCallback(() => {
+    if (!session || isPresenter) return;
+    collab.send({ t: "ctl.take" });
+  }, [session, isPresenter]);
+
   const sendCursor = useCallback((pid: string, x: number, y: number) => {
     if (!session) return;
     cursorThrottle.push({ pid, x, y });
@@ -349,7 +415,8 @@ export function useCollab(opts: {
 
   return {
     session, isHost, meId, isPresenter, following, follow, detach, caps, can,
-    annos, addAnno, updateAnno, removeAnno: removeAnnoById,
+    annos, annosOf, addAnno, updateAnno, removeAnno: removeAnnoById,
+    clearSurfaceMarks, takePresent,
     readOnly, cursors, invite,
     startSession, inviteUser, acceptInvite, declineInvite, leaveSession, sendCursor,
   };
