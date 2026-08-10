@@ -42,8 +42,26 @@ test("판독창 하단 Worklist 뷰어 — 체크·상하 조절·계정 저장�
   assert.match(s, /worklist_viewer_h: h \}, "user"\)/, "높이도 계정 로밍");
   assert.match(s, /cursor: "row-resize"/, "상하 스플리터");
   assert.match(s, /function WorklistDock\(/, "하단 도크 컴포넌트");
-  assert.match(s, /onDoubleClick=\{\(\) => onOpen\(r\.id\)\}/, "더블클릭 = 그 검사 판독 전환");
-  assert.match(s, /STATUS_LABEL\[r\.status\]/, "상태 표기는 워크리스트와 같은 사전(STATUS_LABEL)");
+});
+
+test("판독창 도크 = 실제 워크리스트와 동일 구성(2026-08-10 사용자 확정)", () => {
+  const s = src("src/pages/ReportWindow.tsx");
+  // 그리드·컬럼 구성·드래그/폭이 워크리스트와 **같은 컴포넌트·같은 저장 키** — 양방향
+  assert.match(s, /<StudyGrid items=\{rows\}/, "워크리스트의 StudyGrid 그대로(복사 금지)");
+  assert.match(src("src/pages/Worklist.tssx".replace("tssx", "tsx")), /export function StudyGrid/, "공유를 위해 export");
+  assert.ok((s.match(/by_viewer[\s\S]{0,80}sv/g) || []).length >= 2, "컬럼 순서 — by_viewer.sv 공유(읽기+저장)");
+  assert.match(s, /col_widths_by_viewer/, "컬럼 폭 — 같은 키 공유");
+  // 목록도 같은 소스 — Live 모드면 liveWorklist(로컬만 부르면 환자 목록이 갈린다 — 실제 증상)
+  assert.match(s, /sv_server_mode.*=== "live"/, "모드 판정");
+  assert.match(s, /api\.liveWorklist\(\{ limit: 300/, "Live 소스");
+  // SEARCH — 워크리스트 통합 검색과 같은 범위/방식
+  assert.match(s, /sbScopeParam\(\), qop: sbOpParam\(\)/, "같은 검색 범위·방식");
+  assert.ok(s.includes(">SEARCH</button>"), "SEARCH 버튼");
+  // 현재 판독 환자 선택 줄 + ◀▶ 이동 동기(자동 스크롤) + 클릭=판독 전환·영상 열기
+  assert.match(s, /selectedId=\{curId\}/, "현재 환자 = 선택 줄");
+  assert.match(s, /querySelector\("tr\.selected"\)/, "◀▶ 이동 시 선택 줄로 자동 스크롤");
+  assert.match(s, /onSelect=\{\(row\) => \{ if \(row\.id !== curId\) onOpen\(row\.id\); \}\}/,
+               "클릭 = 그 검사 판독 전환 + 뷰어(영상)도 함께");
 });
 
 test("Setting>판독 '판독창 설정' — 같은 키(report.prefs.worklist_viewer)로 양방향", () => {

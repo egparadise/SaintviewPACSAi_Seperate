@@ -1225,7 +1225,7 @@ const GRID_COL_DEF_W: Record<string, number> = {
   request_datetime: 150, hospital_name: 170, center_name: 130, assigned_doctor: 100,
   priority: 80, instance_count: 56, series_count: 50, modality: 56, read_state: 52, status: 76,
 };
-function StudyGrid({
+export function StudyGrid({
   items, columns, selectedId, selectedIds, onSelect, onOpen, onContext, variant, treeDisabled,
   colWidths, onReorder, onResize,
 }: {

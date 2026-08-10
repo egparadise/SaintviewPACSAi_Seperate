@@ -1,8 +1,8 @@
 // 전용 판독 창 — 뷰어 [Reading] 버튼으로 열리는 별도 페이지 (?report=1&study=ID)
 // 레이아웃: [판독|판독 기록|단축키|템플릿] 탭 · Font · CVR · ◀▶ · 초기화/저장/승인 · Reading/Conclusion
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail, type StudyRow } from "../api";
-import { STATUS_LABEL } from "./Worklist";
+import { StudyGrid, VIEWER_COL_DEFAULT, sbOpParam, sbScopeParam } from "./Worklist";
 import { onStudySync, onViewerCloseAll, postStudySync } from "../lib/sync";
 import { shouldCloseReportWindow } from "../lib/viewerClose";
 import { liveViewerSlots, noteViewerSlot } from "../lib/viewerSlots";
@@ -923,55 +923,96 @@ export function ReportWindow() {
   );
 }
 
-/* 판독창 하단 Worklist 뷰어 — 워크리스트와 같은 소스(api.worklist: Live/로컬 자동)를 30초마다
- * 갱신해 '다음 판독을 해야 할 환자'를 보여준다. 단일클릭=선택 표시, 더블클릭=그 검사 판독 전환. */
+/* 판독창 하단 Worklist 뷰어(2026-08-10 사용자 확정 — **실제 워크리스트와 동일 구성**).
+ * · 그리드는 워크리스트의 StudyGrid 그대로 — 컬럼 구성·순서·폭이 계정 저장키
+ *   (worklist.prefs.by_viewer.sv / col_widths_by_viewer.sv)를 **공유**해 어느 쪽에서
+ *   드래그해도 양쪽에 적용된다(같은 키 = 양방향).
+ * · 목록도 같은 소스 — Live 모드면 liveWorklist. 예전엔 로컬 API 만 불러 "환자 List 가
+ *   모두 달라" 증상이 났다(원격 직결 계정인데 로컬 Orthanc 목록이 나온 것).
+ * · SEARCH 는 워크리스트 통합 검색과 같은 범위/방식(sbScopeParam/sbOpParam).
+ * · 현재 판독 환자 = 선택 줄 + 자동 스크롤(◀▶ 이동 동기). 클릭/더블클릭 = 그 검사 판독
+ *   전환 + 뷰어(영상)도 함께 열린다(onOpen — ◀▶ 와 같은 경로). */
 function WorklistDock({ curId, onOpen }: { curId: number; onOpen: (id: number) => void }) {
   const [rows, setRows] = useState<StudyRow[]>([]);
   const [err, setErr] = useState("");
+  const [cols, setCols] = useState<string[]>(VIEWER_COL_DEFAULT.sv);
+  const [colW, setColW] = useState<Record<string, number>>({});
+  const [q, setQ] = useState("");
+  const qRef = useRef("");
+  const boxRef = useRef<HTMLDivElement | null>(null);
+
+  // 계정의 워크리스트 컬럼 구성(SaintView 버킷) — 없으면 뷰어 기본값, read_state 는 항상 맨 앞
   useEffect(() => {
-    let alive = true;
-    const tick = () => api.worklist({ limit: "200" })
-      .then((r) => { if (alive) { setRows(r.items); setErr(""); } })
-      .catch((e) => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
+    api.getSetting("worklist.prefs").then((r) => {
+      const v = r.value as { by_viewer?: { sv?: string[] };
+                            col_widths_by_viewer?: { sv?: Record<string, number> } };
+      const ov = v.by_viewer?.sv;
+      const base = ov?.length ? ov : VIEWER_COL_DEFAULT.sv;
+      setCols(base.includes("read_state") ? base : ["read_state", ...base]);
+      setColW(v.col_widths_by_viewer?.sv ?? {});
+    }).catch(() => { /* 설정 실패 = 기본 구성 */ });
+  }, []);
+  // 드래그 이동/폭 조절 — 워크리스트와 같은 키에 저장(양방향 적용)
+  const saveCols = (next: string[]) => {
+    setCols(next);
+    api.getSetting("worklist.prefs").then((r) =>
+      api.putSetting("worklist.prefs",
+        { ...r.value, by_viewer: { ...((r.value as { by_viewer?: object }).by_viewer ?? {}), sv: next } },
+        "user")).catch(() => {});
+  };
+  const saveColW = (c: string, px: number) => {
+    setColW((p) => {
+      const next = { ...p, [c]: px };
+      api.getSetting("worklist.prefs").then((r) => {
+        const cur = ((r.value as { col_widths_by_viewer?: Record<string, Record<string, number>> })
+          .col_widths_by_viewer) ?? {};
+        return api.putSetting("worklist.prefs",
+          { ...r.value, col_widths_by_viewer: { ...cur, sv: next } }, "user");
+      }).catch(() => {});
+      return next;
+    });
+  };
+
+  const tick = useCallback(() => {
+    const live = localStorage.getItem("sv_server_mode") === "live";
+    const query = qRef.current.trim();
+    (live
+      ? api.liveWorklist({ limit: 300, ...(query ? { q: query } : {}) })
+      : api.worklist({ limit: "300", qf: sbScopeParam(), qop: sbOpParam(),
+                       ...(query ? { q: query } : {}) }))
+      .then((r) => { setRows(r.items); setErr(""); })
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+  }, []);
+  useEffect(() => {
     tick();
     const t = window.setInterval(tick, 30_000);
-    return () => { alive = false; window.clearInterval(t); };
-  }, []);
-  const th: React.CSSProperties = { position: "sticky", top: 0, background: "var(--bg-elevated)",
-                                    textAlign: "left", padding: "4px 8px", whiteSpace: "nowrap" };
-  const td: React.CSSProperties = { padding: "3px 8px", whiteSpace: "nowrap", overflow: "hidden",
-                                    textOverflow: "ellipsis", maxWidth: 260 };
+    return () => window.clearInterval(t);
+  }, [tick]);
+
+  // 현재 판독 환자 줄이 항상 보이게 — ◀▶ 이동·목록 갱신마다 선택 줄로 스크롤
+  useEffect(() => {
+    const el = boxRef.current?.querySelector("tr.selected");
+    el?.scrollIntoView({ block: "nearest" });
+  }, [curId, rows]);
+
   return (
-    <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-      {err && <div style={{ padding: 8, fontSize: 12, color: "var(--stat-emergency)" }}>{err}</div>}
-      <table className="grid-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-        <thead><tr>
-          <th style={th}>{tr("상태")}</th><th style={th}>{tr("이름")}</th><th style={th}>ID</th>
-          <th style={th}>MOD</th><th style={th}>{tr("검사일")}</th><th style={th}>{tr("검사시각")}</th>
-          <th style={th}>{tr("부위")}</th><th style={th}>Img</th>
-          <th style={th}>{tr("검사명")}</th><th style={th}>{tr("의뢰의")}</th>
-        </tr></thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.id} onDoubleClick={() => onOpen(r.id)}
-                title={tr("더블클릭 = 그 검사 판독으로 전환 (뷰어도 함께 전환)")}
-                style={{ cursor: "pointer", borderBottom: "1px solid var(--border)",
-                         background: r.id === curId ? "var(--bg-elevated)" : undefined,
-                         fontWeight: r.id === curId ? 700 : 400 }}>
-              <td style={td}>{tr(STATUS_LABEL[r.status] ?? r.status)}</td>
-              <td style={td}>{r.patient_name}</td>
-              <td style={td}>{r.patient_key}</td>
-              <td style={td}>{r.modality}</td>
-              <td style={td}>{r.study_date}</td>
-              <td style={td}>{r.study_time}</td>
-              <td style={td}>{r.body_part}</td>
-              <td style={td}>{r.instance_count}</td>
-              <td style={td}>{r.study_desc}</td>
-              <td style={td}>{r.referring_physician}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 8px", flexShrink: 0 }}>
+        <input value={q}
+               onChange={(e) => { setQ(e.target.value); qRef.current = e.target.value; }}
+               onKeyDown={(e) => { if (e.key === "Enter") tick(); }}
+               placeholder={tr("SEARCH — 선택한 범위에서 검색 (=정확 / 접두% / !제외 · 공백=다중어)")}
+               style={{ flex: 1, fontSize: 11.5 }} />
+        <button className="primary" style={{ fontSize: 11, padding: "2px 12px" }} onClick={tick}>SEARCH</button>
+        {err && <span style={{ fontSize: 11, color: "var(--stat-emergency)" }}>{err}</span>}
+      </div>
+      <div ref={boxRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        <StudyGrid items={rows} columns={cols} selectedId={curId}
+                   onSelect={(row) => { if (row.id !== curId) onOpen(row.id); }}
+                   onOpen={(row) => onOpen(row.id)}
+                   onContext={(e) => e.preventDefault()}
+                   colWidths={colW} onReorder={saveCols} onResize={saveColW} />
+      </div>
     </div>
   );
 }
