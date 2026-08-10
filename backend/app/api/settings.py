@@ -16,6 +16,10 @@ ALLOWED_KEYS = {
     "ai.policy",             # 자동생성·vision 토글 (관리자)
     "worklist.prefs",        # 사용자 기본 필터·자동갱신·컬럼 구성(F-8)
     "viewer.prefs",          # 사용자 뷰어 환경(행잉·오버레이)
+    # 기기 프로필(2026-08-10 사용자 확정) — 계정당 3슬롯. 레지스트리 + 장비 의존 오버레이
+    "device.slots",          # {devices:[{id,slot,label,screen,last_seen}]} — 슬롯 배정 대장
+    "viewer.prefs.dev1", "viewer.prefs.dev2", "viewer.prefs.dev3",        # 모니터 구성 오버레이
+    "worklist.prefs.dev1", "worklist.prefs.dev2", "worklist.prefs.dev3",  # 패널 크기 오버레이
     "report.phrases",        # 상용구 사전 (화면분석 §5.6 Predefined Readings)
     "mode.profiles",         # 05 제품 모드 프로파일 JSON (S7 — 전역/관리자 전용)
     "worklist.tabs",         # 워크리스트 페이지 탭 (UBPACS-Z 최대 10페이지 패턴)
@@ -58,6 +62,9 @@ GLOBAL_ONLY_KEYS = {
 # 규칙: '뷰어에 따라 바꿀 수 있는 모든 값'(툴·레이아웃·글자크기·행잉·워크리스트 구성)은 계정에 귀속.
 USER_ONLY_KEYS = {
     "viewer.prefs", "worklist.prefs", "report.prefs", "viewer.hp",
+    "device.slots",
+    "viewer.prefs.dev1", "viewer.prefs.dev2", "viewer.prefs.dev3",
+    "worklist.prefs.dev1", "worklist.prefs.dev2", "worklist.prefs.dev3",
     "worklist.tree", "worklist.tabs", "report.phrases_local",
 }
 

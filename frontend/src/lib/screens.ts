@@ -65,6 +65,26 @@ export async function screenFeatures(
   return `left=${left},top=${top},width=${right - left},height=${bottom - top}`;
 }
 
+/** 판독창(sv_report) 열기 — **항상 전체 화면**(2026-08-10 사용자 확정 "작은 화면으로 뜬다").
+ *  mon(설정>모니터 '판독' 모니터)이 있으면 그 모니터 전체, 없으면 현재 모니터 전체 크기.
+ *  창을 여는 곳이 4곳(워크리스트 2·뷰어 2)이라 제각각의 고정 폭(440/980/1280)으로 갈렸었다 —
+ *  크기 결정은 이 함수 한 곳이다. 재사용 창은 open 좌표가 무시되므로 moveTo/resizeTo 로 맞춘다. */
+export async function openReportWindow(studyId: number, mon?: number | null): Promise<Window | null> {
+  const scr = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const full = `left=${scr.availLeft ?? 0},top=${scr.availTop ?? 0},width=${scr.availWidth},height=${scr.availHeight}`;
+  const features = await screenFeatures(mon != null && mon >= 0 ? [mon] : null, full);
+  const url = `${window.location.origin}${window.location.pathname}?report=1&study=${studyId}`;
+  const w = window.open(url, "sv_report", features);
+  if (!w) return null;
+  const m: Record<string, number> = {};
+  for (const kv of features.split(",")) { const [k, v] = kv.split("="); m[k] = Number(v); }
+  if (![m.left, m.top, m.width, m.height].some((n) => n === undefined || Number.isNaN(n))) {
+    try { w.moveTo(m.left, m.top); w.resizeTo(m.width, m.height); } catch { /* 권한/브라우저 제약 */ }
+  }
+  try { w.focus(); } catch { /* 무시 */ }
+  return w;
+}
+
 /** 선택 모니터별 개별 창 배치 — 모니터 번호(인덱스) 오름차순.
  *  다중 모니터에 뷰어를 "각각" 띄우기 위한 것. 단일 스팬 창은 브라우저가 한 모니터로
  *  클램프하고, 비연속 선택(예: 1·3·4, 2 건너뜀) 시 사이 모니터까지 덮으므로 창을 나눈다.

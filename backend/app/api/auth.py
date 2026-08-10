@@ -127,14 +127,17 @@ def client_login(body: ClientLoginRequest, request: Request, response: Response,
                  db: Session = Depends(get_db)) -> dict:
     """Client 뷰어 로그인 — 병원 ID/이름 + 개별 ID + Password.
 
-    같은 병원·같은 ID 로 이미 살아있는 세션이 있으면 토큰 대신 {duplicate:true} 를 반환한다
-    (프론트가 Yes/No 인계 프롬프트 → /client-login/force 로 인계).
+    동시 로그인은 계정당 **3개 시스템**까지(2026-08-10 사용자 확정 — 태블릿·노트북·
+    판독환경). 3개가 차 있으면 토큰 대신 {duplicate:true} 를 반환한다
+    (프론트가 Yes/No 인계 프롬프트 → /client-login/force 가 가장 오래 안 쓴 세션만 인계).
     """
     from app.services import session_service
 
     account, hospital = _resolve_client(body, request, db)
-    if session_service.find_live(db, hospital.id, account.username):
-        return {"duplicate": True, "hospital_name": hospital.name}
+    live = session_service.live_sessions(db, hospital.id, account.username)
+    if len(live) >= session_service.MAX_LIVE_SESSIONS:
+        return {"duplicate": True, "hospital_name": hospital.name,
+                "live_count": len(live), "max_sessions": session_service.MAX_LIVE_SESSIONS}
     return _client_login_ok(db, account, hospital, response)
 
 
@@ -145,11 +148,10 @@ def client_login_force(body: ClientLoginRequest, request: Request, response: Res
     from app.services import session_service
 
     account, hospital = _resolve_client(body, request, db)
-    live = session_service.find_live(db, hospital.id, account.username)
-    if live:
-        # 구 세션은 카운트다운 후 무효 — pixel_session 이 revoke_deadline 을 보므로
-        # 다른 브라우저에 남아 있던 구 sv_pix 쿠키도 그 시점부터 401 이 된다.
-        session_service.revoke(db, live, "다른 곳에서 로그인됩니다. 10초 뒤에 종료됩니다.")
+    # 상한(3)을 넘기는 만큼만 — 가장 오래 안 쓴 세션에 카운트다운. 나머지 시스템은 산다.
+    # pixel_session 이 revoke_deadline 을 보므로 그 브라우저의 sv_pix 도 그 시점부터 401.
+    session_service.enforce_cap(db, hospital.id, account.username,
+                                "다른 곳에서 로그인됩니다. 10초 뒤에 종료됩니다.")
     return _client_login_ok(db, account, hospital, response)
 
 
@@ -301,6 +303,10 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
         db.rollback()
 
     # B 세션 + JWT(sid) — B Account 없이 A 신원으로 세션 구성(sub=A user_id).
+    # 동시 로그인 상한 3 시스템 — A 계정 경로는 중복 Yes/No 프롬프트 채널이 없으므로
+    # 4번째 시스템 로그인 시 가장 오래 안 쓴 세션을 **자동 인계**한다(10초 카운트다운).
+    session_service.enforce_cap(db, None, f"a:{body.user_id}",
+                                "같은 계정이 다른 시스템에서 로그인됩니다. 10초 뒤에 종료됩니다.")
     sid = session_service.register(db, None, f"a:{body.user_id}")
     db.commit()
     settings = get_settings()

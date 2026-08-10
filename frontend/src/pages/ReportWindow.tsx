@@ -1,7 +1,8 @@
 // 전용 판독 창 — 뷰어 [Reading] 버튼으로 열리는 별도 페이지 (?report=1&study=ID)
 // 레이아웃: [판독|판독 기록|단축키|템플릿] 탭 · Font · CVR · ◀▶ · 초기화/저장/승인 · Reading/Conclusion
 import { useEffect, useRef, useState } from "react";
-import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail } from "../api";
+import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail, type StudyRow } from "../api";
+import { STATUS_LABEL } from "./Worklist";
 import { onStudySync, onViewerCloseAll, postStudySync } from "../lib/sync";
 import { shouldCloseReportWindow } from "../lib/viewerClose";
 import { liveViewerSlots, noteViewerSlot } from "../lib/viewerSlots";
@@ -82,6 +83,37 @@ export function ReportWindow() {
   const [histView, setHistView] = useState<Report | null>(null);
   const [phrases, setPhrases] = useState<PhraseRow[]>([]);
   const [rdOpts, setRdOpts] = useState<Record<string, unknown>>({});
+  // Worklist 뷰어 도크(2026-08-10 사용자 확정) — 판독창 하단에 워크리스트를 붙여
+  // '다음 판독 대상'을 보면서 판독한다. 체크·높이 모두 report.prefs 계정 로밍
+  // (Setting>판독>판독창 설정과 양방향 — 같은 키 worklist_viewer 를 읽고 쓴다).
+  const [wlDock, setWlDock] = useState(false);
+  const [wlDockH, setWlDockH] = useState(260);
+  const toggleWlDock = (on: boolean) => {
+    setWlDock(on);
+    api.getSetting("report.prefs").then((r) =>
+      api.putSetting("report.prefs", { ...r.value, worklist_viewer: on }, "user")).catch(() => {});
+  };
+  const dockDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY, startH = wlDockH;
+    const move = (ev: MouseEvent) =>
+      setWlDockH(Math.min(Math.max(120, startH + (startY - ev.clientY)), Math.round(window.innerHeight * 0.7)));
+    const up = () => {
+      window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up);
+      setWlDockH((h) => {
+        api.getSetting("report.prefs").then((r) =>
+          api.putSetting("report.prefs", { ...r.value, worklist_viewer_h: h }, "user")).catch(() => {});
+        return h;
+      });
+    };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  };
+  /** 도크 더블클릭 — 그 검사의 판독으로 전환(◀▶ 와 동일하게 뷰어 창도 함께 전환) */
+  const openFromDock = (id: number) => {
+    void loadStudyRef.current(id);
+    const w = window.open(viewerUrlFor(`viewer=2d&study=${id}`), "sv_viewer");
+    if (w) noteViewerSlot("sv_viewer", id);
+  };
   const [msg, setMsg] = useState("");
   // ── History(과거검사) 상호작용: 단일클릭=판독 표시, 더블클릭=1:2 Compare, 드래그·잡고 V=판독영역 복사 ──
   // 과거검사 판독 미리보기 — 검사별 최종(없으면 최신) 판독문 lazy 로드(최대 12건 캐시)
@@ -332,6 +364,9 @@ export function ReportWindow() {
         api.getSetting("report.prefs").then((r) => {
           const v = r.value as Record<string, unknown>;
           setRdOpts(v);
+          if (v.worklist_viewer === true) setWlDock(true);
+          const wh = Number(v.worklist_viewer_h);
+          if (wh >= 120 && wh <= 800) setWlDockH(wh);
           if (v.sidebar_tab === "sheet") setSideTab("sheet");
           if (v.panel_tab === "template") setRightTab("tpl");
         }).catch(() => {});
@@ -717,6 +752,11 @@ export function ReportWindow() {
             <span style={{ color: "var(--text-secondary)" }}>{detail.modality}/{detail.study_date}</span>
             {msg && <span style={{ color: "var(--stat-final)" }}>{msg}</span>}
             <span style={{ flex: 1 }} />
+            <label title={tr("판독창 하단에 워크리스트 표시 — 다음 판독 대상 확인 (계정 저장·Setting>판독)")}
+                   style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <input type="checkbox" checked={wlDock} onChange={(e) => toggleWlDock(e.target.checked)} />
+              {tr("Worklist 뷰어")}
+            </label>
             <label title={tr("CVR Notice — critical 소견 경고")} style={{ display: "flex", gap: 4, alignItems: "center" }}>
               <input type="checkbox" checked={!!rdOpts.cvr_notice}
                      onChange={(e) => setRdOpts((p) => ({ ...p, cvr_notice: e.target.checked }))} />
@@ -868,6 +908,70 @@ export function ReportWindow() {
           </div>
         </div>
       </div>
+      {/* 하단 Worklist 뷰어(2026-08-10 사용자 확정) — 상하 스플리터로 높이 조절, 계정 저장 */}
+      {wlDock && (
+        <>
+          <div onMouseDown={dockDragStart} title={tr("드래그하여 높이 조절")}
+               style={{ height: 6, cursor: "row-resize", background: "var(--border)", flexShrink: 0 }} />
+          <div style={{ height: wlDockH, flexShrink: 0, borderTop: "1px solid var(--border)",
+                        display: "flex", flexDirection: "column", minHeight: 0, background: "var(--bg-panel)" }}>
+            <WorklistDock curId={detail.id} onOpen={openFromDock} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* 판독창 하단 Worklist 뷰어 — 워크리스트와 같은 소스(api.worklist: Live/로컬 자동)를 30초마다
+ * 갱신해 '다음 판독을 해야 할 환자'를 보여준다. 단일클릭=선택 표시, 더블클릭=그 검사 판독 전환. */
+function WorklistDock({ curId, onOpen }: { curId: number; onOpen: (id: number) => void }) {
+  const [rows, setRows] = useState<StudyRow[]>([]);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let alive = true;
+    const tick = () => api.worklist({ limit: "200" })
+      .then((r) => { if (alive) { setRows(r.items); setErr(""); } })
+      .catch((e) => { if (alive) setErr(e instanceof Error ? e.message : String(e)); });
+    tick();
+    const t = window.setInterval(tick, 30_000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, []);
+  const th: React.CSSProperties = { position: "sticky", top: 0, background: "var(--bg-elevated)",
+                                    textAlign: "left", padding: "4px 8px", whiteSpace: "nowrap" };
+  const td: React.CSSProperties = { padding: "3px 8px", whiteSpace: "nowrap", overflow: "hidden",
+                                    textOverflow: "ellipsis", maxWidth: 260 };
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+      {err && <div style={{ padding: 8, fontSize: 12, color: "var(--stat-emergency)" }}>{err}</div>}
+      <table className="grid-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+        <thead><tr>
+          <th style={th}>{tr("상태")}</th><th style={th}>{tr("이름")}</th><th style={th}>ID</th>
+          <th style={th}>MOD</th><th style={th}>{tr("검사일")}</th><th style={th}>{tr("검사시각")}</th>
+          <th style={th}>{tr("부위")}</th><th style={th}>Img</th>
+          <th style={th}>{tr("검사명")}</th><th style={th}>{tr("의뢰의")}</th>
+        </tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id} onDoubleClick={() => onOpen(r.id)}
+                title={tr("더블클릭 = 그 검사 판독으로 전환 (뷰어도 함께 전환)")}
+                style={{ cursor: "pointer", borderBottom: "1px solid var(--border)",
+                         background: r.id === curId ? "var(--bg-elevated)" : undefined,
+                         fontWeight: r.id === curId ? 700 : 400 }}>
+              <td style={td}>{tr(STATUS_LABEL[r.status] ?? r.status)}</td>
+              <td style={td}>{r.patient_name}</td>
+              <td style={td}>{r.patient_key}</td>
+              <td style={td}>{r.modality}</td>
+              <td style={td}>{r.study_date}</td>
+              <td style={td}>{r.study_time}</td>
+              <td style={td}>{r.body_part}</td>
+              <td style={td}>{r.instance_count}</td>
+              <td style={td}>{r.study_desc}</td>
+              <td style={td}>{r.referring_physician}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

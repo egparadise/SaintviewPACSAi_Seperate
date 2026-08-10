@@ -74,7 +74,7 @@ import { OrderEntryRis } from "../components/OrderEntryRis";
 import { MergeIcon, ReadStateIcon } from "../components/readState";
 import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
-import { screenFeatures, screenFeaturesList } from "../lib/screens";
+import { openReportWindow, screenFeatures, screenFeaturesList } from "../lib/screens";
 import { showToast } from "../lib/toast";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
 import {
@@ -180,7 +180,7 @@ function hpFor(modality: string): string | undefined {
   return hangingMap[modality] ?? hangingMap.default;
 }
 
-const STATUS_LABEL: Record<string, string> = {
+export const STATUS_LABEL: Record<string, string> = {
   received: "요청", draft_ready: "AI초안", reading: "판독중", finalized: "확정",   // 2026-08-10 표시 변경
   suspended: "보류", draft: "초안", in_review: "검토중",
 };
@@ -3489,11 +3489,8 @@ export function Worklist() {
       // 자동 오픈 게이트 — 설정>모니터에서 '판독' 모니터를 지정한 경우에만 더블클릭 자동 오픈.
       // 미지정이면 자동으로 띄우지 않음(뷰어/워크리스트의 [Reading] 버튼으로만 수동 오픈).
       if (mon == null || mon < 0) return;
-      const beside = `left=${window.screenX + Math.max(360, window.outerWidth - 620)},` +
-        `top=${window.screenY},width=980,height=${Math.max(600, window.outerHeight - 40)}`;
-      const features = await screenFeatures([mon], beside);
-      readingWinRef.current = window.open(
-        `${window.location.origin}${window.location.pathname}?report=1&study=${id}`, "sv_report", features);
+      // 항상 전체 화면(2026-08-10 사용자 확정) — 배치 모니터의 전체 크기로 연다.
+      readingWinRef.current = await openReportWindow(id, mon);
     })();
   }, []);
 
@@ -4238,12 +4235,7 @@ export function Worklist() {
         void (async () => {
           const r = await api.getSetting("viewer.prefs").catch(() => ({ value: {} }));
           const mon = (r.value as { monitor?: { report?: number | null } }).monitor?.report;
-          const features = await screenFeatures(mon != null && mon >= 0 ? [mon] : null,
-            "width=1280,height=860");
-          const w = window.open(
-            `${window.location.origin}${window.location.pathname}?report=1&study=${selected.id}`,
-            "sv_report", features);
-          w?.focus();
+          await openReportWindow(selected.id, mon);   // 항상 전체 화면(2026-08-10 사용자 확정)
         })();
         break;
       }

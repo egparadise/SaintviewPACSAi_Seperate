@@ -5,9 +5,10 @@ import { api, openViewer, type Anno, type InstanceNode, type SeriesNode, type St
 import { annoLabel, contentRect, measureAnno, screenToImage } from "../lib/annotations";
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
-import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
+import { openReportWindow, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab, postViewerOpened } from "../lib/sync";
 import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerClosing, markViewerMounted } from "../lib/viewerClose";
+import { focusWorklistWindow } from "../lib/worklistFocus";
 import { clearViewerSlots, isViewerSlotName, otherLiveViewerCount, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
 import { Splitter, clampSz } from "../lib/Splitter";
@@ -3364,8 +3365,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setCloseDlg(false);
     if (remember) {
       setPrefs((p) => ({ ...p, close_mode: mode }));
-      api.getSetting("viewer.prefs").then((r) =>
-        api.putSetting("viewer.prefs", { ...r.value, close_mode: mode }, "user")).catch(() => {});
+      // ★ 완료를 기다린다(2026-08-10 사용자 확정 — "기본으로 체크해도 매번 다시 묻는다").
+      //   이 창은 곧 닫히므로 fire-and-forget PUT 은 창과 함께 중단돼 서버에 남지 않았다.
+      //   주석 저장(saveAnnotations)처럼 저장이 끝난 뒤에 닫는다(실패해도 닫기는 진행).
+      try {
+        const r = await api.getSetting("viewer.prefs");
+        await api.putSetting("viewer.prefs", { ...r.value, close_mode: mode }, "user");
+      } catch { /* 저장 실패해도 닫기는 진행 */ }
     }
     // 확정된 순간에만 다른 모니터 뷰어에 닫기 전파
     const bcast = closeAllMonitorsRef.current;
@@ -3399,6 +3405,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // 수신 창은 핸들러 진입 즉시 releaseViewerSlot() 하므로, 저장 왕복이 끝난 지금 한 번 더 지우면
     // 장부가 확실히 빈다 → All Close 직후 다음 오픈이 ①부트스트랩으로 시작한다.
     if (bcast) clearViewerSlots();
+    // WORKLIST 전면(2026-08-10 사용자 확정) — 이 창이 닫힌 뒤 워크리스트 창이 다른 창
+    // (판독뷰어 등)에 가려져 있으면, 같은 모니터든 다른 모니터든 가장 앞으로 끌어온다.
+    // I-View 는 gotoWorklist(proceedClose)로 같은 헬퍼를 탄다 — 구현은 lib/worklistFocus 한 곳.
+    focusWorklistWindow();
     onClose();
   };
   /** 판정(lib/viewerClose.decideCloseScope) 그대로 접수한다 — 인자 순서를 헷갈릴 여지를 없앤다.
@@ -4104,8 +4114,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       mkItem("report", "Report", () => { void (async () => {
         const r = await api.getSetting("viewer.prefs").catch(() => ({ value: {} }));
         const mon = (r.value as { monitor?: { report?: number | null } }).monitor?.report;
-        const features = await screenFeatures(mon != null && mon >= 0 ? [mon] : null, "width=980,height=800");
-        window.open(`${window.location.origin}${window.location.pathname}?report=1&study=${detail.id}`, "sv_report", features);
+        await openReportWindow(detail.id, mon);   // 항상 전체 화면(2026-08-10 사용자 확정)
       })(); }),
     ] },
   ];
@@ -4696,8 +4705,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         void (async () => {
           const r = await api.getSetting("viewer.prefs").catch(() => ({ value: {} }));
           const mon = (r.value as { monitor?: { report?: number | null } }).monitor?.report;
-          const features = await screenFeatures(mon != null && mon >= 0 ? [mon] : null, "width=980,height=800");
-          window.open(`${window.location.origin}${window.location.pathname}?report=1&study=${detail.id}`, "sv_report", features);
+          await openReportWindow(detail.id, mon);   // 항상 전체 화면(2026-08-10 사용자 확정)
         })();
         break;
       case "m_scroll": setMouseMode("scroll"); break;
@@ -5111,15 +5119,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 })(); }}>📱</button>
         <button onClick={() => setSettingsOpen(true)} title={tr("설정 — 뷰어에서 바로 Setting 진입")}>Settings</button>
         <button title={tr("Reading — 전용 판독 창(새 페이지) 열기 · 모니터 배치는 Setting>모니터")}
-                onClick={() => {
-                  const rm = prefs.monitor?.report;
-                  void screenFeatures(rm != null ? [rm] : null, "width=440,height=1020").then((features) => {
-                    const w = window.open(
-                      `${window.location.origin}${window.location.pathname}?report=1&study=${detail.id}`,
-                      "sv_report", features);
-                    w?.focus();
-                  });
-                }}>
+                onClick={() => { void openReportWindow(detail.id, prefs.monitor?.report); }}>
           Reading
         </button>
         <button onClick={toggleOverlay} title={tr("오버레이 표시 토글 (T+Del) · 글자 크기는 T+마우스스크롤 — 계정 저장")}>

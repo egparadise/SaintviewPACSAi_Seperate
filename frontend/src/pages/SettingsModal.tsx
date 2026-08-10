@@ -207,6 +207,22 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [page, setPage] = useState<string>(visibleTabs[0]?.key ?? "");
   // 설정 창 크기 — 기본(860×580) ↔ 전체 화면 토글, 우하단 드래그로 자유 조절(resize:both)
   const [maxed, setMaxed] = useState(false);
+  // 설정 창 드래그 이동(2026-08-10 사용자 확정) — 제목줄을 좌클릭한 채 끌면 이동.
+  const [dragOff, setDragOff] = useState({ x: 0, y: 0 });
+  const dragMove = (e: React.MouseEvent) => {
+    if (maxed) return;                                    // 최대화 상태에선 이동 무의미
+    const t = e.target as HTMLElement;
+    if (t.closest("button, input, select, a, [data-nodrag]")) return;   // 헤더 안 컨트롤은 드래그 아님
+    e.preventDefault();
+    const sx = e.clientX - dragOff.x, sy = e.clientY - dragOff.y;
+    const clampX = Math.round(window.innerWidth * 0.46), clampY = Math.round(window.innerHeight * 0.46);
+    const move = (ev: MouseEvent) => setDragOff({
+      x: Math.min(clampX, Math.max(-clampX, ev.clientX - sx)),
+      y: Math.min(clampY, Math.max(-clampY, ev.clientY - sy)),
+    });
+    const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  };
   const [treeW, setTreeW] = useState(190);   // 좌측 트리 폭 — 스플리터 드래그로 조절
   const [saved, setSaved] = useState("");
 
@@ -409,6 +425,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [profLicense, setProfLicense] = useState("");
   const [profMajor, setProfMajor] = useState("");   // 전문의 번호(2026-08-10) — A 자동 채움, 없으면 공란
   const [chipDays, setChipDays] = useState<number>(Number(localStorage.getItem("sv_chip_days") || 30));
+  // 기기 프로필(2026-08-10 사용자 확정) — 계정당 3슬롯. 장비 의존 설정(모니터·패널 크기)의 슬롯 목록
+  const [devices, setDevices] = useState<{ id: string; slot: number; label: string;
+                                           screen?: string; last_seen?: string }[] | null>(null);
+  useEffect(() => {
+    api.deviceSlots().then((r) => setDevices(r.devices)).catch(() => setDevices([]));
+  }, []);
   // DICOM 노드 (SCP/SCU) — 전역/관리자
   const [nodes, setNodes] = useState<DicomNode[]>([]);
   const [nodeMsg, setNodeMsg] = useState("");
@@ -815,6 +837,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       <div style={{
         background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 8,
         display: "flex", flexDirection: "column", overflow: "hidden",
+        // 드래그 이동 오프셋 — 최대화에서는 원위치(전체 화면이라 이동 무의미)
+        transform: maxed || (!dragOff.x && !dragOff.y) ? undefined : `translate(${dragOff.x}px, ${dragOff.y}px)`,
         ...(maxed
           // flex 로 남는 폭을 쓴다 — 형제(Refresh)와 padding 을 자동으로 비켜 간다
           ? { flex: 1, minWidth: 0, height: "95vh" }
@@ -827,7 +851,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               // 우하단 핸들 드래그로 좌우·상하 크기 자유 조절(네이티브 resize)
               resize: "both" as const, minWidth: 640, minHeight: 420, maxWidth: "98vw", maxHeight: "95vh" }),
       }}>
-        <div style={{ padding: "9px 14px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", background: "var(--bg-elevated)" }}>
+        <div onMouseDown={dragMove} title={tr("제목줄을 잡고 드래그하면 창을 이동할 수 있습니다")}
+             style={{ padding: "9px 14px", borderBottom: "1px solid var(--border)", display: "flex",
+                      alignItems: "center", background: "var(--bg-elevated)", cursor: "move", userSelect: "none" }}>
           <b>{tr(SCOPE_TITLE[scope])}</b>
           <span style={{ marginLeft: 8, fontSize: 11.5, color: "var(--text-secondary)" }}>
             {scope === "system" ? tr("서버 운영") : scope === "hospital" ? tr("병원별 배치 구성") : tr("사용자·판독 환경")}
@@ -1079,6 +1105,42 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       })()}
                     </span>
                   </Row>
+                </Group>
+                {/* 기기 프로필 — 같은 계정 3시스템 동시 사용, 장비 의존 설정만 기기별 분리 저장 */}
+                <Group title={tr("기기 프로필")}>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: 6 }}>
+                    {tr("같은 계정을 최대 3개 시스템에서 동시에 사용할 수 있습니다. 모니터 구성·패널 크기 같은 장비 의존 설정은 기기(슬롯)별로 서버에 저장되고, 컬럼 구성 등 나머지 설정은 모든 기기에 공통입니다.")}
+                  </div>
+                  {[1, 2, 3].map((s) => {
+                    const d = (devices ?? []).find((x) => x.slot === s);
+                    const mine = !!d && d.id === localStorage.getItem("sv_device_id");
+                    return (
+                      <Row key={s} label={`${tr("슬롯")} ${s}`}>
+                        {d ? (
+                          <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <input value={d.label} style={{ width: 200 }}
+                                   onChange={(e) => setDevices((p) => (p ?? []).map((x) =>
+                                     x.id === d.id ? { ...x, label: e.target.value } : x))}
+                                   onBlur={(e) => { api.renameDeviceSlot(d.id, e.target.value).catch(() => {}); }} />
+                            {mine && <span style={{ fontSize: 11, fontWeight: 700, color: "var(--ai,#a78bfa)" }}>{tr("현재 기기")}</span>}
+                            {d.last_seen && (
+                              <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                                {d.last_seen.slice(0, 16).replace("T", " ")}{d.screen ? ` · ${d.screen}` : ""}
+                              </span>
+                            )}
+                            {!mine && (
+                              <button style={{ fontSize: 11 }}
+                                      onClick={() => api.clearDeviceSlot(d.id).then(setDevices).catch(() => {})}>
+                                {tr("슬롯 비우기")}
+                              </button>
+                            )}
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{tr("빈 슬롯")}</span>
+                        )}
+                      </Row>
+                    );
+                  })}
                 </Group>
                 <Group title={tr("워크리스트 동작")}>
                   <Row label={tr("env.listRefresh")}>
@@ -1744,6 +1806,17 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                         <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
                           {tr("일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.")}
                         </span>
+                      </Row>
+                    </Group>
+                    {/* 판독창 설정(2026-08-10 사용자 확정) — 판독창 상단 'Worklist 뷰어' 체크와
+                        같은 키(report.prefs.worklist_viewer)를 읽고 써서 양방향·계정 저장이다. */}
+                    <Group title={tr("판독창 설정")}>
+                      <Row label={tr("Worklist 뷰어 사용")}>
+                        <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+                          <input type="checkbox" checked={!!rdOpts.worklist_viewer}
+                                 onChange={(e) => setRdOpts((p) => ({ ...p, worklist_viewer: e.target.checked }))} />
+                          {tr("판독창 하단에 워크리스트를 표시합니다 (판독창 상단 체크와 연동 · 계정별 저장)")}
+                        </label>
                       </Row>
                     </Group>
                     <Group title={tr("Compare — 비교할 과거 검사를 어디서 고를까")}>
@@ -2641,17 +2714,29 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       {tr("뷰어 우측에 리포트·과거검사 표시")}
                     </label>
                   </Row>
-                  <Row label={tr("닫기 동작")}>
-                    <select value={closeMode}
-                            onChange={(e) => setCloseMode(e.target.value as typeof closeMode)}>
-                      <option value="ask">{tr("항상 묻기 (닫기 다이얼로그)")}</option>
-                      <option value="save_current">{tr("현재 화면 저장하고 닫기")}</option>
-                      <option value="save_all">{tr("전체 변경사항 저장하고 닫기 (주석+GSPS)")}</option>
-                      <option value="discard">{tr("저장하지 않고 닫기")}</option>
-                    </select>
+                  {/* 뷰어 닫기 설정(2026-08-10 사용자 확정) — 다이얼로그 "기본으로" 체크가 여기
+                      저장되고, 체크를 해제하면 다시 닫기 다이얼로그가 나타난다(계정 로밍). */}
+                  <Row label={tr("뷰어 닫기 설정")}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                        <input type="checkbox" checked={closeMode !== "ask"}
+                               onChange={(e) => setCloseMode(e.target.checked ? "save_current" : "ask")} />
+                        {tr("묻지 않고 기본 동작으로 닫기")}
+                      </label>
+                      <select value={closeMode === "ask" ? "save_current" : closeMode}
+                              disabled={closeMode === "ask"}
+                              onChange={(e) => setCloseMode(e.target.value as typeof closeMode)}>
+                        <option value="save_current">{tr("현재 화면 저장하고 닫기")}</option>
+                        <option value="save_all">{tr("전체 변경사항 저장하고 닫기 (주석+GSPS)")}</option>
+                        <option value="discard">{tr("저장하지 않고 닫기")}</option>
+                      </select>
+                    </span>
                   </Row>
                   <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                    {tr('닫기 다이얼로그에서 "기본으로" 체크 시 이 설정이 자동 변경됩니다. Exam 탭은 ✕/전체닫기 전까지 유지.')}
+                    {closeMode === "ask"
+                      ? tr('지금은 닫을 때마다 다이얼로그로 묻습니다. 다이얼로그에서 "기본으로"를 체크하면 그 동작이 여기에 저장됩니다.')
+                      : tr("닫기 다이얼로그 없이 위 동작으로 바로 닫습니다. 체크를 해제하면 다시 다이얼로그가 나타납니다.")}
+                    {" "}{tr("Exam 탭은 ✕/전체닫기 전까지 유지.")}
                   </div>
                 </Group>
                 <Group title={tr("Tools bar 구성 (UBPACS p.18~21 — 계정 로밍)")}>

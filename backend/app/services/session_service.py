@@ -3,6 +3,9 @@
 poll 기반 자발적 로그아웃(하드 revoke 아님) — Client 뷰어 UX 목적.
 - register: 로그인 시 세션 등록 → session_id(=JWT sid) 반환.
 - find_live: 같은 (병원, 사용자)의 살아있는 세션(비인계, TTL 내) 1건.
+- live_sessions/enforce_cap: 동시 로그인 상한 3 시스템(2026-08-10 사용자 확정) —
+  태블릿·노트북·판독환경을 같은 계정으로 동시에 쓴다. 4번째부터 가장 오래 안 쓴
+  세션을 인계한다(enforce_cap). 상한 판단·인계 대상 선정은 **이 파일 한 곳**이다.
 - revoke: 인계 예약 — 기존 세션에 카운트다운(revoke_deadline) 설정.
 - status: /auth/session-status poll — 종료 예고 상태 반환 + last_seen 갱신(하트비트).
 - pixel_session: 픽셀 GET 전용 쿠키(sv_pix)의 sid 검증 — 취소 가능한 자격증명의 실체.
@@ -19,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.models import ActiveSession
 
 SESSION_TTL = 30        # 이 초 이내 last_seen 이면 '살아있는' 세션(poll 주기보다 넉넉히)
+MAX_LIVE_SESSIONS = 3   # 계정당 동시 로그인 시스템 수(2026-08-10 사용자 확정)
 REVOKE_COUNTDOWN = 10   # 인계 Yes 후 기존 세션 종료까지 카운트다운(초)
 _STALE = SESSION_TTL * 20  # 이보다 오래된 세션 행은 정리(하한 — 아래 _max_age 가 우선)
 
@@ -62,10 +66,40 @@ def find_live(db: Session, hospital_id: int | None, username: str) -> ActiveSess
     ).scalars().first()
 
 
+def live_sessions(db: Session, hospital_id: int | None, username: str) -> list[ActiveSession]:
+    """해당 (병원, 사용자)의 살아있는 세션 전부 — **오래된 것부터**(인계 대상 선정용)."""
+    cutoff = _now() - timedelta(seconds=SESSION_TTL)
+    return list(db.execute(
+        select(ActiveSession)
+        .where(
+            ActiveSession.hospital_id == (hospital_id or 0),
+            ActiveSession.username == username,
+            ActiveSession.revoke_deadline.is_(None),
+            ActiveSession.last_seen >= cutoff,
+        )
+        .order_by(ActiveSession.last_seen.asc())
+    ).scalars())
+
+
+def enforce_cap(db: Session, hospital_id: int | None, username: str, reason: str) -> list[ActiveSession]:
+    """새 로그인 1건이 들어올 자리를 만든다 — 상한(3)을 넘기는 만큼만, 가장 오래
+    안 쓴 세션부터 인계(카운트다운). 나머지 시스템은 그대로 산다. 커밋은 호출부."""
+    live = live_sessions(db, hospital_id, username)
+    victims = live[:max(0, len(live) - MAX_LIVE_SESSIONS + 1)]
+    for sess in victims:
+        revoke(db, sess, reason)
+    return victims
+
+
 def register(db: Session, hospital_id: int | None, username: str) -> str:
     """새 세션 등록 → session_id 반환. 오래된 행 정리도 겸함(커밋은 호출부)."""
     stale = max(_STALE, _max_age())
-    db.execute(delete(ActiveSession).where(ActiveSession.last_seen < _now() - timedelta(seconds=stale)))
+    # synchronize_session=False — 이 정리는 DB 에서만 하면 된다. 기본 'auto'는 세션에
+    # 이미 로드된 행(live_sessions 가 로그인 직전에 읽는다)을 Python 에서도 평가하는데,
+    # SQLite 가 돌려준 naive last_seen 과 aware 기준시각의 비교로 TypeError 가 난다.
+    db.execute(delete(ActiveSession)
+               .where(ActiveSession.last_seen < _now() - timedelta(seconds=stale))
+               .execution_options(synchronize_session=False))
     sid = uuid.uuid4().hex
     db.add(ActiveSession(session_id=sid, hospital_id=hospital_id or 0, username=username, last_seen=_now()))
     return sid

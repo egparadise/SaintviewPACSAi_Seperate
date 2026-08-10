@@ -33,6 +33,7 @@ import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
 import { screenFeatures, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerOpened } from "../lib/sync";
+import { focusWorklistWindow } from "../lib/worklistFocus";
 import { decideCloseScope, markViewerClosing, markViewerMounted, shouldCloseAllMonitors } from "../lib/viewerClose";
 import { clearViewerSlots, isViewerSlotName, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
@@ -829,7 +830,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     setCloseDlg(null);
     if (remember && mode !== "ask") {
       setCloseMode(mode);
-      persistPrefs({ infi_close_mode: mode });
+      // ★ persistPrefs(600ms 디바운스) 금지(2026-08-10) — 이 창은 곧 닫혀 타이머가 영영 안
+      //   돈다("기본으로"가 기억되지 않던 원인). 즉시 RMW 하고 완료를 기다린 뒤 닫는다.
+      try {
+        const r = await api.getSetting("viewer.prefs");
+        await api.putSetting("viewer.prefs", { ...r.value, infi_close_mode: mode }, "user");
+      } catch { /* 저장 실패해도 닫기는 진행 */ }
     }
     if (closeAllBroadcastRef.current) { closeAllBroadcastRef.current = false; postViewerCloseAll(); }
     try {
@@ -2492,21 +2498,9 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       else say(dir < 0 ? tr("위쪽에 아직 열지 않은 검사가 없습니다") : tr("아래쪽에 아직 열지 않은 검사가 없습니다"));
     } catch { say(tr("워크리스트 조회 실패")); }
   };
-  // Worklist 버튼(§3.1) — 워크리스트 창을 최전면으로 (다른 모니터에 있어도)
-  // named window 재-open 은 브라우저가 해당 창을 raise 한다 (opener.focus() 는 대부분 무시됨)
-  const gotoWorklist = () => {
-    const w = window.open("", "sv_worklist");
-    if (w) {
-      try {
-        // 워크리스트가 닫혀 있어 빈 창이 새로 열린 경우 → 홈으로 이동
-        if (w.location.href === "about:blank") w.location.href = `${window.location.origin}/`;
-      } catch { /* 접근 제약 시 무시 */ }
-      w.focus();
-      return;
-    }
-    if (window.opener && !window.opener.closed) window.opener.focus();
-    else window.open("/", "_blank");
-  };
+  // Worklist 버튼(§3.1) — 워크리스트 창을 최전면으로 (다른 모니터에 있어도).
+  // 구현은 lib/worklistFocus.focusWorklistWindow 한 곳 — Viewer2D 와 공유(복사 금지).
+  const gotoWorklist = () => focusWorklistWindow();
   // Report 도크의 과거검사 비교(◀▶/Prior Studies 클릭) — Setting>판독(Reading) '과거검사 비교 표시'에 따라:
   //  monitor = 인접 모니터(다음, 끝번이면 이전 — 예: 1,2,3 중 3번 기준→2번, 1번 기준→2번)에 과거검사 창.
   //            단일/미감지·팝업 차단 시 Layout 으로 폴백.

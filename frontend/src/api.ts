@@ -1,5 +1,7 @@
 // API 클라이언트 — 백엔드 FastAPI
 import { registerLiveStudyUid, registerLiveStudyVid } from "./lib/liveUids";
+import { DEVICE_OVERLAY_KEYS, chooseSlot, mergeOverlay, overlayKeyOf, pickOverlay,
+         type DeviceEntry } from "./lib/deviceProfile";
 import { opfsWipe } from "./lib/opfsStore";
 import { dlResetCache } from "./lib/dlCache";
 
@@ -104,7 +106,61 @@ export function getToken(): string | null {
   return token ?? localStorage.getItem("sv_token") ?? sessionStorage.getItem("sv_token");
 }
 
+// ── 기기 프로필(2026-08-10 사용자 확정) — 계정당 3슬롯, 장비 의존 설정 분리 저장 ──
+// 읽기 = 공용 문서 ⊕ 이 기기 슬롯의 오버레이 · 쓰기 = 공용(전체) + 오버레이(장비 의존 키만).
+// 슬롯 협상 실패(비로그인·서버 오류)면 공용 문서만 쓴다 — 기존 단일 기기 동작과 동일.
+export function deviceId(): string {
+  let id = localStorage.getItem("sv_device_id");
+  if (!id) {
+    id = typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem("sv_device_id", id);
+  }
+  return id;
+}
+
+function rawGetSetting(key: string) {
+  return req<{ key: string; value: Record<string, unknown> }>(`/api/settings/${key}`);
+}
+function rawPutSetting(key: string, value: Record<string, unknown>, scope: "user" | "global") {
+  return req<{ ok: boolean }>(`/api/settings/${key}`, {
+    method: "PUT",
+    body: JSON.stringify({ value, scope }),
+  });
+}
+
+let slotPromise: Promise<number | null> | null = null;
+
+/** 기기 슬롯 확정(캐시) — device.slots 레지스트리에서 이 기기의 슬롯(1~3)을 얻는다.
+ *  미등록 기기는 빈 슬롯에 등록하고, 3개가 차 있으면 가장 오래 안 쓴 기기를 밀어낸 뒤
+ *  그 슬롯의 오버레이를 초기화한다(이전 기기 환경이 새 기기에 새는 것 방지). */
+function ensureDeviceSlot(): Promise<number | null> {
+  if (!slotPromise) {
+    slotPromise = (async () => {
+      const id = deviceId();
+      const reg = await rawGetSetting("device.slots");   // 401/오류 → catch 로 — 캐시하지 않는다
+      const devices = ((reg.value as { devices?: DeviceEntry[] }).devices) ?? [];
+      const scr = typeof screen !== "undefined" ? `${screen.width}×${screen.height}` : "";
+      const label = `${(navigator.platform || "PC").split(" ")[0]} ${scr}`.trim();  // 저장 데이터 — i18n 금지
+      const r = chooseSlot(devices, id, new Date().toISOString(), label, scr);
+      const mine = devices.find((d) => d.id === id);
+      // 쓰기 절제 — 신규 등록·밀어내기·1시간 경과 하트비트만 저장(설정 읽기마다 쓰지 않는다)
+      const stale = !mine?.last_seen || Date.parse(mine.last_seen) < Date.now() - 3600_000;
+      if (r.isNew || stale) {
+        if (r.evicted) {
+          for (const k of Object.keys(DEVICE_OVERLAY_KEYS))
+            await rawPutSetting(overlayKeyOf(k, r.slot), {}, "user").catch(() => {});
+        }
+        await rawPutSetting("device.slots", { devices: r.devices }, "user").catch(() => {});
+      }
+      return r.slot;
+    })().catch(() => { slotPromise = null; return null; });
+  }
+  return slotPromise;
+}
+
 export function setToken(t: string | null, remember = false) {
+  slotPromise = null;   // 계정 전환 — 기기 슬롯(계정당 3개 레지스트리) 재협상
   const prev = token;
   token = t;
   window.__svToken = t;
@@ -528,12 +584,52 @@ export const api = {
       : req<{ ok: boolean; sop_instance_uid: string }>(`/api/reports/${reportId}/send-sr`, {
           method: "POST",
         }),
-  getSetting: (key: string) => req<{ key: string; value: Record<string, unknown> }>(`/api/settings/${key}`),
-  putSetting: (key: string, value: Record<string, unknown>, scope: "user" | "global") =>
-    req<{ ok: boolean }>(`/api/settings/${key}`, {
-      method: "PUT",
-      body: JSON.stringify({ value, scope }),
-    }),
+  // 설정 읽기/쓰기 — 장비 의존 키(DEVICE_OVERLAY_KEYS)만 기기 슬롯 오버레이로 갈라 저장.
+  // 공용 문서에는 항상 전체를 쓴다 → 오버레이가 없는 기기(첫 로그인)도 마지막 값으로 시작.
+  getSetting: async (key: string) => {
+    const r = await rawGetSetting(key);
+    if (!DEVICE_OVERLAY_KEYS[key]) return r;
+    const slot = await ensureDeviceSlot();
+    if (!slot) return r;
+    const ov = await rawGetSetting(overlayKeyOf(key, slot)).catch(() => null);
+    return { ...r, value: mergeOverlay(key, r.value ?? {}, ov?.value) };
+  },
+  putSetting: async (key: string, value: Record<string, unknown>, scope: "user" | "global") => {
+    const r = await rawPutSetting(key, value, scope);
+    if (scope === "user" && DEVICE_OVERLAY_KEYS[key]) {
+      const slot = await ensureDeviceSlot();
+      const ov = slot ? pickOverlay(key, value) : null;
+      if (slot && ov) await rawPutSetting(overlayKeyOf(key, slot), ov, "user").catch(() => {});
+    }
+    return r;
+  },
+  /** 기기 슬롯 목록(설정>환경) — 이 기기의 슬롯 번호 + 계정의 3슬롯 레지스트리 */
+  deviceSlots: async () => {
+    const slot = await ensureDeviceSlot();
+    const reg = await rawGetSetting("device.slots").catch(() => null);
+    return { slot, devices: ((reg?.value as { devices?: DeviceEntry[] } | undefined)?.devices) ?? [] };
+  },
+  renameDeviceSlot: async (id: string, label: string) => {
+    const reg = await rawGetSetting("device.slots").catch(() => null);
+    const devices = (((reg?.value as { devices?: DeviceEntry[] } | undefined)?.devices) ?? [])
+      .map((d) => (d.id === id ? { ...d, label } : d));
+    await rawPutSetting("device.slots", { devices }, "user");
+    return devices;
+  },
+  /** 슬롯 비우기 — 레지스트리에서 제거 + 그 슬롯 오버레이 초기화(다음 기기에 새지 않게) */
+  clearDeviceSlot: async (id: string) => {
+    const reg = await rawGetSetting("device.slots").catch(() => null);
+    const all = ((reg?.value as { devices?: DeviceEntry[] } | undefined)?.devices) ?? [];
+    const gone = all.find((d) => d.id === id);
+    const devices = all.filter((d) => d.id !== id);
+    if (gone) {
+      for (const k of Object.keys(DEVICE_OVERLAY_KEYS))
+        await rawPutSetting(overlayKeyOf(k, gone.slot), {}, "user").catch(() => {});
+    }
+    await rawPutSetting("device.slots", { devices }, "user");
+    if (localStorage.getItem("sv_device_id") === id) slotPromise = null;
+    return devices;
+  },
   aiQuality: () => req<AiQuality>("/api/admin/ai-quality"),
   instances: (studyId: number) =>
     req<{ items: InstanceThumb[]; key_images: KeyImage[] }>(

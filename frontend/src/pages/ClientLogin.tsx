@@ -147,8 +147,8 @@ export function ClientLogin({ onLogin, onBack }: {
                         padding: 24, width: 400, maxWidth: "90vw", display: "flex", flexDirection: "column", gap: 14 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>{tr("이미 사용 중인 ID")}</div>
             <div style={{ fontSize: 13, lineHeight: 1.7, color: "var(--text-secondary)" }}>
-              {tr("현재 접속하는 ID는 이미 사용중입니다.")}<br />
-              {tr("로그인 된 곳을 종료하고 여기에서 로그인 하시겠습니까?")}
+              {tr("이미 3개 시스템에서 이 계정으로 로그인되어 있습니다.")}<br />
+              {tr("가장 오래 사용하지 않은 시스템을 종료하고 여기에서 로그인하시겠습니까?")}
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button type="button" onClick={() => setDup(false)} style={{ padding: "6px 18px" }}>No</button>
