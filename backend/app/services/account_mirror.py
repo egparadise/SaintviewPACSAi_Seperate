@@ -63,26 +63,25 @@ def is_active(row: dict) -> bool:
     return str(row.get("user_status") or "A").upper() != "D"
 
 
-def apply_doctor_profile(account, *, name: str, license_no: str) -> bool:
-    """A 의사 정보 → 판독의 등록(설정>판독>기본 설정: 이름·면허번호) **자동 채움**.
+def apply_doctor_profile(account, *, name: str, license_no: str, major_no: str = "") -> bool:
+    """A 의사 정보 → 판독의 등록(설정>판독>기본 설정: 이름·면허번호·전문의 번호) **자동 채움**.
 
-    2026-08-07 사용자 확정: 영상의학과 의사가 자기 A 계정(ID/PW)으로 로그인하면
-    확정 서명에 쓰는 이름·면허번호가 자동으로 채워져 있어야 한다.
+    2026-08-07·10 사용자 확정: 의사가 자기 A 계정(ID/PW)으로 로그인하면 확정 서명에 쓰는
+    이름·의사면허번호·전문의 번호가 자동으로 채워지고, **번호가 없는 계정은 공란**이어야 한다.
 
     ⚠ **미러 계정만** 건드린다(a_user_idx 있는 행) — 손으로 만든 로컬 계정의 프로필을
       A 값으로 덮으면 관리자 표시명이 바뀌는 사고가 된다(ensure_mirror 의 보호 계약과 동일).
     A 가 방금 인증해 준 값이므로 매 로그인 갱신이 맞다(A 가 진실의 원천).
-    반환: 실제로 값을 채웠는가."""
+    번호 두 개는 값이 비어도 **공란으로 덮어쓴다** — A 에서 번호가 삭제된 계정에 이전
+    로그인의 스테일 번호가 남으면 서명이 거짓이 된다. 이름만은 비면 유지(표시명 보호).
+    반환: 실제로 값을 바꿨는가."""
     if getattr(account, "a_user_idx", None) is None:
         return False
-    changed = False
     if name:
         account.display_name = str(name)[:64]
-        changed = True
-    if license_no:
-        account.license_no = str(license_no)[:32]
-        changed = True
-    return changed
+    account.license_no = str(license_no or "")[:32]
+    account.major_no = str(major_no or "")[:32]
+    return True
 
 
 def ensure_mirror(db: Session, *, user_id: str, name: str, role: str,

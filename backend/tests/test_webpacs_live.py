@@ -726,3 +726,4 @@ def test_live_doctor_login_autofills_signature(client, live_ready, db):
     acc = db.execute(select(Account).where(Account.username == "dr_kim")).scalar_one()
     assert acc.display_name == "김판독"
     assert acc.license_no == "10011", "면허번호가 자동으로 채워져야 한다(그림의 판독의 등록)"
+    assert acc.major_no == "90011", "전문의 번호도 자동으로 채워져야 한다(2026-08-10)"

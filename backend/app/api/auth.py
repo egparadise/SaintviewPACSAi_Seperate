@@ -293,10 +293,10 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
 
         acc = ensure_mirror(db, user_id=body.user_id, name=a_name, role=role,
                             a_user_idx=int(a_user_idx or 0))
-        # ★ 판독의 등록 자동 채움(사용자 확정) — A 에 의사로 등록된 계정이면
-        #   확정 서명용 이름·면허번호를 로그인 시점에 채운다(미러 계정만, 매 로그인 갱신).
-        if doctor_idx:
-            apply_doctor_profile(acc, name=a_name, license_no=doctor_id)
+        # ★ 판독의 등록 자동 채움(사용자 확정 2026-08-08·10) — A 계정별 면허번호·전문의
+        #   번호를 로그인 시점에 기록한다(미러 계정만, 매 로그인 갱신). 값이 **없는 계정은
+        #   공란으로 초기화** — 이전 로그인의 스테일 번호가 남으면 안 된다(사용자 요구).
+        apply_doctor_profile(acc, name=a_name, license_no=doctor_id, major_no=doctor_major)
     except Exception:  # noqa: BLE001 — 미러는 부가 기능, 로그인 가용성이 우선
         db.rollback()
 
@@ -332,6 +332,7 @@ def webpacs_login(body: WebpacsLoginRequest, request: Request, response: Respons
 class ProfileBody(BaseModel):
     display_name: str = ""
     license_no: str = ""
+    major_no: str = ""    # 전문의 번호(2026-08-10) — A doctor_major 자동 채움, 없으면 공란
 
 
 @router.get("/profile")
@@ -347,6 +348,7 @@ def get_profile(db: Session = Depends(get_db), user: dict = Depends(current_user
     return {
         "username": account.username, "role": account.role,
         "display_name": account.display_name, "license_no": account.license_no,
+        "major_no": account.major_no,
     }
 
 
@@ -363,6 +365,7 @@ def put_profile(
         raise HTTPException(status_code=404, detail="계정을 찾을 수 없습니다")
     account.display_name = body.display_name.strip()[:64]
     account.license_no = body.license_no.strip()[:32]
+    account.major_no = body.major_no.strip()[:32]
     db.add(AuditLog(account_id=account.id, action="profile_update", target_type="account",
                     target_id=account.username))
     db.commit()

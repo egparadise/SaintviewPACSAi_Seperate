@@ -425,7 +425,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
                     style={{ ...taStyle, flex: 1, minHeight: 70 }} />
           {dockSig && (
             <div style={{ fontSize: 11, color: "var(--stat-final)" }}>
-              ✍ {dockSig.name}{dockSig.license_no && ` (License No. ${dockSig.license_no})`} · {dockSig.signed_at?.slice(0, 16).replace("T", " ")}
+              ✍ {dockSig.name}{dockSig.license_no && ` (License No. ${dockSig.license_no})`}{(dockSig as { major_no?: string }).major_no && ` · Specialist No. ${(dockSig as { major_no?: string }).major_no}`} · {dockSig.signed_at?.slice(0, 16).replace("T", " ")}
             </div>
           )}
         </div>

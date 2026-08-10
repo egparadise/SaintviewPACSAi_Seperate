@@ -783,7 +783,7 @@ export function ReportWindow() {
                       style={{ ...taStyle, minHeight: 110, flex: 1 }} />
             {sig && (
               <div style={{ fontSize: 12.5, color: "var(--stat-final)" }}>
-                ✍ {sig.name}{sig.license_no && ` (${tr("면허 제")}${sig.license_no}${tr("호")})`} · {sig.signed_at?.slice(0, 16).replace("T", " ")}
+                ✍ {sig.name}{sig.license_no && ` (${tr("면허 제")}${sig.license_no}${tr("호")})`}{(sig as { major_no?: string }).major_no && ` · ${tr("전문의 제")}${(sig as { major_no?: string }).major_no}${tr("호")}`} · {sig.signed_at?.slice(0, 16).replace("T", " ")}
               </div>
             )}
           </div>

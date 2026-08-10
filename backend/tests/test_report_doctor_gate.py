@@ -60,11 +60,16 @@ def test_save_report_gate_reads_session_doctor_fields():
 def test_login_autofills_mirror_profile(db):
     """★ A 의사 로그인 → 미러 계정의 판독의 등록(이름·면허번호) 자동 채움."""
     acc = ensure_mirror(db, user_id="a_rad1", name="박성철", role="doctor", a_user_idx=77)
-    changed = apply_doctor_profile(acc, name="박성철", license_no="12345")
+    changed = apply_doctor_profile(acc, name="박성철", license_no="12345", major_no="67890")
     db.commit()
     assert changed is True
     assert acc.display_name == "박성철"
     assert acc.license_no == "12345", "확정 서명의 면허번호가 자동으로 채워져야 한다"
+    assert acc.major_no == "67890", "전문의 번호도 자동으로 채워져야 한다(2026-08-10)"
+    # ★ 번호가 없는 계정은 **공란** — 이전 로그인의 스테일 번호가 남으면 서명이 거짓이 된다
+    apply_doctor_profile(acc, name="박성철", license_no="", major_no="")
+    assert acc.license_no == "" and acc.major_no == "", "A 에 번호가 없으면 공란으로 초기화"
+    assert acc.display_name == "박성철", "이름은 비어 있을 때만 유지 규칙 — 지워지면 안 된다"
 
 
 def test_autofill_never_touches_local_account(db):

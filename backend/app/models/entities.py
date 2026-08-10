@@ -206,9 +206,10 @@ class Account(Base):
     birth6: Mapped[str] = mapped_column(String(6), default="")   # 주민번호 앞 6자리(YYMMDD)
     phone: Mapped[str] = mapped_column(String(32), default="")
     mobile: Mapped[str] = mapped_column(String(32), default="")
-    # 판독 서명(Reading) — 확정 시 리포트에 이름·면허번호가 함께 기록된다
+    # 판독 서명(Reading) — 확정 시 리포트에 이름·면허번호·전문의 번호가 함께 기록된다
     display_name: Mapped[str] = mapped_column(String(64), default="")
     license_no: Mapped[str] = mapped_column(String(32), default="")
+    major_no: Mapped[str] = mapped_column(String(32), default="")   # 전문의 번호(A doctor_major 자동 채움)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ── 비밀번호 라이프사이클(발급 계정) ──

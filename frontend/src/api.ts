@@ -721,9 +721,9 @@ export const api = {
   deletePhrase: (id: number) =>
     req<{ ok: boolean }>(`/api/phrases/${id}`, { method: "DELETE" }),
   profile: () => req<Profile>("/api/auth/profile"),
-  putProfile: (display_name: string, license_no: string) =>
+  putProfile: (display_name: string, license_no: string, major_no = "") =>
     req<{ ok: boolean }>("/api/auth/profile", {
-      method: "PUT", body: JSON.stringify({ display_name, license_no }),
+      method: "PUT", body: JSON.stringify({ display_name, license_no, major_no }),
     }),
   /** 공유 폴더 목록 — sub=상대 하위경로(생략=루트). 폴더 클릭 진입 지원 */
   shareList: (sub?: string) =>
@@ -1628,6 +1628,7 @@ export interface Profile {
   role: string;
   display_name: string;
   license_no: string;
+  major_no?: string;   // 전문의 번호(2026-08-10) — A 자동 채움, 없으면 공란
 }
 
 export interface OrthancStatus {

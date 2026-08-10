@@ -401,6 +401,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   // 판독(Reading) — 내 서명 정보(확정 시 리포트에 기록)
   const [profName, setProfName] = useState("");
   const [profLicense, setProfLicense] = useState("");
+  const [profMajor, setProfMajor] = useState("");   // 전문의 번호(2026-08-10) — A 자동 채움, 없으면 공란
   // DICOM 노드 (SCP/SCU) — 전역/관리자
   const [nodes, setNodes] = useState<DicomNode[]>([]);
   const [nodeMsg, setNodeMsg] = useState("");
@@ -592,7 +593,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     }).catch(() => {});
     loadTabs().then(setWlTabs).catch(() => {});
     loadTree().then(setWlTree).catch(() => {});
-    api.profile().then((p) => { setProfName(p.display_name); setProfLicense(p.license_no); }).catch(() => {});
+    api.profile().then((p) => { setProfName(p.display_name); setProfLicense(p.license_no);
+      setProfMajor((p as { major_no?: string }).major_no ?? ""); }).catch(() => {});
     api.phrases().then((r) => setPhrases(r.items)).catch(() => {});
     api.getSetting("dicom.nodes").then((r) => {
       setNodes(((r.value as { items?: DicomNode[] }).items) ?? []);
@@ -1688,9 +1690,16 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                         <input value={profLicense} onChange={(e) => setProfLicense(e.target.value)}
                                placeholder="12345" style={{ width: 220 }} />
                       </Row>
+                      <Row label={tr("전문의 번호")}>
+                        <input value={profMajor} onChange={(e) => setProfMajor(e.target.value)}
+                               placeholder="67890" style={{ width: 220 }} />
+                        <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                          {tr("원격 PACS 계정으로 로그인하면 면허·전문의 번호가 자동으로 채워집니다(등록이 없으면 공란).")}
+                        </span>
+                      </Row>
                       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                         <button className="primary" onClick={async () => {
-                          await api.putProfile(profName, profLicense);
+                          await api.putProfile(profName, profLicense, profMajor);
                           setSaved(tr("판독의 정보 저장됨 — 이후 확정(서명)부터 적용"));
                         }}>{tr("판독의 정보 저장")}</button>
                       </div>

@@ -2640,5 +2640,8 @@ const d: Record<string, string> = {
   "자동 탐지가 영상마다 실패·지연하면 배치가 들쭉날쭉해집니다 — 켜 두면 항상 같은 모양으로 나옵니다. 해제하면 아래 흉벽 판정(자동 탐지) 규칙을 씁니다.": "Si la detección automática falla o se retrasa en algunas imágenes, la disposición queda irregular — manténgalo activado para una vista uniforme. Desmárquelo para usar las reglas de pared torácica de abajo.",
   "드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 드래그 = 폭 조절": "Arrastrar = mover columna · borde derecho = ajustar ancho",
   "나이": "Edad",
+  "전문의 번호": "N.º de especialista",
+  "전문의 제": "Especialista n.º ",
+  "원격 PACS 계정으로 로그인하면 면허·전문의 번호가 자동으로 채워집니다(등록이 없으면 공란).": "Al iniciar sesión con la cuenta del PACS remoto, los números de licencia y de especialista se rellenan automáticamente (en blanco si no están registrados).",
 };
 export default d;

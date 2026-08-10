@@ -112,6 +112,8 @@ def finalize_report(db: Session, report: Report, *, username: str) -> Report:
         "by": username,
         "name": (acct.display_name if acct else "") or username,
         "license_no": acct.license_no if acct else "",
+        # 전문의 번호(2026-08-10) — 등록된 계정만 값이 있고 없으면 공란(추정 기입 금지)
+        "major_no": acct.major_no if acct else "",
         "signed_at": report.finalized_at.isoformat(),
     }
     report.diff_metrics = dm
