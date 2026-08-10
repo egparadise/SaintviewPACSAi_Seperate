@@ -7,6 +7,7 @@ import {
   SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
+import { MediaPermPanel } from "../components/MediaPermPanel";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
 import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
@@ -405,9 +406,11 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [colCfg, setColCfg] = useState<{
     default_caps: string[]; auto_grant: boolean; cursor_labels: boolean;
     author_colors: boolean; follow_default: boolean; ice: string;
+    close_action: "end" | "hide"; media_exclusive: boolean;   // 협진 창 동작(2026-08-10)
   }>({
     default_caps: ["collab.annotate", "collab.text"], auto_grant: false,
     cursor_labels: true, author_colors: true, follow_default: true, ice: "",
+    close_action: "end", media_exclusive: true,
   });
   const [modeJson, setModeJson] = useState("");
   // UBPACS-Z Worklist 구성요소 표시/숨김 (Study List 제외 추가·삭제)
@@ -1683,6 +1686,33 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
 
             {page === "collab" && (
               <>
+                {/* 협진 창 하단과 **같은 컴포넌트**(MediaPermPanel) — 두 곳이 갈리면 안내가 어긋난다 */}
+                <Group title={tr("미디어 권한·장치")}>
+                  <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginBottom: 6 }}>
+                    {tr("협진 통화가 안 될 때 1차 점검 — 협진 창 하단에도 같은 패널이 있습니다.")}
+                  </div>
+                  <MediaPermPanel />
+                </Group>
+                {/* 협진 창 동작(2026-08-10 사용자 확정) — ✕/숨기기 구별 · 미디어 배타 */}
+                <Group title={tr("협진 창 동작")}>
+                  <Row label={tr("✕ 버튼 동작")}>
+                    <select value={colCfg.close_action}
+                            onChange={(e) => setColCfg((p) => ({ ...p, close_action: e.target.value as "end" | "hide" }))}>
+                      <option value="end">{tr("종료 — 통화를 끊고 창을 닫습니다")}</option>
+                      <option value="hide">{tr("숨기기 — 통화·대화를 유지한 채 창만 감춥니다")}</option>
+                    </select>
+                  </Row>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", marginBottom: 6 }}>
+                    {tr("협진 창의 — 버튼은 언제나 '숨기기'입니다. ✕ 의 동작만 여기서 바꿉니다.")}
+                  </div>
+                  <Row label={tr("미디어 동시 사용 제한")}>
+                    <label style={{ display: "flex", gap: 5, alignItems: "flex-start", fontSize: 12 }}>
+                      <input type="checkbox" checked={colCfg.media_exclusive}
+                             onChange={(e) => setColCfg((p) => ({ ...p, media_exclusive: e.target.checked }))} />
+                      <span>{tr("마이크·화상·화면 공유는 한 대화에서만 — 다른 대화에서는 버튼이 비활성화됩니다. 끄면 다른 대화에서 켤 때 기존 통화를 끊고 가져옵니다.")}</span>
+                    </label>
+                  </Row>
+                </Group>
                 <Group title={tr("초대 시 자동으로 줄 기본 권한")}>
                   <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginBottom: 6 }}>
                     {tr("여기서 정한 것은 기본값입니다. 협진 중에는 협진 페이지에서 참가자마다 켜고 끌 수 있습니다.")}

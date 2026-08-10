@@ -10,6 +10,7 @@ import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { showToast } from "../lib/toast";
 import { VideoTile } from "./CollabSessionPanel";
+import { MediaPermPanel } from "./MediaPermPanel";
 
 type Tab = "friends" | "find" | "chat";
 
@@ -94,6 +95,11 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   const [found, setFound] = useState<CollabUser[]>([]);
   const [searching, setSearching] = useState(false);
   const [peer, setPeer] = useState<CollabUser | null>(null);
+  // 열린 대화들(2026-08-10 사용자 확정 — 사람별 탭). peer = 지금 보이는 탭.
+  const [chats, setChats] = useState<CollabUser[]>([]);
+  // 협진 창 동작(Setting>협진 로밍) — ✕ 동작·미디어 배타. 기본: 종료 / 배타 켬.
+  const [dockCfg, setDockCfg] = useState<{ close_action: "end" | "hide"; media_exclusive: boolean }>(
+    { close_action: "end", media_exclusive: true });
   const [msgs, setMsgs] = useState<CollabMessage[]>([]);
   // 채팅 초안은 DOM 이 소유한다. 협진 WS 프레즌스/메시지로 부모가 다시 그려져도
   // IME 조합과 입력 포커스가 흔들리지 않아야 한다(특히 초대받은 쪽에서 재현됐던 문제).
@@ -109,6 +115,16 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   const [wsOpen, setWsOpen] = useState(collab.status === "open");
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const meId = collab.me?.id ?? 0;
+  // 미디어 배타(2026-08-10 사용자 확정) — 마이크·화상·화면은 **한 대화만** 쓴다.
+  // 소유자 = 미디어가 켜져 있는 동안의 mesh 시그널 룸. 다른 탭에서는 버튼이 죽는다.
+  const anyMedia = mic || cam || screen;
+  const anyMediaRef = useRef(false);
+  anyMediaRef.current = anyMedia;
+  const visRoom = peer ? dmRoom(meId, peer.id) : null;
+  const ownerRoom = anyMedia ? mesh.room() : null;
+  const foreignOwner = ownerRoom !== null && ownerRoom !== visRoom;
+  /** ✕(종료) — 통화를 끊고 창을 닫는다. 숨기기(—)와 구별(2026-08-10 사용자 확정). */
+  const endAll = () => { mesh.stop(); onClose(); };
 
   useEffect(() => collab.onStatus((s) => setWsOpen(s === "open")), []);
   useEffect(() => mesh.onChange(setPeers), []);
@@ -121,6 +137,14 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   }, []);
 
   useEffect(() => { if (open) reload(); }, [open, reload]);
+  useEffect(() => {
+    if (!open) return;
+    api.getSetting("viewer.prefs").then((r) => {
+      const c = (r.value as { collab?: { close_action?: "end" | "hide"; media_exclusive?: boolean } }).collab;
+      setDockCfg({ close_action: c?.close_action === "hide" ? "hide" : "end",
+                   media_exclusive: c?.media_exclusive !== false });
+    }).catch(() => { /* 설정 실패 = 기본값 */ });
+  }, [open]);
 
   // WS 이벤트 — 친구 요청/수락·프레즌스·새 메시지
   useEffect(() => collab.on((e: CollabEvent) => {
@@ -152,6 +176,7 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   // 대화 열기 — 백필 + 읽음 처리
   const openChat = useCallback((u: CollabUser) => {
     setPeer(u);
+    setChats((prev) => (prev.some((x) => x.id === u.id) ? prev : [...prev, u]));
     setTab("chat");
     const room = dmRoom(meId, u.id);
     api.collabMessages(room).then((r) => setMsgs(r.items)).catch(() => setMsgs([]));
@@ -159,6 +184,17 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   }, [meId, reload]);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ block: "end" }); }, [msgs]);
+
+  /** 대화 탭 닫기 — 그 대화가 미디어를 쓰는 중이면 통화도 함께 끝난다(명시적 닫기). */
+  const closeChat = (u: CollabUser) => {
+    const room = dmRoom(meId, u.id);
+    if (anyMediaRef.current && mesh.room() === room) mesh.stop();
+    setChats((prev) => {
+      const next = prev.filter((x) => x.id !== u.id);
+      if (peer?.id === u.id) setPeer(next.length ? next[next.length - 1] : null);
+      return next;
+    });
+  };
 
   // 친구 목록에서 대화를 열면 편집기가 새로 마운트된 뒤 바로 포커스한다.
   // 열린 패널에 HMR 수정이 적용될 때도 예전 input DOM에 포커스가 남지 않는다.
@@ -176,9 +212,13 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
       return;
     }
     const room = dmRoom(meId, peer.id);
+    // 다른 대화가 미디어를 쓰는 중이면 그 방의 시그널을 유지한다 — 여기서 start 하면
+    // (mesh 는 단일이라) 기존 통화가 끊긴다. 이 탭은 채팅만 가능(버튼 비활성).
+    if (anyMediaRef.current && mesh.room() !== room) return;
     mesh.start(meId, room);
     mesh.syncPeers([peer.id]);
-    return () => mesh.stop();
+    // 탭 전환·창 숨김이 통화를 죽이면 안 된다(2026-08-10) — 미디어가 꺼져 있을 때만 정리.
+    return () => { if (!anyMediaRef.current) mesh.stop(); };
   }, [open, tab, peer, meId, peerOnline]);
 
   // 검색 — 입력 후 300ms 디바운스(타이핑마다 서버를 때리지 않는다)
@@ -206,6 +246,16 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
 
   const runMedia = async (work: () => Promise<void>, label: string) => {
     if (mediaBusy) return;
+    // 다른 대화가 미디어 소유 중 — 배타(기본)면 시작 금지, 설정에서 껐으면 가져온다
+    // (mesh.start 는 room 이 다르면 내부적으로 기존 통화를 정리한 뒤 새로 연다).
+    if (foreignOwner && peer) {
+      if (dockCfg.media_exclusive) {
+        showToast(tr("다른 대화에서 미디어 사용 중입니다 — 그쪽에서 끄면 여기서 켤 수 있습니다"), "error");
+        return;
+      }
+      mesh.start(meId, dmRoom(meId, peer.id));
+      mesh.syncPeers([peer.id]);
+    }
     setMediaBusy(label);
     try {
       await work();
@@ -237,7 +287,18 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
               style={{ width: 7, height: 7, borderRadius: "50%",
                        background: wsOpen ? "var(--stat-final)" : "var(--stat-reading)" }} />
         <div style={{ flex: 1 }} />
-        <button onClick={onClose} title={tr("닫기")}
+        {/* 초대(2026-08-10 사용자 확정) — 친구가 아니어도 [찾기]에서 바로 대화·통화로 초대 */}
+        <button onClick={() => setTab("find")}
+                title={tr("초대 — 친구가 아니어도 사용자를 찾아 대화·통화로 초대합니다")}
+                style={{ fontSize: 11, padding: "1px 8px" }}>＋{tr("초대")}</button>
+        {/* 숨기기 vs 종료 구별(2026-08-10 사용자 확정) — ✕ 만으로는 끊겼는지 알 수 없었다 */}
+        <button onClick={onClose} title={tr("숨기기 — 대화·통화는 그대로 유지됩니다")}
+                style={{ background: "none", border: "none", color: "var(--text-secondary)",
+                         cursor: "pointer", fontSize: 14, lineHeight: 1 }}>—</button>
+        <button onClick={() => (dockCfg.close_action === "hide" ? onClose() : endAll())}
+                title={dockCfg.close_action === "hide"
+                  ? tr("닫기(숨기기) — 동작은 Setting>협진에서 변경")
+                  : tr("종료 — 통화를 끊고 창을 닫습니다 (동작은 Setting>협진에서 변경)")}
                 style={{ background: "none", border: "none", color: "var(--text-secondary)",
                          cursor: "pointer", fontSize: 14, lineHeight: 1 }}>✕</button>
       </div>
@@ -326,15 +387,23 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
             )}
             {found.map((u) => (
               <UserRow key={u.id} user={u} online={u.online} right={
-                u.relation === "accepted" ? <span style={{ fontSize: 11, color: "var(--stat-final)" }}>{tr("친구")}</span>
-                  : u.relation === "pending" ? <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                      {u.relation_mine ? tr("대기 중") : tr("요청 받음")}</span>
-                    : u.relation === "blocked" ? <span style={{ fontSize: 11, color: "var(--text-disabled)" }}>{tr("차단")}</span>
-                      : <button className="primary" style={{ fontSize: 11, padding: "2px 6px" }}
-                                onClick={() => act(api.collabRequestFriend(u.id), tr("친구 요청을 보냈습니다"))
-                                  .then(() => api.collabDirectory(query).then((r) => setFound(r.items)).catch(() => {}))}>
-                          {tr("친구 요청")}
-                        </button>
+                <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                  {/* 초대(2026-08-10 사용자 확정) — 친구가 아니어도 바로 대화·통화 시작(차단만 불가) */}
+                  {u.relation !== "blocked" && u.id !== meId && (
+                    <button style={{ fontSize: 11, padding: "2px 6px" }}
+                            title={tr("친구가 아니어도 바로 대화를 시작합니다 (통화 가능)")}
+                            onClick={() => openChat(u)}>{tr("초대")}</button>
+                  )}
+                  {u.relation === "accepted" ? <span style={{ fontSize: 11, color: "var(--stat-final)" }}>{tr("친구")}</span>
+                    : u.relation === "pending" ? <span style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                        {u.relation_mine ? tr("대기 중") : tr("요청 받음")}</span>
+                      : u.relation === "blocked" ? <span style={{ fontSize: 11, color: "var(--text-disabled)" }}>{tr("차단")}</span>
+                        : <button className="primary" style={{ fontSize: 11, padding: "2px 6px" }}
+                                  onClick={() => act(api.collabRequestFriend(u.id), tr("친구 요청을 보냈습니다"))
+                                    .then(() => api.collabDirectory(query).then((r) => setFound(r.items)).catch(() => {}))}>
+                            {tr("친구 요청")}
+                          </button>}
+                </span>
               } />
             ))}
           </div>
@@ -343,9 +412,35 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
 
       {tab === "chat" && (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          {/* 사람별 대화 탭(2026-08-10 사용자 확정) — 여러 명과 개별 채팅을 탭으로 전환 */}
+          {chats.length > 0 && (
+            <div style={{ display: "flex", gap: 2, padding: "3px 4px", overflowX: "auto",
+                          borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+              {chats.map((u) => {
+                const r = dmRoom(meId, u.id);
+                const owns = ownerRoom === r;
+                const un = (data.unread?.[r] ?? 0) > 0 && peer?.id !== u.id;
+                return (
+                  <span key={u.id} onClick={() => openChat(u)}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4, cursor: "pointer",
+                                 fontSize: 11, padding: "2px 7px", borderRadius: 6, whiteSpace: "nowrap",
+                                 background: peer?.id === u.id ? "var(--accent-subtle)" : "var(--bg-elevated)",
+                                 border: "1px solid var(--border)" }}>
+                    {owns && <span title={tr("이 대화가 마이크·화상·화면을 사용 중")}>🎤</span>}
+                    {u.name}
+                    {un && <span style={{ color: "var(--stat-emergency)", fontWeight: 700 }}>●</span>}
+                    <span onClick={(e) => { e.stopPropagation(); closeChat(u); }}
+                          title={tr("이 대화 탭 닫기 — 통화 중이면 통화도 끝납니다")}
+                          style={{ color: "var(--text-secondary)" }}>×</span>
+                  </span>
+                );
+              })}
+            </div>
+          )}
           {!peer && (
             <div style={{ padding: 12, fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.6 }}>
-              {tr("[친구] 탭에서 💬 를 눌러 대화를 시작하세요.")}
+              {tr("[친구] 탭에서 💬 를 눌러 대화를 시작하세요.")}<br />
+              {tr("친구가 아닌 사용자는 [찾기]에서 [초대]를 누르면 바로 대화·통화를 시작할 수 있습니다.")}
             </div>
           )}
           {peer && (
@@ -363,24 +458,27 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
                             background: "var(--bg-canvas)" }}>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
                   <button onClick={() => void runMedia(() => mesh.setMicrophone(!mic), tr("음성"))}
-                          disabled={!!mediaBusy || !peerOnline}
+                          disabled={!!mediaBusy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
                           className={mic ? "primary" : undefined}
                           style={{ fontSize: 11, padding: "4px 2px" }}
-                          title={mic ? tr("마이크 끄기") : tr("음성 통화")}>
+                          title={foreignOwner && dockCfg.media_exclusive ? tr("다른 대화에서 사용 중")
+                                 : mic ? tr("마이크 끄기") : tr("음성 통화")}>
                     {mic ? `🎤 ${tr("음성 켜짐")}` : `🎤 ${tr("음성")}`}
                   </button>
                   <button onClick={() => void runMedia(() => mesh.setCamera(!cam), tr("화상"))}
-                          disabled={!!mediaBusy || !peerOnline}
+                          disabled={!!mediaBusy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
                           className={cam ? "primary" : undefined}
                           style={{ fontSize: 11, padding: "4px 2px" }}
-                          title={cam ? tr("카메라 끄기") : tr("화상 통화")}>
+                          title={foreignOwner && dockCfg.media_exclusive ? tr("다른 대화에서 사용 중")
+                                 : cam ? tr("카메라 끄기") : tr("화상 통화")}>
                     {cam ? `📹 ${tr("화상 켜짐")}` : `📹 ${tr("화상")}`}
                   </button>
                   <button onClick={() => void runMedia(() => mesh.setScreenShare(!screen), tr("화면 공유"))}
-                          disabled={!!mediaBusy || !peerOnline}
+                          disabled={!!mediaBusy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
                           className={screen ? "primary" : undefined}
                           style={{ fontSize: 11, padding: "4px 2px" }}
-                          title={screen ? tr("화면 공유 중지") : tr("화면 공유")}>
+                          title={foreignOwner && dockCfg.media_exclusive ? tr("다른 대화에서 사용 중")
+                                 : screen ? tr("화면 공유 중지") : tr("화면 공유")}>
                     {screen ? `🖥 ${tr("공유 중")}` : `🖥 ${tr("화면")}`}
                   </button>
                 </div>
@@ -394,7 +492,7 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
                     {mediaBusy} — {tr("권한 확인 중…")}
                   </div>
                 )}
-                {(mic || cam || screen || peers.some((p) => (p.stream?.getTracks().length ?? 0) > 0)) && (
+                {!foreignOwner && (mic || cam || screen || peers.some((p) => (p.stream?.getTracks().length ?? 0) > 0)) && (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginTop: 6 }}>
                     <VideoTile id={meId} name={tr("나")} stream={mesh.localStream()} muted
                                color={colorOf(meId)} popoutFeatures={popoutFeatures}
@@ -448,6 +546,9 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
                        style={{ flex: 1, fontSize: 12 }} />
                 <button className="primary" onClick={send} style={{ fontSize: 12 }}>{tr("전송")}</button>
               </div>
+              {/* 미디어 권한·장치(2026-08-10 사용자 확정) — "마이크가 동작하지 않고 상대가 안
+                  보인다" 1차 점검. 접이식 — 통화가 정상인 사용자에게는 한 줄만 차지한다. */}
+              <MediaPermPanel compact />
             </>
           )}
         </div>

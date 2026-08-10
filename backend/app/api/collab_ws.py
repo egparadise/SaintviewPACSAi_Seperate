@@ -125,10 +125,11 @@ def _sync_context(user: dict) -> dict[str, Any] | None:
 
 
 def _can_relay_dm_rtc(account_id: int, target_id: int, room: str) -> bool:
-    """1:1 WebRTC 시그널을 서로 수락한 친구 사이에서만 허용한다.
+    """1:1 WebRTC 시그널 — 당사자 검증 + **차단만 아니면 허용**(2026-08-10 사용자 확정).
 
-    room 문자열만 믿지 않고, 두 ID가 실제 당사자인지와 accepted 관계를 함께 검증한다.
-    SDP/ICE 내용은 열어 보지 않는다.
+    예전에는 accepted 친구 사이에서만 허용했지만, '초대'(친구가 아니어도 대화·통화)가
+    계약이 되면서 dm_allowed(차단 검사)로 바꿨다. room 문자열만 믿지 않고 두 ID가 실제
+    당사자인지 함께 검증한다. SDP/ICE 내용은 열어 보지 않는다.
     """
     from app.models import Account
 
@@ -137,7 +138,7 @@ def _can_relay_dm_rtc(account_id: int, target_id: int, room: str) -> bool:
         return bool(
             me is not None
             and svc.dm_peer(room, account_id) == target_id
-            and target_id in svc.friend_ids(db, account_id)
+            and svc.dm_allowed(db, account_id, target_id)
         )
 
 

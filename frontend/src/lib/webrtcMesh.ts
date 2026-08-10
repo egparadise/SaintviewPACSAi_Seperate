@@ -13,6 +13,7 @@
 // 열어 보지 않고 지정 상대에게 넘기기만 한다(백엔드 collab_ws.py 릴레이 분기).
 
 import { collab } from "./collab";
+import { CAM_DEV_KEY, MIC_DEV_KEY, preferredDevice } from "./mediaPerms";
 
 /** 저해상 고정 — 판독 화면 옆의 작은 타일이 목적이지 화상회의 품질이 목적이 아니다.
  *  이 값이 mesh 정원 6명을 성립시키는 근거다(올리려면 SFU 부터). */
@@ -138,6 +139,9 @@ export class WebrtcMesh {
     });
   }
 
+  /** 현재 시그널 룸 — 미디어 배타(다른 대화에서 버튼 비활성) 판정용(2026-08-10) */
+  room(): string | null { return this.signalRoom; }
+
   stop(): void {
     for (const id of [...this.pcs.keys()]) {
       this.sendRtc("rtc.leave", id, null);
@@ -170,7 +174,9 @@ export class WebrtcMesh {
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저는 마이크를 지원하지 않습니다");
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: AUDIO_CONSTRAINTS, video: false });
+    // 설정/협진 창의 미디어 패널에서 고른 장치(이 PC localStorage) — ideal 이라 없으면 기본으로 폴백
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { ...AUDIO_CONSTRAINTS, ...preferredDevice(MIC_DEV_KEY) }, video: false });
     const track = stream.getAudioTracks()[0];
     if (!track) { stream.getTracks().forEach((t) => t.stop()); throw new Error("사용 가능한 마이크가 없습니다"); }
     stream.getTracks().filter((t) => t !== track).forEach((t) => t.stop());
@@ -184,7 +190,8 @@ export class WebrtcMesh {
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("이 브라우저는 카메라를 지원하지 않습니다");
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: VIDEO_CONSTRAINTS });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false, video: { ...VIDEO_CONSTRAINTS, ...preferredDevice(CAM_DEV_KEY) } });
     const track = stream.getVideoTracks()[0];
     if (!track) { stream.getTracks().forEach((t) => t.stop()); throw new Error("사용 가능한 카메라가 없습니다"); }
     stream.getTracks().filter((t) => t !== track).forEach((t) => t.stop());

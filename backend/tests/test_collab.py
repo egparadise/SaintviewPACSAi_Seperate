@@ -940,21 +940,27 @@ def test_dm_webrtc_survives_being_in_a_session(client, db, duo):
             assert offer["room"] == room, "DM 릴레이에서 room 이 유실됐다"
 
 
-def test_dm_webrtc_guard_requires_friend_and_exact_room(db, duo):
-    """room ID 위조나 비친구 계정으로는 화상 시그널을 보낼 수 없다."""
+def test_dm_webrtc_guard_blocks_only_forged_room_or_blocked(db, duo):
+    """화상 시그널 거부 사유는 room 위조·차단뿐 — 비친구는 허용.
+
+    2026-08-10 사용자 확정 '초대' 계약: 친구가 아니어도 [찾기]>[초대]로 대화·통화를
+    시작할 수 있다(친구 관계는 목록·프레즌스 편의일 뿐 자격이 아니다). 예전의
+    '친구 한정' 단언은 이 계약과 정면 충돌해 갱신했다(test_collab_dm_policy 와 한 쌍).
+    """
     from app.api.collab_ws import _can_relay_dm_rtc
     from app.services import collab_service as svc
 
     stranger = _account(db, "rtc_signal_stranger", duo["hb"].id)
     svc.unfriend(db, duo["host"], stranger.id)  # 재실행해도 항상 비친구에서 시작
     room = svc.dm_room(duo["host"].id, stranger.id)
-    assert _can_relay_dm_rtc(duo["host"].id, stranger.id, room) is False
-
-    svc.request_friend(db, duo["host"], stranger.id)
-    svc.respond_friend(db, stranger, duo["host"].id, True)
+    # 비친구여도 허용 — 초대가 성립하는 근거
     assert _can_relay_dm_rtc(duo["host"].id, stranger.id, room) is True
+    # room ID 위조는 여전히 거부(당사자 검증)
     assert _can_relay_dm_rtc(duo["host"].id, stranger.id,
                              svc.dm_room(duo["host"].id, stranger.id + 999)) is False
+    # 차단은 거부 — 유일한 관계 기반 거부 사유
+    svc.set_block(db, duo["host"], stranger.id, True)
+    assert _can_relay_dm_rtc(duo["host"].id, stranger.id, room) is False
 
 
 def test_ws_non_controller_state_is_dropped(client, db, duo):

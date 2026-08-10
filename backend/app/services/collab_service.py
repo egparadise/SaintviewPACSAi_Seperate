@@ -371,6 +371,16 @@ def respond_friend(db: Session, me: Account, other_id: int, accept: bool) -> Col
     return link
 
 
+def dm_allowed(db: Session, a_id: int, b_id: int) -> bool:
+    """1:1 대화·통화 허용 — **차단만 아니면 허용**(2026-08-10 사용자 확정).
+
+    '초대' 기능의 근거: 친구가 되지 않았어도 등록 사용자를 대화·통화로 초대할 수 있어야
+    한다. 친구 관계는 목록·프레즌스 편의일 뿐 **자격이 아니다**. 차단(blocked)만 거부한다.
+    (DM 채팅은 원래부터 can_use_room 이 당사자 검사만 했다 — 통화 시그널도 같은 정책으로.)"""
+    link = find_link(db, a_id, b_id)
+    return not (link is not None and link.status == "blocked")
+
+
 def set_block(db: Session, me: Account, other_id: int, blocked: bool) -> None:
     link = find_link(db, me.id, other_id)
     if blocked:
