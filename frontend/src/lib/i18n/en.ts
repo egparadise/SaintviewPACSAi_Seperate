@@ -2638,5 +2638,6 @@ const d: Record<string, string> = {
   "좌우 비율 무시": "Ignore L/R ratio",
   "조직 탐지와 무관하게 항상 같은 고정 비율로 가운데 여백 제거 (기본 켬)": "Always trim the central gap at the same fixed ratio, regardless of tissue detection (default on)",
   "자동 탐지가 영상마다 실패·지연하면 배치가 들쭉날쭉해집니다 — 켜 두면 항상 같은 모양으로 나옵니다. 해제하면 아래 흉벽 판정(자동 탐지) 규칙을 씁니다.": "When auto detection fails or lags on some images, the hanging becomes inconsistent — keep this on for a consistent look. Uncheck to use the chest-wall detection rules below.",
+  "드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 드래그 = 폭 조절": "Drag = move column · drag right edge = resize width",
 };
 export default d;

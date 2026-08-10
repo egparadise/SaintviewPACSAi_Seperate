@@ -1116,8 +1116,14 @@ function SeriesTreeRows({ studyId, tree, expSeries, toggleSeries, colSpan, lead,
 }
 
 /* ── [C] 메인 검사 그리드 (컬럼 구성형) ───────────── */
+/** 컬럼 기본 폭 — 설정 폭(colWidths)이 없을 때. 넓은 텍스트 컬럼만 예외, 나머지 110px. */
+const GRID_COL_DEF_W: Record<string, number> = {
+  name: 150, study_desc: 180, institution: 190, ref_phys: 150, memo: 200,
+  impression_preview: 220, order_name: 170, ae_title: 130, body_part: 120,
+};
 function StudyGrid({
   items, columns, selectedId, selectedIds, onSelect, onOpen, onContext, variant, treeDisabled,
+  colWidths, onReorder, onResize,
 }: {
   items: StudyRow[];
   columns: string[];
@@ -1129,22 +1135,87 @@ function StudyGrid({
   variant?: "infi";
   /** LOCAL 모드 — Series 펼침(＋)은 서버 seriesTree 라 숨김(로컬 id 오호출 방지) */
   treeDisabled?: boolean;
+  /** 2026-08-10 사용자 확정 — 헤더 드래그로 위치 이동·우측 가장자리로 폭 조절·넘치면 가로
+   *  스크롤. 조정값은 계정별 저장(worklist.prefs — 부모가 소유). 셋 다 선택적: 안 넘기면 구 동작. */
+  colWidths?: Record<string, number>;
+  onReorder?: (next: string[]) => void;
+  onResize?: (col: string, px: number) => void;
 }) {
   const infi = variant === "infi";
   // Exam → Series → Image 계층 확장: '＋' 클릭=아래로 전개('−'로 전환), 다시 클릭=접기
   const { expanded, expSeries, trees, toggleExam, toggleSeries } = useSeriesTree();
   const span = columns.length + 2;   // 토글 + # + 컬럼들
   const markStyle = TREE_MARK;
+  // ── 컬럼 폭·순서 직접 조작 ──────────────────────────────────────────────
+  const [dragCol, setDragCol] = useState<string | null>(null);
+  const [overCol, setOverCol] = useState<string | null>(null);
+  const resizingRef = useRef(false);   // 폭 조절 중 th 드래그(이동) 시작 금지
+  const colWOf = (c: string) =>
+    colWidths?.[c] ?? (infi ? INFI_COL_WIDTH[c] : undefined) ?? GRID_COL_DEF_W[c] ?? 110;
+  // 전체 폭 = 고정 2열 + 컬럼 합 — 컨테이너보다 크면 바깥 div(overflow:auto)가 가로 스크롤을 낸다.
+  // ⚠ tableLayout:fixed + colgroup 이라야 폭 지정이 결정적이다(auto 레이아웃은 내용이 폭을 이긴다).
+  const totalW = 22 + 30 + columns.reduce((a, c) => a + colWOf(c), 0);
+  const startResize = (c: string) => (e: React.PointerEvent) => {
+    if (!onResize) return;
+    e.preventDefault(); e.stopPropagation();
+    resizingRef.current = true;
+    const x0 = e.clientX;
+    const w0 = colWOf(c);
+    const move = (ev: PointerEvent) =>
+      onResize(c, Math.max(40, Math.min(600, w0 + ev.clientX - x0)));
+    const up = () => {
+      resizingRef.current = false;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  const dropOn = (c: string) => {
+    if (!onReorder || !dragCol || dragCol === c) { setDragCol(null); setOverCol(null); return; }
+    const next = columns.filter((x) => x !== dragCol);
+    next.splice(next.indexOf(c) < 0 ? next.length : next.indexOf(c), 0, dragCol);
+    onReorder(next);
+    setDragCol(null); setOverCol(null);
+  };
   return (
     <div style={{ overflow: "auto", flex: 1, minWidth: 0 }}>
-      <table className={infi ? "grid-table grid-infi" : "grid-table"}>
+      <table className={infi ? "grid-table grid-infi" : "grid-table"}
+             style={{ tableLayout: "fixed", width: totalW, minWidth: "100%" }}>
+        <colgroup>
+          <col style={{ width: 22 }} />
+          <col style={{ width: 30 }} />
+          {columns.map((c) => <col key={c} style={{ width: colWOf(c) }} />)}
+        </colgroup>
         <thead>
           <tr>
-            <th style={{ width: 22 }} />
-            <th style={{ width: 30 }}>#</th>
+            <th />
+            <th>#</th>
             {columns.map((c) => (
-              <th key={c} style={infi && INFI_COL_WIDTH[c] ? { width: INFI_COL_WIDTH[c] } : undefined}>
+              <th key={c}
+                  draggable={!!onReorder}
+                  title={onReorder ? tr("드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 드래그 = 폭 조절") : undefined}
+                  onDragStart={(e) => {
+                    if (resizingRef.current) { e.preventDefault(); return; }
+                    setDragCol(c); e.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDragOver={(e) => { if (dragCol) { e.preventDefault(); setOverCol(c); } }}
+                  onDrop={(e) => { e.preventDefault(); dropOn(c); }}
+                  onDragEnd={() => { setDragCol(null); setOverCol(null); }}
+                  style={{ position: "relative", overflow: "hidden", textOverflow: "ellipsis",
+                           whiteSpace: "nowrap",
+                           cursor: onReorder ? "grab" : undefined,
+                           opacity: dragCol === c ? 0.4 : undefined,
+                           boxShadow: overCol === c && dragCol && dragCol !== c
+                             ? "inset 3px 0 0 var(--accent)" : undefined }}>
                 {tr(COLUMN_DEFS[c]?.label ?? c)}
+                {onResize && (
+                  <span onPointerDown={startResize(c)} draggable={false}
+                        onClick={(e) => e.stopPropagation()}
+                        onDragStart={(e) => e.preventDefault()}
+                        style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 7,
+                                 cursor: "col-resize" }} />
+                )}
               </th>
             ))}
           </tr>
@@ -1168,7 +1239,12 @@ function StudyGrid({
                   </td>
                 )}
                 <td style={{ color: "var(--text-secondary)" }}>{i + 1}</td>
-                {columns.map((c) => <td key={c}>{COLUMN_DEFS[c]?.render(row)}</td>)}
+                {/* tableLayout:fixed 에선 넘치는 내용이 이웃 칸을 밀지 못한다 — 말줄임으로 자른다 */}
+                {columns.map((c) => (
+                  <td key={c} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {COLUMN_DEFS[c]?.render(row)}
+                  </td>
+                ))}
               </tr>
               {/* Series → Image 행들 (과거검사 패널과 같은 렌더) */}
               {!treeDisabled && expanded.has(row.id) && (
@@ -2598,6 +2674,11 @@ export function Worklist() {
   const [searchFlash, setSearchFlash] = useState(0);
   const flashMountRef = useRef(false);
   const [columns, setColumns] = useState<string[]>(DEFAULT_COLUMNS);
+  // ── 그리드 컬럼 폭·순서 직접 조작(2026-08-10 사용자 확정) — 계정별 저장 ──
+  // 폭: worklist.prefs.col_widths_by_viewer[vk] · 순서: by_viewer[vk](설정 ▲▼ 와 같은 키 —
+  // 두 UI 가 다른 키에 쓰면 반드시 갈린다). 저장은 병합형(read-modify-write)으로 다른 키 보존.
+  const [colW, setColW] = useState<Record<string, number>>({});
+  const colWSaveT = useRef<number | null>(null);
   // 뷰어별 워크리스트 컬럼 오버라이드(settings>워크리스트>뷰어별) — 모드 전환 시 적용
   const wlColsBaseRef = useRef<string[]>(DEFAULT_COLUMNS);
   const wlByViewerRef = useRef<{ sv?: string[] | null; ty?: string[] | null; infi?: string[] | null }>({});
@@ -2685,6 +2766,34 @@ export function Worklist() {
   // 원본 worklist.prefs + 현재 활성 뷰어 스킨 키 — 뷰어별 해석·병합 저장 라우팅
   const wlPrefsRef = useRef<Record<string, unknown>>({});
   const vkRef = useRef<ViewerKey>("ty");
+  // ── 그리드 컬럼 순서(헤더 드래그)·폭(가장자리 드래그) 저장 — 계정별(worklist.prefs) ──
+  const reorderColumns = useCallback((next: string[]) => {
+    setColumns(next);
+    const vk = vkRef.current;
+    // 설정 ▲▼ 와 같은 키(by_viewer[vk])에 쓴다 — 다음 접속·설정 화면 모두 이 순서를 본다
+    wlByViewerRef.current = { ...wlByViewerRef.current, [vk]: next };
+    api.getSetting("worklist.prefs").then((r) =>
+      api.putSetting("worklist.prefs",
+        { ...r.value, by_viewer: { ...((r.value as { by_viewer?: object }).by_viewer ?? {}), [vk]: next } },
+        "user")).catch(() => {});
+  }, []);
+  const resizeColumn = useCallback((c: string, px: number) => {
+    setColW((prev) => {
+      const next = { ...prev, [c]: Math.round(px) };
+      // 드래그 중 매 픽셀 저장하지 않는다 — 600ms 디바운스로 마지막 값만 병합 저장
+      if (colWSaveT.current) window.clearTimeout(colWSaveT.current);
+      colWSaveT.current = window.setTimeout(() => {
+        const vk = vkRef.current;
+        api.getSetting("worklist.prefs").then((r) => {
+          const cur = (r.value as { col_widths_by_viewer?: Record<string, Record<string, number>> })
+            .col_widths_by_viewer ?? {};
+          return api.putSetting("worklist.prefs",
+            { ...r.value, col_widths_by_viewer: { ...cur, [vk]: next } }, "user");
+        }).catch(() => {});
+      }, 600);
+      return next;
+    });
+  }, []);
   // 뷰어별 크기 저장 — ty=legacy layout_sizes / sv·infi=sizes_by_viewer[vk]{railW,prevH,priorH,repH}
   const persistViewerSizes = useCallback(() => {
     const vk = vkRef.current;
@@ -3916,6 +4025,10 @@ export function Worklist() {
     const base = vk === "ty" ? wlColsBaseRef.current : VIEWER_COL_DEFAULT[vk];
     const cols = ov?.length ? ov.filter((c) => COLUMN_DEFS[c]) : base;
     if (cols?.length) setColumns(cols.includes("read_state") ? cols : ["read_state", ...cols]);
+    // 컬럼 폭(계정별·뷰어별) — 헤더 가장자리 드래그로 조정한 값 복원
+    const cwBag = (v as { col_widths_by_viewer?: Partial<Record<ViewerKey, Record<string, number>>> })
+      .col_widths_by_viewer;
+    setColW(cwBag?.[vk] ?? {});
     // ── 패널 표시/숨김 ──
     setPanelsOn(vk === "ty"
       ? { ...DEFAULT_TY_PANELS, ...(v.panels ?? {}) }
@@ -4306,6 +4419,7 @@ export function Worklist() {
                           ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
               <StudyGrid items={items} columns={columns} variant="infi" selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                          treeDisabled={localMode}
+                         colWidths={colW} onReorder={reorderColumns} onResize={resizeColumn}
                          onSelect={onSelect}
                          onOpen={(r) => { if (localMode) setLocalViewerRow(r); else void doAction("viewdraft", r); }}
                          onContext={(e, r) => setCtx({ x: e.clientX, y: e.clientY, row: r })} />
@@ -4358,6 +4472,7 @@ export function Worklist() {
                       ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
           <StudyGrid items={items} columns={columns} selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                      treeDisabled={localMode}
+                     colWidths={colW} onReorder={reorderColumns} onResize={resizeColumn}
                      onSelect={onSelect}
                      onOpen={(r) => { if (localMode) setLocalViewerRow(r); else void doAction("viewdraft", r); }}
                      onContext={(e, r) => setCtx({ x: e.clientX, y: e.clientY, row: r })} />
