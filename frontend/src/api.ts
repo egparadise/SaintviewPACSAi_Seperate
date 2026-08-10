@@ -608,6 +608,8 @@ export const api = {
           by_modality: boolean; by_body_part: boolean }>(
       (isLiveId(studyId) ? `${LIVE}/studies/${studyId}/compare-candidates`
                          : `/api/studies/${studyId}/compare-candidates`) + `?${query}`),
+  /** 배정의 판독 대기 배지 — A 세션 없으면 pending:null(숨김) */
+  liveMyPending: () => req<{ pending: number | null }>(`${LIVE}/my-pending`),
   seriesTree: (studyId: number) =>
     req<{ study_uid: string; series: SeriesNode[] }>(
       isLiveId(studyId) ? `${LIVE}/studies/${studyId}/series-tree`

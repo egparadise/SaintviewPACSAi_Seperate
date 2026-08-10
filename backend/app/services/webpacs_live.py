@@ -280,6 +280,22 @@ def _row_of(r: dict) -> dict:
     }
 
 
+def live_my_pending(db: Session, user: dict | None = None) -> dict:
+    """배정의(로그인 A 계정) 기준 판독 대기 건수 — 헤더 배지(2026-08-10 사용자 확정).
+
+    A 의 자체 집계 개념(study_date_step=no_reading → status E/RE/RI, 날짜 무제한)을 그대로
+    쓴다 — 원 서버 프로그램과 숫자가 일치해야 사용자가 믿는다. per-user A 토큰으로 호출하므로
+    A 가 그 계정 권한 스코프(배정분)로 집계한다. A 세션이 없으면 None(배지 숨김)."""
+    if not has_user_a_session(user):
+        return {"pending": None}
+    client = live_client(db, user)
+    try:
+        n = client.study_count({"study_date_step": "no_reading"})
+    except Exception:  # noqa: BLE001 — 배지는 부가 정보, 실패로 화면을 막지 않는다
+        return {"pending": None}
+    return {"pending": int(n)}
+
+
 def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None) -> dict:
     """A 워크리스트 실시간 조회 → StudyRow 배열(vid). 최신순.
     per-user 세션이 있으면 그 사용자 A 계정으로 조회(A 권한 스코프 그대로 적용)."""

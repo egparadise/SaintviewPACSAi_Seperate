@@ -68,6 +68,7 @@ export function ClientLogin({ onLogin, onBack }: {
         const a = await api.webpacsLogin(username.trim(), password);
         setToken(a.token, remember);
         localStorage.setItem("sv_login_mode", "webpacs");
+        localStorage.setItem("sv_a_user", "1");   // 배정의(A 계정) 로그인 — 칩 기간·대기 배지 조건
         localStorage.setItem("sv_server_mode", "live");   // 워크리스트가 Live 소스로 시작
         localStorage.setItem("sv_user", a.a_user_name || a.username);
         onLogin({ token: a.token, username: a.a_user_name || a.username, role: a.role,

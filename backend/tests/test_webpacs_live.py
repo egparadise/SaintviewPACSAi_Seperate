@@ -727,3 +727,23 @@ def test_live_doctor_login_autofills_signature(client, live_ready, db):
     assert acc.display_name == "김판독"
     assert acc.license_no == "10011", "면허번호가 자동으로 채워져야 한다(그림의 판독의 등록)"
     assert acc.major_no == "90011", "전문의 번호도 자동으로 채워져야 한다(2026-08-10)"
+
+
+def test_status_map_shows_reading_and_request():
+    """★ 2026-08-10 사용자 강조 — '판독중'(RI)과 '요청'(E 계열)이 상태로 정확히 드러나야 한다."""
+    from app.services.webpacs_live import _map_status
+
+    assert _map_status("RI") == ("reading", "reading", False), "RI 는 화면에서 '판독중'이어야 한다"
+    for code in ("E", "RE", "I", "C", ""):
+        assert _map_status(code)[0] == "received", f"{code} 는 '요청'(received) 칩이어야 한다"
+    assert _map_status("A")[0] == "finalized"
+
+
+def test_my_pending_uses_a_no_reading_count(client, live_ready):
+    """배정의 대기 배지 — A 의 no_reading 집계와 같은 계약. A 세션 없으면 null(숨김)."""
+    r = client.post("/api/auth/webpacs-login",
+                    json={"user_id": "dr_kim", "user_passwd": "kim1234"})
+    tok = {"Authorization": f"Bearer {r.json()['token']}"}
+    r = client.get("/api/webpacs/live/my-pending", headers=tok)
+    assert r.status_code == 200, r.text
+    assert isinstance(r.json()["pending"], int), "A 세션인데 집계가 없다"

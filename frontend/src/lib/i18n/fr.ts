@@ -2704,5 +2704,11 @@ const d: Record<string, string> = {
   "Accession 번호": "N° d'accession",
   "기관(센터명)": "Établissement (centre)",
   "메모": "Mémo",
+  "판독 대기": "Lectures en attente",
+  "배정된 판독 대기(요청·재판독·작성중) — 원 서버 집계와 동일, 30초마다 갱신": "Lectures qui vous sont assignées (demandées, relecture, en cours) — même décompte que le serveur d'origine, actualisé toutes les 30 s",
+  "칩 집계 기간": "Période de comptage des puces",
+  "일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.": "jours — période de comptage des puces d'état lors d'une connexion en tant que médecin assigné (compte PACS distant). La puce Urgence est toujours sur 1 jour (aujourd'hui).",
+  "정산조회": "Facturation",
+  "정산조회 — 원격판독 정산 사이트를 새 창으로 엽니다 (같은 A 계정으로 로그인)": "Facturation — ouvre le site de facturation de téléradiologie dans une nouvelle fenêtre (connexion avec le même compte distant)",
 };
 export default d;

@@ -2704,5 +2704,11 @@ const d: Record<string, string> = {
   "Accession 번호": "Accession-Nr.",
   "기관(센터명)": "Einrichtung (Zentrum)",
   "메모": "Notiz",
+  "판독 대기": "Offene Befunde",
+  "배정된 판독 대기(요청·재판독·작성중) — 원 서버 집계와 동일, 30초마다 갱신": "Ihnen zugewiesene Befunde (angefordert, Zweitbefund, in Arbeit) — identisch mit dem Ursprungsserver, alle 30 s aktualisiert",
+  "칩 집계 기간": "Zählzeitraum der Chips",
+  "일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.": "Tage — Zählzeitraum der Status-Chips bei Anmeldung als zugewiesener Arzt (Remote-PACS-Konto). Der Notfall-Chip zählt immer 1 Tag (heute).",
+  "정산조회": "Abrechnung",
+  "정산조회 — 원격판독 정산 사이트를 새 창으로 엽니다 (같은 A 계정으로 로그인)": "Abrechnung — öffnet die Teleradiologie-Abrechnungsseite in einem neuen Fenster (Anmeldung mit demselben Remote-Konto)",
 };
 export default d;

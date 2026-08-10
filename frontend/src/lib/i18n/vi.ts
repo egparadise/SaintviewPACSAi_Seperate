@@ -2704,5 +2704,11 @@ const d: Record<string, string> = {
   "Accession 번호": "Số Accession",
   "기관(센터명)": "Cơ sở (trung tâm)",
   "메모": "Ghi chú",
+  "판독 대기": "Chờ đọc",
+  "배정된 판독 대기(요청·재판독·작성중) — 원 서버 집계와 동일, 30초마다 갱신": "Ca đọc được phân công (yêu cầu, đọc lại, đang viết) — trùng số liệu máy chủ gốc, làm mới mỗi 30 giây",
+  "칩 집계 기간": "Khoảng thống kê chip",
+  "일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.": "ngày — khoảng thống kê chip trạng thái khi đăng nhập bằng tài khoản bác sĩ được phân công (PACS từ xa). Chip cấp cứu luôn tính 1 ngày (hôm nay).",
+  "정산조회": "Tra cứu thanh toán",
+  "정산조회 — 원격판독 정산 사이트를 새 창으로 엽니다 (같은 A 계정으로 로그인)": "Tra cứu thanh toán — mở trang thanh toán đọc từ xa trong cửa sổ mới (đăng nhập cùng tài khoản từ xa)",
 };
 export default d;

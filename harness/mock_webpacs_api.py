@@ -203,6 +203,7 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
         return {"study_data": page, "study_count": 0, "study_data_count": len(page),
                 "message": "ok", "status": 200}
 
+    # study_date_step=no_reading → A 계약: status ['E','RE','RI'] 집계(B 배지가 쓴다)
     @app.get("/api/study/count")
     def study_count(patient_id: str | None = None, patient_name: str | None = None,
                     study_modality: str | None = None, study_search: str | None = None,

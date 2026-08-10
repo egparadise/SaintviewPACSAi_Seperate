@@ -97,6 +97,31 @@ function AdminLogin({ onLogin, onBack }: { onLogin: (r: LoginResp) => void; onBa
   );
 }
 
+/** 배정의 판독 대기 배지(2026-08-10) — 이름 왼쪽. A 계정(배정의) 로그인일 때만 뜨고
+ *  30초마다 갱신. 숫자는 원 서버의 '판독 전(no_reading: 요청·재판독·작성중)' 집계와 동일. */
+function PendingBadge() {
+  useLang();
+  const [n, setN] = useState<number | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const tick = () => api.liveMyPending()
+      .then((r) => { if (alive) setN(r.pending); })
+      .catch(() => { if (alive) setN(null); });
+    tick();
+    const t = window.setInterval(tick, 30_000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, []);
+  if (n === null) return null;
+  return (
+    <span title={tr("배정된 판독 대기(요청·재판독·작성중) — 원 서버 집계와 동일, 30초마다 갱신")}
+          style={{ fontSize: 12, fontWeight: 700, padding: "2px 9px", borderRadius: 10,
+                   background: n > 0 ? "rgba(248,113,113,0.16)" : "rgba(120,120,140,0.15)",
+                   color: n > 0 ? "var(--stat-emergency, #f87171)" : "var(--text-secondary)" }}>
+      {tr("판독 대기")} {n}
+    </span>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(restoreSession);
   const [authView, setAuthView] = useState<AuthView>(INITIAL_AUTH_VIEW);
@@ -221,6 +246,7 @@ export default function App() {
         <span style={{ fontWeight: 700 }}>Saintview <span style={{ color: "var(--ai)" }}>AI</span></span>
         {session.hospitalName && <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>🏥 {session.hospitalName}</span>}
         <div style={{ flex: 1 }} />
+        <PendingBadge />
         <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{session.name} [{session.role}]</span>
         {/* 협진 — 같은 병원·타 병원 사용자와 친구를 맺고 메신저로 대화한다.
             실제 영상 공유(세션)는 뷰어 창에서 [협진] 버튼으로 시작한다. */}
@@ -231,7 +257,11 @@ export default function App() {
         <button onClick={() => setSettingsOpen(true)}>{tr("settings")}</button>
         <button onClick={logout}>{tr("logout")}</button>
       </header>
-      <CollabGlobal open={collabOpen} onClose={() => setCollabOpen(false)} />
+      {/* 협진 패널 숨기기(2026-08-10 사용자 확정) — X/재클릭은 **숨김**이지 종료가 아니다.
+          display 로만 감춰 마운트를 유지한다 → 대화·탭 상태가 보존되고 다시 열면 그대로다. */}
+      <div style={{ display: collabOpen ? "contents" : "none" }}>
+        <CollabGlobal open onClose={() => setCollabOpen(false)} />
+      </div>
       {settingsOpen && <SettingsModal role={session.role} scope="viewer" onClose={() => setSettingsOpen(false)} />}
       <main style={{ flex: 1, minHeight: 0 }}>
         <ErrorBoundary where="worklist"><Worklist /></ErrorBoundary>

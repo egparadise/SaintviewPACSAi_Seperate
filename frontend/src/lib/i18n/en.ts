@@ -2704,5 +2704,11 @@ const d: Record<string, string> = {
   "Accession 번호": "Accession No.",
   "기관(센터명)": "Institution (center)",
   "메모": "Memo",
+  "판독 대기": "Pending reads",
+  "배정된 판독 대기(요청·재판독·작성중) — 원 서버 집계와 동일, 30초마다 갱신": "Reads assigned to you (requested, re-read, writing) — same count as the origin server, refreshed every 30s",
+  "칩 집계 기간": "Chip count window",
+  "일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.": "days — count window for the worklist status chips when logged in as the assigned doctor (remote PACS account). The Emergency chip is always 1 day (today).",
+  "정산조회": "Billing",
+  "정산조회 — 원격판독 정산 사이트를 새 창으로 엽니다 (같은 A 계정으로 로그인)": "Billing — opens the teleradiology billing site in a new window (log in with the same remote account)",
 };
 export default d;

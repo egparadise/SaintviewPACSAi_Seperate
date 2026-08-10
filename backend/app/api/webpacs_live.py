@@ -64,6 +64,12 @@ def _wrap(fn, *args, **kw):
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/my-pending")
+def my_pending(db: Session = Depends(get_db), user: dict = Depends(current_user)):
+    """배정의 판독 대기 배지 — A 세션 없으면 {pending:null}(숨김)."""
+    return _wrap(lambda: live.live_my_pending(db, user))
+
+
 @router.get("/worklist")
 def worklist(
     q: str = "", pid: str = "", pname: str = "", modality: str = "",

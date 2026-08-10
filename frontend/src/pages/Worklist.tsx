@@ -940,6 +940,14 @@ function ServerButtons({ mode, onMode, onWebPacs }: {
 
   return (
     <span style={{ position: "relative", display: "flex", gap: 3, alignSelf: "center" }}>
+      {/* 정산조회(2026-08-10 사용자 확정) — 원 서버 프로그램의 기능. admin73 정산 사이트를
+          새 창으로 연다. ⚠ 타 오리진이라 자동 로그인은 프로그램이 대신할 수 없다 —
+          같은 A 계정으로 그 사이트에 로그인돼 있으면 세션이 그대로 이어진다. */}
+      <button onClick={() => window.open("https://admin73.cloudcare.life/reading", "_blank", "noopener")}
+              title={tr("정산조회 — 원격판독 정산 사이트를 새 창으로 엽니다 (같은 A 계정으로 로그인)")}
+              style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+        {tr("정산조회")}
+      </button>
       <button onClick={() => pick("local")}
               title={tr("Local Server — 로컬 PACS 모드로 전환(서버 데이터 숨김) + 공유 폴더 보기 (설정>서버 네트워크에서 디렉토리 지정)")}
               style={{ padding: "2px 10px", fontSize: 11, fontWeight: 700,
@@ -2603,8 +2611,23 @@ function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, page
   useEffect(() => {
     if (pageOnly) { setC(null); return; }
     let alive = true;
-    api.worklistCounts({ ...queryParams, qf: sbScopeParam(), qop: sbOpParam() })
-      .then((r) => { if (alive) setC(r); }).catch(() => { if (alive) setC(null); });
+    // 배정의(A 계정) 로그인 + 사용자가 기간을 고르지 않았으면(전체) 설정 일수로 좁힌다
+    // (설정>판독>기본 설정 '칩 집계 기간' 1~30일, 기본 30). 응급 칩만 **1일** 별도 집계(사용자 확정).
+    const chipP: Record<string, string> = { ...queryParams, qf: sbScopeParam(), qop: sbOpParam() };
+    const aUser = localStorage.getItem("sv_a_user") === "1";
+    const days = Math.min(30, Math.max(1, Number(localStorage.getItem("sv_chip_days") || 30)));
+    const dstr = (back: number) => {
+      const d = new Date(Date.now() - back * 86400000);
+      return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+    };
+    if (aUser && !chipP.date_from) chipP.date_from = dstr(days - 1);
+    const emerP = aUser ? { ...chipP, date_from: dstr(0) } : null;
+    Promise.all([
+      api.worklistCounts(chipP),
+      emerP ? api.worklistCounts(emerP) : Promise.resolve(null),
+    ]).then(([r, re]) => {
+      if (alive) setC(re ? { ...r, emergency: re.emergency } : r);
+    }).catch(() => { if (alive) setC(null); });
     return () => { alive = false; };
   }, [queryParams, refreshKey, pageOnly]);
   const pageN = (pred: (r: StudyRow) => boolean) => items.filter(pred).length;

@@ -2704,5 +2704,11 @@ const d: Record<string, string> = {
   "Accession 번호": "N.º de Accession",
   "기관(센터명)": "Institución (centro)",
   "메모": "Nota",
+  "판독 대기": "Pendientes de lectura",
+  "배정된 판독 대기(요청·재판독·작성중) — 원 서버 집계와 동일, 30초마다 갱신": "Lecturas asignadas (solicitadas, relectura, en curso) — igual que el servidor origen, se actualiza cada 30 s",
+  "칩 집계 기간": "Periodo de conteo de chips",
+  "일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.": "días — periodo de conteo de los chips de estado al iniciar sesión como médico asignado (cuenta PACS remota). El chip de emergencia siempre es de 1 día (hoy).",
+  "정산조회": "Facturación",
+  "정산조회 — 원격판독 정산 사이트를 새 창으로 엽니다 (같은 A 계정으로 로그인)": "Facturación — abre el sitio de facturación de telerradiología en una ventana nueva (inicie sesión con la misma cuenta remota)",
 };
 export default d;

@@ -408,6 +408,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [profName, setProfName] = useState("");
   const [profLicense, setProfLicense] = useState("");
   const [profMajor, setProfMajor] = useState("");   // 전문의 번호(2026-08-10) — A 자동 채움, 없으면 공란
+  const [chipDays, setChipDays] = useState<number>(Number(localStorage.getItem("sv_chip_days") || 30));
   // DICOM 노드 (SCP/SCU) — 전역/관리자
   const [nodes, setNodes] = useState<DicomNode[]>([]);
   const [nodeMsg, setNodeMsg] = useState("");
@@ -553,6 +554,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         // 남는 게 있으면 그건 어떤 뷰어도 읽지 않는 값이고, mig.dropped 로 배너에 그대로 찍힌다.
         setDefLay(Object.fromEntries(Object.entries(legacyInfi)
           .filter(([k]) => !HANG2D_MODS.includes(k) && k !== "MG")));
+      }
+      {
+        const cd = (v as { reading_chip_days?: number }).reading_chip_days;
+        if (typeof cd === "number" && cd >= 1 && cd <= 30) {
+          setChipDays(cd);
+          localStorage.setItem("sv_chip_days", String(cd));
+        }
       }
       setMgCfg(readMgCfg((v as { mg_hang?: unknown }).mg_hang));
       {
@@ -709,6 +717,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       hanging2d: h2d.common,
       hanging2d_common_on: h2dCommonOn,
       hanging2d_by_viewer: h2d.byViewer,
+      reading_chip_days: chipDays,   // 칩 집계 기간(배정의) — 로밍
       mg_hang: mgCfg,
       overlay_by_modality: ovlCfg,
       client_viewer: clientViewer,
@@ -1719,6 +1728,23 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           setSaved(tr("판독의 정보 저장됨 — 이후 확정(서명)부터 적용"));
                         }}>{tr("판독의 정보 저장")}</button>
                       </div>
+                      {/* 칩 집계 기간(2026-08-10 사용자 확정) — 배정의(A 계정) 로그인 시 상태 칩
+                          (전체·미판독·판독중…)을 최근 N일 기준으로 집계. 응급은 **1일 고정**. */}
+                      <Row label={tr("칩 집계 기간")}>
+                        <select value={String(chipDays)}
+                                onChange={(e) => {
+                                  const n = Math.min(30, Math.max(1, Number(e.target.value) || 30));
+                                  setChipDays(n);
+                                  localStorage.setItem("sv_chip_days", String(n));
+                                }}>
+                          {Array.from({ length: 30 }, (_, i) => i + 1).map((n) => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
+                        <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                          {tr("일 — 배정의(원격 PACS 계정) 로그인 시 워크리스트 상태 칩의 집계 기간입니다. 응급 칩은 항상 1일(당일) 기준입니다.")}
+                        </span>
+                      </Row>
                     </Group>
                     <Group title={tr("Compare — 비교할 과거 검사를 어디서 고를까")}>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
