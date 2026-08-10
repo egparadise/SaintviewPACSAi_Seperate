@@ -298,6 +298,11 @@ export interface StudyRow {
   impression_preview: string;
   // DICOM 헤더 기반 확장 컬럼 (UBPACS-Z Filter Setting)
   institution: string;
+  // 원격판독 운영 4항목(2026-08-10) — Live 는 A 원천, 로컬은 공란(병원명=institution)
+  request_datetime?: string;   // 의뢰 일시(등록) — 표시 형식은 설정>워크리스트
+  hospital_name?: string;      // 의뢰병원
+  center_name?: string;        // 원격판독 센터(강남미래·써밋 등)
+  assigned_doctor?: string;    // 센터별 배정 판독의
   referring_physician: string;
   memo: string;
   finalized_at: string;

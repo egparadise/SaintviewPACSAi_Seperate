@@ -181,7 +181,7 @@ function hpFor(modality: string): string | undefined {
 }
 
 const STATUS_LABEL: Record<string, string> = {
-  received: "도착", draft_ready: "AI초안", reading: "판독중", finalized: "확정",
+  received: "요청", draft_ready: "AI초안", reading: "판독중", finalized: "확정",   // 2026-08-10 표시 변경
   suspended: "보류", draft: "초안", in_review: "검토중",
 };
 function StatusBadge({ status }: { status: string }) {
@@ -254,6 +254,11 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
     render: (r) => (r.study_time ? `${r.study_time.slice(0, 2)}:${r.study_time.slice(2, 4)}` : ""),
   },
   institution: { label: "기관 (Institution)", render: (r) => r.institution },
+  // 원격판독 운영 4항목(2026-08-10) — Live 는 A 원천(study_insert_datetime·hospital/center·배정의)
+  request_datetime: { label: "의뢰 일시", render: (r) => fmtReqDt(r.request_datetime) },
+  hospital_name: { label: "병원명 (의뢰병원)", render: (r) => r.hospital_name ?? r.institution },
+  center_name: { label: "센터명 (판독센터)", render: (r) => r.center_name ?? "" },
+  assigned_doctor: { label: "배정의사", render: (r) => r.assigned_doctor ?? "" },
   referring_physician: { label: "의뢰의 (Ref.Phys)", render: (r) => r.referring_physician },
   finalized_at: {
     label: "판독일시",
@@ -280,10 +285,10 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
  * 세 뷰어(Saint/I/T) 공통 기본이며, 계정이 저장한 순서(by_viewer)가 있으면 그것이 우선.
  * 넘치는 폭은 그리드 가로 스크롤이 받는다(3166356). */
 export const DEFAULT_COLUMNS = [
-  "read_state", "status", "institution", "patient_name", "patient_key", "modality",
-  "study_date", "study_time", "referring_physician", "body_part", "instance_count",
-  "study_desc", "priority", "memo", "accession_no", "age", "sex", "birth_date",
-  "finalized_at", "impression",
+  "read_state", "status", "request_datetime", "center_name", "patient_name", "patient_key",
+  "modality", "study_date", "study_time", "assigned_doctor", "body_part", "hospital_name",
+  "instance_count", "study_desc", "priority", "memo", "accession_no", "age", "sex",
+  "birth_date", "finalized_at", "impression",
 ];
 // Infi(INFINITT) 컬럼 순서 — 원본 Exam List: Status | ID | Name | Sex | Study Date | MOD | Srs | Img | Body | Desc | AETitle
 export const INFI_COLUMNS = [
@@ -363,7 +368,7 @@ function usePermMe(): PermMe | null {
 
 /* ── [A] 액션 툴바 ─────────────────────────────── */
 function ActionToolbar({
-  selected, onAction, searchText, setSearchText, onSearch, onNlSearch, dirty,
+  selected, onAction, searchText, setSearchText, onSearch, onNlSearch, dirty, searchMode, setSearchMode,
   withOpen, setWithOpen, withOpenMode, setWithOpenMode, ohifOn = false, allowed,
 }: {
   selected: StudyDetail | null;
@@ -372,6 +377,8 @@ function ActionToolbar({
   setSearchText: (s: string) => void;
   onSearch: () => void;
   onNlSearch: (text: string) => void;
+  searchMode: "text" | "ai";                    // 통합 검색창 방식(설정>워크리스트>검색창 설정이 기본값)
+  setSearchMode: (m: "text" | "ai") => void;
   // 입력한 검색조건이 아직 조회에 반영되지 않았음(=커밋 전). SEARCH 를 눌러야 목록이 바뀐다는
   // 계약을 지키되, 사용자가 '왜 안 바뀌지?' 로 헤매지 않도록 버튼에 표시만 해 준다.
   dirty?: boolean;
@@ -383,7 +390,6 @@ function ActionToolbar({
   allowed?: (a: string) => boolean;   // 유효 권한 게이트(레인 W) — 서버 403 이 최종 방어선
 }) {
   const need = !selected;
-  const [nlText, setNlText] = useState("");
   const Btn = ({ a, label, primary, title }: { a: string; label: string; primary?: boolean; title?: string }) => {
     const ok = allowed ? allowed(a) : true;   // 권한 없음 → 비활성 + 안내 툴팁 (UX 목적)
     return (
@@ -442,26 +448,38 @@ function ActionToolbar({
       {/* ⚠ name/autoComplete 를 반드시 준다 — 이름 없는 텍스트 필드는 크롬이 문서 전체를
           'unowned 합성 로그인 폼' 으로 묶을 때 username 후보로 잡아 저장된 자격증명(예: 병원ID)을
           여기에 채워 넣는다. 실제로 SEARCH 칸에 로그인 병원ID 가 자동입력돼 목록이 비는 사고가 있었다. */}
+      {/* ★ 통합 검색창(2026-08-10 사용자 확정) — AI 검색과 SEARCH 를 한 입력으로 합쳤다.
+          방식(SEARCH/AI)은 셀렉트로 전환, 기본값·검색 범위·다중어 결합은
+          설정>워크리스트>검색창 설정(계정별 저장)이 정한다. */}
+      <select value={searchMode} onChange={(e) => setSearchMode(e.target.value === "ai" ? "ai" : "text")}
+              title={tr("검색 방식 — SEARCH: 선택한 범위에서 문법 검색(=정확/접두%/!제외/공백=다중어) · AI: 자연어를 필터로 변환")}
+              style={searchMode === "ai" ? { borderColor: "var(--ai)", color: "var(--ai)", fontWeight: 700 } : { fontWeight: 700 }}>
+        <option value="text">SEARCH</option>
+        <option value="ai">AI</option>
+      </select>
       <input
-        placeholder={tr("AI 검색 — 예: 지난주 흉부 CT 미판독")} value={nlText}
-        name="wl-nlq" autoComplete="off" autoCorrect="off" spellCheck={false}
-        onChange={(e) => setNlText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && nlText.trim()) { onNlSearch(nlText); } }}
-        title={tr("자연어로 검색 조건을 입력하면 AI가 필터로 변환합니다 (적용 전 미리보기)")}
-        style={{ width: 200, background: "var(--bg-canvas)", borderColor: "var(--ai)" }}
-      />
-      <input
-        placeholder={tr("SEARCH — 환자 ID/이름 (=정확 / 접두% / !제외)")} value={searchText}
+        placeholder={searchMode === "ai"
+          ? tr("AI 검색 — 예: 지난주 흉부 CT 미판독")
+          : tr("SEARCH — 선택한 범위에서 검색 (=정확 / 접두% / !제외 · 공백=다중어)")}
+        value={searchText}
         name="wl-q" autoComplete="off" autoCorrect="off" spellCheck={false}
         onChange={(e) => setSearchText(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onSearch()}
-        style={{ width: 280, background: "var(--bg-canvas)" }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          if (searchMode === "ai") { if (searchText.trim()) onNlSearch(searchText); }
+          else onSearch();
+        }}
+        style={{ width: 420, background: "var(--bg-canvas)",
+                 ...(searchMode === "ai" ? { borderColor: "var(--ai)" } : {}) }}
       />
-      <button className="primary" onClick={onSearch}
-              title={dirty ? tr("입력한 검색조건이 아직 적용되지 않았습니다 — 누르면 조회합니다")
-                           : tr("현재 조건으로 다시 조회")}
-              style={dirty ? { boxShadow: "0 0 0 2px var(--stat-emergency,#f87171)" } : undefined}>
-        SEARCH{dirty ? " •" : ""}
+      <button className="primary"
+              onClick={() => { if (searchMode === "ai") { if (searchText.trim()) onNlSearch(searchText); } else onSearch(); }}
+              title={searchMode === "ai"
+                ? tr("자연어로 검색 조건을 입력하면 AI가 필터로 변환합니다 (적용 전 미리보기)")
+                : dirty ? tr("입력한 검색조건이 아직 적용되지 않았습니다 — 누르면 조회합니다")
+                        : tr("현재 조건으로 다시 조회")}
+              style={dirty && searchMode !== "ai" ? { boxShadow: "0 0 0 2px var(--stat-emergency,#f87171)" } : undefined}>
+        {searchMode === "ai" ? "AI" : "SEARCH"}{dirty && searchMode !== "ai" ? " •" : ""}
       </button>
     </div>
   );
@@ -474,6 +492,55 @@ export const FIND_FIELDS: Record<string, string> = {
   status: "상태", finding: "소견 검색(F-2)", emergency: "Emergency", key: "Key Image",
 };
 export const DEFAULT_FIND_FIELDS = ["pid", "pname", "sex", "modality", "date", "desc", "status", "finding", "emergency", "key"];
+
+/* ── 통합 편집기·통합 검색창 (2026-08-10 사용자 확정) ─────────────────────────
+ * COL_FIND_MAP: 그리드 컬럼 ↔ 검색 필드 대응(설정의 두 표를 한 표로 합치는 접착제).
+ * SEARCH_SCOPE_FIELDS: 통합 검색(q)이 훑을 수 있는 범위 — 백엔드 _QUERY_FIELD_COLS 와 1:1.
+ * ⚠ Live 는 A 파라미터 한계로 환자 ID/이름만 통합 검색이 적용된다(설정 도움말에 명시). */
+/* 통합 검색 범위/결합 — 컴포넌트 밖 조회 함수가 쓸 모듈 미러(리렌더 무관).
+   Worklist 가 prefs 로드/설정 변경 시 setSbConfig 로 갱신한다. */
+let SB_FIELDS: string[] = ["pid", "pname"];
+let SB_OP: "and" | "or" = "and";
+export function setSbConfig(fields: string[], op: "and" | "or"): void {
+  SB_FIELDS = fields.length ? fields : ["pid", "pname"];
+  SB_OP = op;
+}
+export function sbScopeParam(): string { return SB_FIELDS.join(","); }
+export function sbOpParam(): string { return SB_OP; }
+
+/** 의뢰일시 표시 형식(설정>워크리스트 공통 — 계정 저장 worklist.prefs.req_dt_fmt).
+ *  COLUMN_DEFS.render 는 정적이라 모듈 상태로 든다(imageFormat 의 IMG_FMT 패턴). */
+export const REQ_DT_FMTS = [
+  "yyyy-mm-dd hh:mm:ss", "yyyy-mm-dd hh:mm", "yyyy-mm-dd", "mm-dd hh:mm", "hh:mm:ss",
+] as const;
+let REQ_DT_FMT: string = REQ_DT_FMTS[1];
+export function setReqDtFmt(f: string): void { if ((REQ_DT_FMTS as readonly string[]).includes(f)) REQ_DT_FMT = f; }
+export function fmtReqDt(raw: string | undefined | null, fmt = REQ_DT_FMT): string {
+  const d = String(raw ?? "").replace(/\D/g, "");   // "2026-08-10 12:17:00" → 14자리
+  if (d.length < 8) return "";
+  const [Y, M, D, h, m, sec] = [d.slice(0, 4), d.slice(4, 6), d.slice(6, 8),
+                                d.slice(8, 10) || "00", d.slice(10, 12) || "00", d.slice(12, 14) || "00"];
+  switch (fmt) {
+    case "yyyy-mm-dd hh:mm:ss": return `${Y}-${M}-${D} ${h}:${m}:${sec}`;
+    case "yyyy-mm-dd": return `${Y}-${M}-${D}`;
+    case "mm-dd hh:mm": return `${M}-${D} ${h}:${m}`;
+    case "hh:mm:ss": return `${h}:${m}:${sec}`;
+    default: return `${Y}-${M}-${D} ${h}:${m}`;
+  }
+}
+
+export const COL_FIND_MAP: Record<string, string> = {
+  patient_key: "pid", patient_name: "pname", sex: "sex", modality: "modality",
+  study_date: "date", study_desc: "desc", status: "status", body_part: "body_part",
+  impression: "finding", priority: "emergency",
+};
+export const FIND_ONLY_FIELDS = Object.keys(FIND_FIELDS)
+  .filter((k) => !Object.values(COL_FIND_MAP).includes(k));
+export const SEARCH_SCOPE_FIELDS: Record<string, string> = {
+  pid: "환자 ID", pname: "환자 이름", accession: "Accession 번호", desc: "검사명",
+  institution: "기관(센터명)", body_part: "부위", ref_phys: "의뢰의", memo: "메모",
+};
+export const DEFAULT_SEARCH_BOX = { mode: "text" as "text" | "ai", fields: ["pid", "pname"], op: "and" as "and" | "or" };
 
 function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
   filters: Record<string, string>;
@@ -532,7 +599,7 @@ function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
         return (
           <select key={key} value={filters.status ?? ""} {...ac("status")} onChange={(e) => set("status", e.target.value)}>
             <option value="">{tr("*Any 상태")}</option><option value="unread">{tr("미판독(확정 전)")}</option>
-            <option value="received">{tr("도착")}</option>
+            <option value="received">{tr("요청")}</option>
             <option value="draft_ready">{tr("AI초안")}</option><option value="reading">{tr("판독중")}</option>
             <option value="finalized">{tr("확정")}</option>
           </select>
@@ -1146,6 +1213,7 @@ const GRID_COL_DEF_W: Record<string, number> = {
   patient_name: 130, study_desc: 180, institution: 170, referring_physician: 120, memo: 180,
   impression: 220, order_name: 170, source_aet: 120, body_part: 110,
   age: 56, sex: 48, study_time: 76, accession_no: 140, finalized_at: 130,
+  request_datetime: 150, hospital_name: 170, center_name: 130, assigned_doctor: 100,
   priority: 80, instance_count: 56, series_count: 50, modality: 56, read_state: 52, status: 76,
 };
 function StudyGrid({
@@ -2535,7 +2603,8 @@ function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, page
   useEffect(() => {
     if (pageOnly) { setC(null); return; }
     let alive = true;
-    api.worklistCounts(queryParams).then((r) => { if (alive) setC(r); }).catch(() => { if (alive) setC(null); });
+    api.worklistCounts({ ...queryParams, qf: sbScopeParam(), qop: sbOpParam() })
+      .then((r) => { if (alive) setC(r); }).catch(() => { if (alive) setC(null); });
     return () => { alive = false; };
   }, [queryParams, refreshKey, pageOnly]);
   const pageN = (pred: (r: StudyRow) => boolean) => items.filter(pred).length;
@@ -2705,6 +2774,17 @@ export function Worklist() {
   // 폭: worklist.prefs.col_widths_by_viewer[vk] · 순서: by_viewer[vk](설정 ▲▼ 와 같은 키 —
   // 두 UI 가 다른 키에 쓰면 반드시 갈린다). 저장은 병합형(read-modify-write)으로 다른 키 보존.
   const [colW, setColW] = useState<Record<string, number>>({});
+  // ── 통합 검색창(2026-08-10) — 방식·범위·결합은 설정>워크리스트>검색창 설정(계정 저장) ──
+  const [searchMode, setSearchModeState] = useState<"text" | "ai">(DEFAULT_SEARCH_BOX.mode);
+  const sbRef = useRef<{ fields: string[]; op: "and" | "or" }>({ fields: DEFAULT_SEARCH_BOX.fields, op: DEFAULT_SEARCH_BOX.op });
+  const setSearchMode = useCallback((m: "text" | "ai") => {
+    setSearchModeState(m);
+    // 모드 전환은 계정에 기억(다음 접속 기본값) — 병합 저장으로 다른 키 보존
+    api.getSetting("worklist.prefs").then((r) => {
+      const sb = ((r.value as { search_box?: object }).search_box ?? {}) as Record<string, unknown>;
+      return api.putSetting("worklist.prefs", { ...r.value, search_box: { ...sb, mode: m } }, "user");
+    }).catch(() => {});
+  }, []);
   const colWSaveT = useRef<number | null>(null);
   // 뷰어별 워크리스트 컬럼 오버라이드(settings>워크리스트>뷰어별) — 모드 전환 시 적용
   const wlColsBaseRef = useRef<string[]>(DEFAULT_COLUMNS);
@@ -2996,6 +3076,17 @@ export function Worklist() {
       }
       wlByViewerRef.current = v.by_viewer ?? {};
       if (v.find_fields?.length) setFindFields(v.find_fields.filter((c) => FIND_FIELDS[c]));
+      {  // 통합 검색창 설정 + 의뢰일시 표시 형식(계정 저장)
+        const sb = (v as { search_box?: { mode?: string; fields?: string[]; op?: string } }).search_box;
+        if (sb?.mode === "ai" || sb?.mode === "text") setSearchModeState(sb.mode);
+        sbRef.current = {
+          fields: (sb?.fields ?? DEFAULT_SEARCH_BOX.fields).filter((f) => SEARCH_SCOPE_FIELDS[f]),
+          op: sb?.op === "or" ? "or" : "and",
+        };
+        setSbConfig(sbRef.current.fields, sbRef.current.op);
+        const fmt = (v as { req_dt_fmt?: string }).req_dt_fmt;
+        if (fmt) setReqDtFmt(fmt);
+      }
       if (v.dbl_action) setDblAction(v.dbl_action);
       const po = v.panel_order;
       if (po?.d?.length === 3 && po?.e?.length === 4) setPanelOrder({ d: po.d, e: po.e });
@@ -3147,7 +3238,7 @@ export function Worklist() {
         });
       return;
     }
-    api.worklist(queryParams).then((r) => {
+    api.worklist({ ...queryParams, qf: sbScopeParam(), qop: sbOpParam() }).then((r) => {
       setItems(r.items);
       setTotal(r.total);
       // 다중선택은 현재 목록에 남아있는 항목만 유지(검색/새로고침 후 stale id 제거)
@@ -4338,6 +4429,7 @@ export function Worklist() {
                      searchText={searchText} setSearchText={setSearchText}
                      onSearch={runSearch} dirty={queryDirty}
                      onNlSearch={onNlSearch}
+                     searchMode={searchMode} setSearchMode={setSearchMode}
                      withOpen={withOpen} setWithOpen={setWithOpen}
                      withOpenMode={withOpenMode} setWithOpenMode={setWithOpenMode}
                      ohifOn={ohifOn} allowed={allowedAction} />

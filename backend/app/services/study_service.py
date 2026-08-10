@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import AiJob, Patient, PatientMerge, Report, Series, Study
@@ -12,7 +12,12 @@ from app.services.activity_service import qc_meta
 
 @dataclass
 class WorklistFilter:
-    patient_query: str = ""       # 통합 검색(ID 또는 이름)
+    patient_query: str = ""       # 통합 검색 — 아래 query_fields 범위에서 토큰 검색
+    # ── 통합 검색 확장(2026-08-10 사용자 확정: "모든 검색에 대한 다양한 방법과 가능성") ──
+    #   query_fields: 검색 범위(설정>워크리스트>검색창 설정) · query_op: 다중어 결합(and|or)
+    #   토큰별 문법은 _op_clause 그대로: '=K' 정확 / 'K%' 접두 / '!K' 제외 / 기본 포함
+    query_fields: list[str] | None = None   # None/빈=기본(pid,pname) — 구 계약 유지
+    query_op: str = "and"
     patient_id: str = ""          # 필드별 검색 (Zetta/PiView 패턴)
     patient_name: str = ""
     sex: str = ""
@@ -28,6 +33,20 @@ class WorklistFilter:
     hospital_id: int | None = None  # 경량 테넌시 — 소속 병원 검사로 제한(None=전체)
     limit: int = 100
     offset: int = 0
+
+
+# 통합 검색 범위 — 키는 프론트 설정(SEARCH_SCOPE_FIELDS)과 1:1. 지연 평가(람다)인 이유:
+# 모듈 로드 순서상 Patient/Study 컬럼 참조를 호출 시점으로 미룬다.
+_QUERY_FIELD_COLS = {
+    "pid": lambda: Patient.patient_key,
+    "pname": lambda: Patient.name_masked,
+    "accession": lambda: Study.accession_no,
+    "desc": lambda: Study.study_desc,
+    "institution": lambda: Study.institution,
+    "body_part": lambda: Study.body_part,
+    "ref_phys": lambda: Study.referring_physician,
+    "memo": lambda: Study.memo,
+}
 
 
 def _op_clause(col, raw: str):
@@ -154,8 +173,17 @@ def _apply_worklist_filters(q, f: WorklistFilter, *, with_status: bool = True, w
     """워크리스트 필터를 쿼리에 적용 — search_worklist(목록)와 worklist_counts(상태바)가 공유해 드리프트 방지.
     counts 는 상태/응급 칩을 채워야 하므로 with_status/with_emergency=False 로 그 두 필터를 제외한다."""
     if f.patient_query:
-        like = f"%{f.patient_query}%"
-        q = q.where(or_(Patient.patient_key.like(like), Patient.name_masked.like(like)))
+        # 통합 검색 — 공백 분리 토큰 × 선택 범위 필드.
+        #   토큰: 필드들 사이 OR (한 필드라도 맞으면 그 토큰 충족)
+        #   '!K' 제외 토큰: 모든 범위 필드에서 AND (어느 필드에도 K 가 없어야)
+        #   토큰 사이: query_op(and 기본 | or)
+        fields = [k for k in (f.query_fields or []) if k in _QUERY_FIELD_COLS] or ["pid", "pname"]
+        clauses = []
+        for tok in f.patient_query.split():
+            per = [_op_clause(_QUERY_FIELD_COLS[k](), tok) for k in fields]
+            clauses.append(and_(*per) if tok.startswith("!") else or_(*per))
+        if clauses:
+            q = q.where(and_(*clauses) if (f.query_op or "and") != "or" else or_(*clauses))
     if f.patient_id:
         q = q.where(_op_clause(Patient.patient_key, f.patient_id))
     if f.patient_name:
@@ -315,6 +343,12 @@ def _study_row(study: Study, patient: Patient, latest: Report | None, *,
         # DICOM 헤더 기반 확장 컬럼 (UBPACS-Z Filter Setting)
         "institution": study.institution,
         "referring_physician": study.referring_physician,
+        # 4항목(2026-08-10) — 로컬 검사는 의뢰/센터/배정 원천이 없어 공란(추정 기입 금지),
+        # 병원명은 DICOM InstitutionName(=의뢰기관)으로 채운다. Live 는 A 값이 실린다.
+        "request_datetime": "",
+        "hospital_name": study.institution,
+        "center_name": "",
+        "assigned_doctor": "",
         "memo": study.memo,
         "finalized_at": (
             latest.finalized_at.isoformat() if latest and latest.finalized_at else ""

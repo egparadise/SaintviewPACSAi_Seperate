@@ -2,7 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { VIEWER_BASE, api, sttStatus, type AiQuality, type OrthancStatus, type PhraseRow, type SttStatus } from "../api";
 import {
-  COLUMN_DEFS, DEFAULT_COLUMNS, DEFAULT_FIND_FIELDS, FIND_FIELDS, PhraseEditModal,
+  COLUMN_DEFS, COL_FIND_MAP, DEFAULT_COLUMNS, DEFAULT_FIND_FIELDS, DEFAULT_SEARCH_BOX,
+  FIND_FIELDS, FIND_ONLY_FIELDS, PhraseEditModal, REQ_DT_FMTS, SEARCH_SCOPE_FIELDS,
   SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
@@ -220,6 +221,11 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   // 뷰어별 패널 표시/숨김 오버라이드 (sv·infi) — 없으면 기본 전부 표시. ty 는 공통 wlPanels 사용
   const [wlPanelsBy, setWlPanelsBy] = useState<{ sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null }>({});
   const [findFields, setFindFields] = useState<string[]>(DEFAULT_FIND_FIELDS);
+  // 통합 검색창 설정(2026-08-10) — 방식·범위·다중어 결합 + 의뢰일시 표시 형식
+  const [sbMode, setSbMode] = useState<"text" | "ai">(DEFAULT_SEARCH_BOX.mode);
+  const [sbFields, setSbFields] = useState<string[]>(DEFAULT_SEARCH_BOX.fields);
+  const [sbOp, setSbOp] = useState<"and" | "or">(DEFAULT_SEARCH_BOX.op);
+  const [reqDtFmt, setReqDtFmtState] = useState<string>(REQ_DT_FMTS[1]);
   const [dblAction, setDblAction] = useState<"viewer2d" | "ohif">("viewer2d");
   // 선택 뷰어 — Client Viewer 레지스트리(TY Viewer=현행 Viewer2D, Infi Viewer=개발 중)
   const [clientViewer, setClientViewer] = useState(DEFAULT_CLIENT_VIEWER);
@@ -445,6 +451,14 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       setDefaultStatus(v.default_status ?? "");
       if (v.columns?.length) setColumns(v.columns.filter((c) => COLUMN_DEFS[c]));
       if (v.find_fields?.length) setFindFields(v.find_fields.filter((c) => FIND_FIELDS[c]));
+      {  // 검색창 설정 + 의뢰일시 형식
+        const sb = (v as { search_box?: { mode?: string; fields?: string[]; op?: string } }).search_box;
+        if (sb?.mode === "ai" || sb?.mode === "text") setSbMode(sb.mode);
+        if (sb?.fields?.length) setSbFields(sb.fields.filter((f) => SEARCH_SCOPE_FIELDS[f]));
+        if (sb?.op === "or" || sb?.op === "and") setSbOp(sb.op);
+        const fmt = (v as { req_dt_fmt?: string }).req_dt_fmt;
+        if (fmt && (REQ_DT_FMTS as readonly string[]).includes(fmt)) setReqDtFmtState(fmt);
+      }
       if (v.dbl_action) setDblAction(v.dbl_action);
       const pn = (v as { panels?: Record<string, boolean> }).panels;
       if (pn) setWlPanels((prev) => ({ ...prev, ...pn }));
@@ -686,7 +700,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
     await api.putSetting("worklist.prefs",
       { ...cur, refresh_mode: refreshMode, auto_refresh_sec: refreshSec, default_status: defaultStatus, columns,
         by_viewer: wlBy, panels_by_viewer: wlPanelsBy,
-        find_fields: findFields, dbl_action: dblAction, panels: wlPanels, nav_left: polNavLeft }, "user");
+        find_fields: findFields, dbl_action: dblAction, panels: wlPanels, nav_left: polNavLeft,
+        search_box: { mode: sbMode, fields: sbFields, op: sbOp },
+        req_dt_fmt: reqDtFmt }, "user");
     const curV = (await api.getSetting("viewer.prefs").catch(() => ({ value: {} }))).value;
     await api.putSetting("viewer.prefs", {
       ...curV,
@@ -1922,26 +1938,75 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
             })()}
             {page === "worklist" && (
               <>
-                <Group title={tr("그리드 컬럼 구성 — Filter Setting (USE/NO USE, UBPACS형)")}>
+                {(() => {
+                  // 통합 편집기(2026-08-10 사용자 확정) — 그리드 컬럼과 검색 필드는 겹치는
+                  // 개념이라 한 표(표시·검색·순서)로 합쳤다. 목록은 **선택 뷰어의 실제 표시
+                  // 순서**(그리드 헤더 드래그와 같은 by_viewer 저장)를 그대로 보여 준다.
+                  const cvk: ViewerKey = clientViewer === "sv" ? "sv" : clientViewer === "infi" ? "infi" : "ty";
+                  const eff = ((wlBy[cvk]?.length ? wlBy[cvk]! : (cvk === "ty" && columns.length ? columns : DEFAULT_COLUMNS)))
+                    .filter((c) => COLUMN_DEFS[c]);
+                  return (
+                <Group title={tr("워크리스트 항목 구성 — 표시·검색·순서 (그리드와 같은 계정별 저장)")}>
                   <FilterSettingList
                     all={Object.keys(COLUMN_DEFS)}
-                    selected={columns}
+                    selected={eff}
                     labelOf={(k) => tr(COLUMN_DEFS[k].label)}
-                    onChange={setColumns}
+                    onChange={(next) => { setColumns(next); setWlBy((p) => ({ ...p, [cvk]: next })); }}
+                    searchable={COL_FIND_MAP}
+                    searchSel={findFields}
+                    onSearchChange={setFindFields}
+                    searchOnly={FIND_ONLY_FIELDS}
+                    searchOnlyLabelOf={(k) => tr(FIND_FIELDS[k])}
                   />
-                  <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                    {tr("USE/NO USE 클릭으로 토글, ▲▼로 표시 순서 변경 — OK(저장) 시 적용.")}
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                    {tr("표시 = 그리드 컬럼 · 검색 = 검색 필터 바 노출 · 행 드래그/▲▼ = 순서. 그리드 헤더를 드래그해 바꾼 순서와 같은 저장(계정별·뷰어별)이라 서로 그대로 반영됩니다.")}
                   </div>
                 </Group>
-                <Group title={tr("검색 필드 구성 (Find criteria)")}>
-                  <DualList
-                    all={Object.keys(FIND_FIELDS)}
-                    selected={findFields}
-                    labelOf={(k) => tr(FIND_FIELDS[k])}
-                    onChange={setFindFields}
-                  />
-                  <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
-                    {tr("컬럼·검색필드 구성은 서버 저장(로밍) — 어느 PC에서 로그인해도 동일 적용.")}
+                  );
+                })()}
+                <Group title={tr("검색창 설정 — 통합 검색(SEARCH/AI)의 방식·범위")}>
+                  <Row label={tr("기본 방식")}>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <input type="radio" name="sbmode" checked={sbMode === "text"} onChange={() => setSbMode("text")} />
+                      {tr("SEARCH — 아래 범위에서 문법 검색")}
+                    </label>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: 12 }}>
+                      <input type="radio" name="sbmode" checked={sbMode === "ai"} onChange={() => setSbMode("ai")} />
+                      {tr("AI — 자연어를 검색 조건으로 변환")}
+                    </label>
+                  </Row>
+                  <Row label={tr("검색 범위")}>
+                    <span style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      {Object.entries(SEARCH_SCOPE_FIELDS).map(([k, label]) => (
+                        <label key={k} style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                          <input type="checkbox" checked={sbFields.includes(k)}
+                                 onChange={(e) => setSbFields((p) => e.target.checked ? [...p, k] : p.filter((x) => x !== k))} />
+                          {tr(label)}
+                        </label>
+                      ))}
+                    </span>
+                  </Row>
+                  <Row label={tr("다중어 결합")}>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <input type="radio" name="sbop" checked={sbOp === "and"} onChange={() => setSbOp("and")} />
+                      {tr("AND — 모든 단어 일치(공백 구분)")}
+                    </label>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: 12 }}>
+                      <input type="radio" name="sbop" checked={sbOp === "or"} onChange={() => setSbOp("or")} />
+                      {tr("OR — 한 단어라도 일치")}
+                    </label>
+                  </Row>
+                  <Row label={tr("의뢰일시 표시")}>
+                    <select value={reqDtFmt} onChange={(e) => setReqDtFmtState(e.target.value)}>
+                      {REQ_DT_FMTS.map((f) => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                    <span style={{ fontSize: 11, color: "var(--text-secondary)", marginLeft: 8 }}>
+                      {tr("워크리스트 '의뢰 일시' 컬럼의 표시 형식입니다.")}
+                    </span>
+                  </Row>
+                  <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                    {tr("문법: =단어(정확) · 단어%(접두) · !단어(제외) · 공백=다중어. 범위·방식·형식 모두 계정별 저장(로밍)입니다.")}<br />
+                    {tr("⚠ Live(원격 직결)는 원격 PACS 파라미터 한계로 환자 ID/이름에만 통합 검색이 적용됩니다.")}
                   </div>
                 </Group>
                 <Group title={tr("상용구 관리 (DB — Modality×부위 분류 + Alt+단축키)")} right={
@@ -3766,14 +3831,25 @@ function HpScreenEditor({ screens, monitors, monitorSel, onChange }: {
 }
 
 /* ── Filter Setting 리스트 (UBPACS형 — ITEM | USE/NO USE 토글 + ▲▼ 순서) ── */
-export function FilterSettingList({ all, selected, labelOf, onChange }: {
+export function FilterSettingList({ all, selected, labelOf, onChange, searchable, searchSel, onSearchChange, searchOnly, searchOnlyLabelOf }: {
   all: string[];
   selected: string[];
   labelOf: (k: string) => string;
   onChange: (next: string[]) => void;
+  /** 통합 편집기(2026-08-10 사용자 확정) — 그리드 컬럼 구성과 검색 필드 구성이 기능적으로
+   *  겹쳐 한 표로 합쳤다. searchable[컬럼키]=검색 필드 키 · searchSel=켜진 검색 필드 ·
+   *  searchOnly=대응 컬럼이 없는 검색 전용 항목(소견 검색·Key Image 등). */
+  searchable?: Record<string, string>;
+  searchSel?: string[];
+  onSearchChange?: (next: string[]) => void;
+  searchOnly?: string[];
+  searchOnlyLabelOf?: (k: string) => string;
 }) {
   useLang();   // tr 반영 — 언어 변경 시 다시 그린다
   const rows = [...selected, ...all.filter((k) => !selected.includes(k))];
+  const unified = !!searchable && !!searchSel && !!onSearchChange;
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [overKey, setOverKey] = useState<string | null>(null);
   const move = (k: string, dir: -1 | 1) => {
     const i = selected.indexOf(k);
     const j = i + dir;
@@ -3782,16 +3858,60 @@ export function FilterSettingList({ all, selected, labelOf, onChange }: {
     [next[i], next[j]] = [next[j], next[i]];
     onChange(next);
   };
+  // 행 드래그 = 순서 이동(그리드 헤더 드래그와 같은 조작) — 켜진(USE) 항목 사이에서만
+  const dropOn = (k: string) => {
+    if (!dragKey || dragKey === k || !selected.includes(dragKey)) { setDragKey(null); setOverKey(null); return; }
+    const next = selected.filter((x) => x !== dragKey);
+    const at = next.indexOf(k);
+    next.splice(at < 0 ? next.length : at, 0, dragKey);
+    onChange(next);
+    setDragKey(null); setOverKey(null);
+  };
+  const toggleSearch = (fk: string) => {
+    if (!searchSel || !onSearchChange) return;
+    onSearchChange(searchSel.includes(fk) ? searchSel.filter((x) => x !== fk) : [...searchSel, fk]);
+  };
+  const searchCell = (fk?: string) => {
+    if (!unified) return null;
+    if (!fk) return <td style={{ color: "var(--text-secondary)" }}>—</td>;
+    const on = searchSel!.includes(fk);
+    return (
+      <td>
+        <span onClick={() => toggleSearch(fk)} title={tr("클릭=토글")}
+              style={{ cursor: "pointer", fontWeight: 700, fontSize: 10.5, padding: "1px 7px",
+                       border: "1px solid var(--border)", borderRadius: 3,
+                       color: on ? "var(--accent)" : "var(--text-secondary)",
+                       background: on ? "rgba(80,140,220,0.14)" : undefined }}>
+          {on ? "USE" : "NO USE"}
+        </span>
+      </td>
+    );
+  };
   return (
-    <div style={{ maxHeight: 250, overflow: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
+    <div style={{ maxHeight: 280, overflow: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
       <table className="grid-table">
-        <thead><tr><th>ITEM</th><th style={{ width: 78 }}>{tr("사용")}</th><th style={{ width: 64 }}>{tr("순서")}</th></tr></thead>
+        <thead><tr>
+          <th>ITEM</th>
+          <th style={{ width: 78 }}>{unified ? tr("표시") : tr("사용")}</th>
+          {unified && <th style={{ width: 78 }}>{tr("검색")}</th>}
+          <th style={{ width: 64 }}>{tr("순서")}</th>
+        </tr></thead>
         <tbody>
           {rows.map((k) => {
             const used = selected.includes(k);
             const i = selected.indexOf(k);
             return (
-              <tr key={k}>
+              <tr key={k}
+                  draggable={used}
+                  onDragStart={(e) => { setDragKey(k); e.dataTransfer.effectAllowed = "move"; }}
+                  onDragOver={(e) => { if (dragKey) { e.preventDefault(); setOverKey(k); } }}
+                  onDrop={(e) => { e.preventDefault(); dropOn(k); }}
+                  onDragEnd={() => { setDragKey(null); setOverKey(null); }}
+                  style={{ cursor: used ? "grab" : undefined,
+                           opacity: dragKey === k ? 0.4 : undefined,
+                           boxShadow: overKey === k && dragKey && dragKey !== k
+                             ? "inset 0 3px 0 var(--accent)" : undefined }}
+                  title={used ? tr("행 드래그 = 순서 이동") : undefined}>
                 <td style={{ color: used ? "var(--text-primary)" : "var(--text-secondary)" }}>{labelOf(k)}</td>
                 <td>
                   <span onClick={() => onChange(used ? selected.filter((x) => x !== k) : [...selected, k])}
@@ -3805,6 +3925,7 @@ export function FilterSettingList({ all, selected, labelOf, onChange }: {
                     {used ? "USE" : "NO USE"}
                   </span>
                 </td>
+                {searchCell(searchable?.[k])}
                 <td style={{ whiteSpace: "nowrap" }}>
                   {used && (
                     <>
@@ -3818,6 +3939,18 @@ export function FilterSettingList({ all, selected, labelOf, onChange }: {
               </tr>
             );
           })}
+          {/* 검색 전용 항목(대응 컬럼 없음 — 소견 검색·Key Image 등)은 표 끝에 */}
+          {unified && (searchOnly ?? []).map((fk) => (
+            <tr key={"find:" + fk}>
+              <td style={{ color: "var(--text-secondary)" }}>
+                {(searchOnlyLabelOf ?? ((x: string) => x))(fk)}
+                <span style={{ fontSize: 10, marginLeft: 6, opacity: 0.7 }}>{tr("(검색 전용)")}</span>
+              </td>
+              <td style={{ color: "var(--text-secondary)" }}>—</td>
+              {searchCell(fk)}
+              <td />
+            </tr>
+          ))}
         </tbody>
       </table>
     </div>

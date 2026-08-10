@@ -55,7 +55,7 @@ def test_worklist_fetch_effect_does_not_depend_on_input_state():
     """
     src = _src("pages/Worklist.tsx")
     # api.worklist(...) 호출이 들어 있는 effect 의 닫는 의존성 배열을 찾는다
-    i = src.index("api.worklist(queryParams)")
+    i = src.index("api.worklist({ ...queryParams, qf: sbScopeParam(), qop: sbOpParam() })")
     dep = re.search(r"\}, \[([^\]]*)\]\);", src[i:])
     assert dep, "조회 effect 의 의존성 배열을 찾지 못했다 — 구조가 바뀌었으면 이 테스트를 갱신하라"
     deps = [d.strip() for d in dep.group(1).split(",") if d.strip()]
@@ -184,7 +184,8 @@ def test_credential_fields_declare_their_role():
 def test_search_inputs_are_named_and_autocomplete_off():
     """워크리스트 SEARCH·필터 입력은 name + autoComplete=off — 이름 없는 칸이 자동완성 표적이다."""
     src = _src("pages/Worklist.tsx")
-    assert 'name="wl-q"' in src and 'name="wl-nlq"' in src, "SEARCH/AI 검색 칸에 name 이 없다"
+    assert 'name="wl-q"' in src, "통합 검색 칸에 name 이 없다"
+    assert 'name="wl-nlq"' not in src, "통합 검색(2026-08-10) 이후 wl-nlq 는 없어야 한다 — 되살았다면 입력이 다시 갈라진 것"
     assert re.search(r'name: `wl-f-\$\{k\}`,\s*autoComplete: "off"', src), \
         "필터바 입력에 name/autoComplete 가 없다"
     # SEARCH 칸 자체에 autoComplete 가 붙어 있는지
@@ -214,3 +215,64 @@ def test_isolated_forms_do_not_submit_the_page():
     for rel in ("pages/SettingsModal.tsx", "pages/WebPacsBrowser.tsx"):
         src = _src(rel)
         assert 'onSubmit={(e) => e.preventDefault()}' in src, f"{rel}: 격리 form 의 submit 을 막지 않았다"
+
+
+# ════════════ 통합 검색 확장(2026-08-10) — 범위·다중어·문법 ════════════
+
+def _mk_filter(**kw):
+    from app.services.study_service import WorklistFilter
+    return WorklistFilter(**kw)
+
+
+def test_query_fields_default_is_legacy_pid_pname():
+    """qf 미지정 = 구 계약(환자 ID/이름) — 기존 사용자의 검색 결과가 변하면 안 된다."""
+    f = _mk_filter(patient_query="김")
+    assert f.query_fields is None and f.query_op == "and"
+
+
+def test_unified_search_scope_and_tokens(db):
+    """★ 범위(qf)·다중어(AND/OR)·제외(!) 가 실제 질의에 반영된다."""
+    from app.models import Hospital, Patient, Study
+    from app.services.study_service import search_worklist
+
+    h = Hospital(code="HQ1", name="검색병원", enabled=True)
+    db.add(h); db.flush()
+    p1 = Patient(patient_key="C111", name_masked="김검색")
+    p2 = Patient(patient_key="C222", name_masked="박검색")
+    db.add_all([p1, p2]); db.flush()
+    db.add_all([
+        Study(study_uid="q.1", patient_id=p1.id, hospital_id=h.id, modality="CT",
+              study_desc="Brain CT", accession_no="ACC777", institution="강남미래", status="received"),
+        Study(study_uid="q.2", patient_id=p2.id, hospital_id=h.id, modality="CR",
+              study_desc="Chest PA", accession_no="ACC888", institution="써밋", status="received"),
+    ])
+    db.commit()
+
+    # 범위: accession 만 — 환자명 '검색' 은 못 찾고 ACC777 은 찾는다
+    items, total = search_worklist(db, _mk_filter(patient_query="ACC777",
+                                                  query_fields=["accession"], hospital_id=h.id))
+    assert total == 1 and items[0]["accession_no"] == "ACC777"
+    items, total = search_worklist(db, _mk_filter(patient_query="검색",
+                                                  query_fields=["accession"], hospital_id=h.id))
+    assert total == 0, "범위 밖 필드(환자명)로 새면 범위 설정이 무의미하다"
+
+    # 다중어 AND: 기관+검사명 범위에서 '강남미래 Brain' → 1건
+    items, total = search_worklist(db, _mk_filter(patient_query="강남미래 Brain",
+                                                  query_fields=["institution", "desc"],
+                                                  query_op="and", hospital_id=h.id))
+    assert total == 1 and items[0]["study_uid"] == "q.1"
+    # OR 이면 두 건 다
+    _, total = search_worklist(db, _mk_filter(patient_query="강남미래 Chest",
+                                              query_fields=["institution", "desc"],
+                                              query_op="or", hospital_id=h.id))
+    assert total == 2
+
+    # 제외(!): 전 범위 필드에서 AND 로 빠져야 한다
+    items, total = search_worklist(db, _mk_filter(patient_query="검색 !박",
+                                                  query_fields=["pid", "pname"], hospital_id=h.id))
+    assert total == 1 and items[0]["patient_name"] == "김검색"
+
+    # 문법 재사용: '=' 정확 일치
+    _, total = search_worklist(db, _mk_filter(patient_query="=C222",
+                                              query_fields=["pid"], hospital_id=h.id))
+    assert total == 1

@@ -27,7 +27,9 @@ router = APIRouter(prefix="/api", tags=["worklist"])
 
 @router.get("/worklist")
 def worklist(
-    q: str = Query("", description="통합 검색(환자 ID/이름)"),
+    q: str = Query("", description="통합 검색 — qf 범위에서 토큰 검색(=정확/접두%/!제외)"),
+    qf: str = Query("", description="검색 범위(쉼표: pid,pname,accession,desc,institution,body_part,ref_phys,memo)"),
+    qop: str = Query("and", description="다중어 결합: and|or"),
     pid: str = Query("", description="환자 ID (필드별)"),
     pname: str = Query("", description="환자 이름 (필드별)"),
     sex: str = "",
@@ -50,6 +52,8 @@ def worklist(
         db,
         WorklistFilter(
             patient_query=q,
+            query_fields=[x for x in qf.split(",") if x] or None,
+            query_op=qop,
             patient_id=pid,
             patient_name=pname,
             sex=sex,
@@ -73,6 +77,7 @@ def worklist(
 @router.get("/worklist/counts")
 def worklist_counts_ep(
     q: str = "",
+    qf: str = "", qop: str = "and",
     pid: str = "",
     pname: str = "",
     sex: str = "",
@@ -91,7 +96,9 @@ def worklist_counts_ep(
     return worklist_counts(
         db,
         WorklistFilter(
-            patient_query=q, patient_id=pid, patient_name=pname, sex=sex, study_desc=desc,
+            patient_query=q,
+            query_fields=[x for x in qf.split(",") if x] or None, query_op=qop,
+            patient_id=pid, patient_name=pname, sex=sex, study_desc=desc,
             modality=modality, body_part=body_part, date_from=date_from, date_to=date_to,
             finding_query=finding, key_only=key,
             hospital_id=_scoped_hospital(db, user, hospital_id),

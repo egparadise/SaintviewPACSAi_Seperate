@@ -258,6 +258,11 @@ def _row_of(r: dict) -> dict:
         "impression_preview": str(r.get("report_conclusion") or "")[:120],
         "institution": str(r.get("hospital_name") or ""),
         "referring_physician": doctor,
+        # ── 2026-08-10 사용자 확정 4항목(원격판독 운영 정보 — A 원천) ──
+        "request_datetime": str(r.get("study_insert_datetime") or ""),  # 의뢰 일시(등록)
+        "hospital_name": str(r.get("hospital_name") or ""),             # 의뢰병원
+        "center_name": str(r.get("center_name") or ""),                 # 원격판독 센터
+        "assigned_doctor": doctor,                                      # 센터별 배정 판독의
         "memo": memo,
         "finalized_at": "",
         "department": str(r.get("center_name") or ""),
