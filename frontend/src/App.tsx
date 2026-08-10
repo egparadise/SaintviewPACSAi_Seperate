@@ -9,6 +9,7 @@ import { collab } from "./lib/collab";
 import { setLang, t as tr, useLang, type Lang } from "./lib/i18n";
 import { CollabGlobal } from "./components/CollabGlobal";
 import { portalRole, portalUrl, type PortalTarget } from "./lib/portals";
+import { toggleFullscreen } from "./lib/pwa";
 import { Worklist } from "./pages/Worklist";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { SettingsModal } from "./pages/SettingsModal";
@@ -94,6 +95,24 @@ function AdminLogin({ onLogin, onBack }: { onLogin: (r: LoginResp) => void; onBa
         <button type="button" onClick={onBack} style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: 12, cursor: "pointer" }}>{tr("← 홈으로")}</button>
       </form>
     </div>
+  );
+}
+
+/** 전체 화면 토글(2026-08-10 사용자 확정) — 헤더 로그아웃 오른쪽 ⛶ */
+function FullscreenBtn() {
+  useLang();
+  const [fs, setFs] = useState(!!document.fullscreenElement);
+  useEffect(() => {
+    const on = () => setFs(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", on);
+    return () => document.removeEventListener("fullscreenchange", on);
+  }, []);
+  return (
+    <button onClick={() => void toggleFullscreen()}
+            title={fs ? tr("전체 화면 해제 (Esc)") : tr("전체 화면 — 브라우저 UI 없이 표시")}
+            style={{ fontSize: 13, padding: "2px 8px", lineHeight: 1.2 }}>
+      {fs ? "🗗" : "⛶"}
+    </button>
   );
 }
 
@@ -256,6 +275,9 @@ export default function App() {
         </button>
         <button onClick={() => setSettingsOpen(true)}>{tr("settings")}</button>
         <button onClick={logout}>{tr("logout")}</button>
+        {/* 전체 화면(2026-08-10 사용자 확정) — 로그아웃 오른쪽. 브라우저 UI 없이 판독 몰입,
+            Esc/재클릭으로 복귀(Fullscreen API — F11 등가). */}
+        <FullscreenBtn />
       </header>
       {/* 협진 패널 숨기기(2026-08-10 사용자 확정) — X/재클릭은 **숨김**이지 종료가 아니다.
           display 로만 감춰 마운트를 유지한다 → 대화·탭 상태가 보존되고 다시 열면 그대로다. */}

@@ -76,6 +76,7 @@ import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { openReportWindow, screenFeatures, screenFeaturesList } from "../lib/screens";
 import { showToast } from "../lib/toast";
+import { installApp } from "../lib/pwa";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
 import {
   decideBaselineArm, decideBaselineRelease, forgetViewerSlot, liveViewerSlots, noteViewerSlot,
@@ -4682,7 +4683,22 @@ export function Worklist() {
         <span>[Q][H] Server: {import.meta.env.VITE_API_BASE || window.location.origin}</span>
         <span>{total} results {selected ? "1 selected" : "0 selected"}</span>
         {emergencyCount > 0 && <span style={{ color: "var(--stat-emergency)" }}>⚠ Emergency {emergencyCount}{tr("건")}</span>}
-        <span style={{ marginLeft: "auto" }}>{new Date().toLocaleString("ko-KR")}</span>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center" }}>
+          {/* Download(2026-08-10 사용자 확정) — 크롬 '페이지를 앱으로 설치'와 동일:
+              바탕화면 아이콘 + 브라우저 탭 없는 독립 창. 시계 왼쪽. */}
+          <button style={{ fontSize: 11, padding: "1px 8px" }}
+                  title={tr("이 페이지를 앱으로 설치 — 바탕화면 아이콘 · 독립 창 실행 (PWA)")}
+                  onClick={() => void (async () => {
+                    const r = await installApp();
+                    if (r === "accepted") showToast(tr("앱으로 설치했습니다 — 바탕화면 아이콘으로 실행할 수 있습니다"));
+                    else if (r === "installed") showToast(tr("이미 앱으로 설치되어 있습니다"));
+                    else if (r === "dismissed") showToast(tr("설치를 취소했습니다"));
+                    else showToast(tr("브라우저 메뉴(⋮) > 저장 및 공유 > '페이지를 앱으로 설치'를 이용하세요"), "error");
+                  })()}>
+            ⬇ Download
+          </button>
+          <span>{new Date().toLocaleString("ko-KR")}</span>
+        </span>
       </footer>
 
       {exportRows && (

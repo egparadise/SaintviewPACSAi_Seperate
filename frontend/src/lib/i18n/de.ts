@@ -2772,5 +2772,12 @@ const d: Record<string, string> = {
   "미디어 동시 사용 제한": "Medien auf ein Gespräch begrenzen",
   "마이크·화상·화면 공유는 한 대화에서만 — 다른 대화에서는 버튼이 비활성화됩니다. 끄면 다른 대화에서 켤 때 기존 통화를 끊고 가져옵니다.": "Mikro, Video und Bildschirmfreigabe nur in einem Gespräch — anderswo sind die Tasten deaktiviert. Ist dies aus, beendet das Aktivieren in einem anderen Gespräch den bestehenden Anruf und übernimmt die Medien.",
   "알 수 없음": "Unbekannt",
+  "전체 화면 — 브라우저 UI 없이 표시": "Vollbild — ohne Browser-UI",
+  "전체 화면 해제 (Esc)": "Vollbild beenden (Esc)",
+  "이 페이지를 앱으로 설치 — 바탕화면 아이콘 · 독립 창 실행 (PWA)": "Diese Seite als App installieren — Desktop-Symbol, eigenes Fenster (PWA)",
+  "앱으로 설치했습니다 — 바탕화면 아이콘으로 실행할 수 있습니다": "Als App installiert — Start über das Desktop-Symbol möglich",
+  "이미 앱으로 설치되어 있습니다": "Bereits als App installiert",
+  "설치를 취소했습니다": "Installation abgebrochen",
+  "브라우저 메뉴(⋮) > 저장 및 공유 > '페이지를 앱으로 설치'를 이용하세요": "Nutzen Sie das Browsermenü (⋮) > Speichern und teilen > „Seite als App installieren“",
 };
 export default d;

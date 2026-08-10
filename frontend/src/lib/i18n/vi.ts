@@ -2772,5 +2772,12 @@ const d: Record<string, string> = {
   "미디어 동시 사용 제한": "Giới hạn media một cuộc",
   "마이크·화상·화면 공유는 한 대화에서만 — 다른 대화에서는 버튼이 비활성화됩니다. 끄면 다른 대화에서 켤 때 기존 통화를 끊고 가져옵니다.": "Mic, video, chia sẻ màn hình chỉ ở một cuộc — nơi khác nút bị vô hiệu. Nếu tắt, bật ở cuộc khác sẽ kết thúc cuộc gọi hiện có và lấy quyền.",
   "알 수 없음": "Không rõ",
+  "전체 화면 — 브라우저 UI 없이 표시": "Toàn màn hình — ẩn giao diện trình duyệt",
+  "전체 화면 해제 (Esc)": "Thoát toàn màn hình (Esc)",
+  "이 페이지를 앱으로 설치 — 바탕화면 아이콘 · 독립 창 실행 (PWA)": "Cài trang này như ứng dụng — biểu tượng màn hình nền, cửa sổ riêng (PWA)",
+  "앱으로 설치했습니다 — 바탕화면 아이콘으로 실행할 수 있습니다": "Đã cài như ứng dụng — có thể chạy từ biểu tượng màn hình nền",
+  "이미 앱으로 설치되어 있습니다": "Đã được cài như ứng dụng",
+  "설치를 취소했습니다": "Đã hủy cài đặt",
+  "브라우저 메뉴(⋮) > 저장 및 공유 > '페이지를 앱으로 설치'를 이용하세요": "Dùng menu trình duyệt (⋮) > Lưu và chia sẻ > 'Cài trang dưới dạng ứng dụng'",
 };
 export default d;
