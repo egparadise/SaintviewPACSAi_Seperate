@@ -218,6 +218,19 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
   },
   sex: { label: "성별", render: (r) => r.sex },
   birth_date: { label: "생년월일", render: (r) => r.birth_date },
+  // 환자 나이 — 검사일 기준 만 나이(판독창 배너와 같은 계산 규칙). 생년월일·검사일이
+  // 8자리로 안 잡히면 빈칸(추정 표기 금지 — 의료 화면에서 틀린 나이가 빈칸보다 해롭다).
+  age: {
+    label: "나이",
+    render: (r) => {
+      const b = (r.birth_date || "").replace(/\D/g, "");
+      const s = (r.study_date || "").replace(/\D/g, "");
+      if (b.length < 8 || s.length < 8) return "";
+      let a = Number(s.slice(0, 4)) - Number(b.slice(0, 4));
+      if (s.slice(4, 8) < b.slice(4, 8)) a -= 1;
+      return a >= 0 && a < 200 ? String(a) : "";
+    },
+  },
   study_date: { label: "검사일", render: (r) => r.study_date },
   modality: { label: "MOD", render: (r) => r.modality },
   body_part: { label: "부위", render: (r) => r.body_part },
@@ -258,9 +271,19 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
   },
   order_name: { label: "오더명 (ORDER NAME)", render: (r) => r.order_name },
 };
+/* 초기(기본) 컬럼 — 2026-08-10 사용자 확정: 원 서버(A) 워크리스트의 항목 순서를 따른다.
+ *   검사상태 → (의뢰일시×) → 센터명 → 환자명 → 환자ID → 장비 → 검사일시 → 배정의사 → 부위
+ *   → (병원명=기관과 중복×) → (재판독사유×) → 이미지수 → 검사내용 → 응급여부 → 검사코멘트
+ *   → (병원코멘트×) → Accession → 나이 → (판독의사×) → 성별 → 생년월일 → 판독일시
+ *   → (판독시간×) → 판독문(임프레션 미리보기로 근사) → (병원결과문×)
+ * ×표는 우리 데이터(StudyRow)에 원천이 없어 제외 — 억지로 빈 컬럼을 만들지 않는다.
+ * 세 뷰어(Saint/I/T) 공통 기본이며, 계정이 저장한 순서(by_viewer)가 있으면 그것이 우선.
+ * 넘치는 폭은 그리드 가로 스크롤이 받는다(3166356). */
 export const DEFAULT_COLUMNS = [
-  "read_state", "status", "ai", "patient_key", "patient_name", "sex", "study_date",
-  "modality", "body_part", "study_desc", "impression", "series_count", "instance_count", "priority",
+  "read_state", "status", "institution", "patient_name", "patient_key", "modality",
+  "study_date", "study_time", "referring_physician", "body_part", "instance_count",
+  "study_desc", "priority", "memo", "accession_no", "age", "sex", "birth_date",
+  "finalized_at", "impression",
 ];
 // Infi(INFINITT) 컬럼 순서 — 원본 Exam List: Status | ID | Name | Sex | Study Date | MOD | Srs | Img | Body | Desc | AETitle
 export const INFI_COLUMNS = [
@@ -280,9 +303,11 @@ export const SV_COLUMNS = [
 
 // 뷰어 스킨 키 — client_viewer 값과 1:1 (sv=SaintView / infi=I-View / ty=T-View)
 export type ViewerKey = "sv" | "infi" | "ty";
-// 뷰어별 컬럼 기본값(오버라이드 없을 때). ty 는 런타임에 공통 columns 로 대체된다.
+// 뷰어별 컬럼 기본값(오버라이드 없을 때) — 2026-08-10 사용자 확정: 세 뷰어 모두
+// 원 서버(A) 순서(DEFAULT_COLUMNS)로 시작한다. 구 SV_COLUMNS/INFI_COLUMNS 는 설정
+// 화면의 '뷰어 원형' 참고용으로만 남는다.
 export const VIEWER_COL_DEFAULT: Record<ViewerKey, string[]> = {
-  sv: SV_COLUMNS, infi: INFI_COLUMNS, ty: DEFAULT_COLUMNS,
+  sv: DEFAULT_COLUMNS, infi: DEFAULT_COLUMNS, ty: DEFAULT_COLUMNS,
 };
 // SaintView/I-View 고정 배치의 숨김 가능한 구역(검색레일·검사그리드는 항상 표시).
 //  preview=좌하단 미리보기 · related=과거검사 · report=리포트
@@ -1118,8 +1143,10 @@ function SeriesTreeRows({ studyId, tree, expSeries, toggleSeries, colSpan, lead,
 /* ── [C] 메인 검사 그리드 (컬럼 구성형) ───────────── */
 /** 컬럼 기본 폭 — 설정 폭(colWidths)이 없을 때. 넓은 텍스트 컬럼만 예외, 나머지 110px. */
 const GRID_COL_DEF_W: Record<string, number> = {
-  name: 150, study_desc: 180, institution: 190, ref_phys: 150, memo: 200,
-  impression_preview: 220, order_name: 170, ae_title: 130, body_part: 120,
+  patient_name: 130, study_desc: 180, institution: 170, referring_physician: 120, memo: 180,
+  impression: 220, order_name: 170, source_aet: 120, body_part: 110,
+  age: 56, sex: 48, study_time: 76, accession_no: 140, finalized_at: 130,
+  priority: 80, instance_count: 56, series_count: 50, modality: 56, read_state: 52, status: 76,
 };
 function StudyGrid({
   items, columns, selectedId, selectedIds, onSelect, onOpen, onContext, variant, treeDisabled,

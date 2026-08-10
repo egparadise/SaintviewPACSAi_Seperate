@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { VIEWER_BASE, api, sttStatus, type AiQuality, type OrthancStatus, type PhraseRow, type SttStatus } from "../api";
 import {
   COLUMN_DEFS, DEFAULT_COLUMNS, DEFAULT_FIND_FIELDS, FIND_FIELDS, PhraseEditModal,
-  INFI_COLUMNS, SV_COLUMNS, SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
+  SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
@@ -1853,7 +1853,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
               const vLabel = page === "wlSaint" ? "SaintView" : page === "wlTy" ? "T-View" : "I-View";
               const ov = wlBy[vk];
               // 오버라이드 시작 시드값 — sv/infi 는 각 스킨 기본 컬럼, ty 는 공통 컬럼
-              const colDefault = vk === "sv" ? SV_COLUMNS : vk === "infi" ? INFI_COLUMNS : columns;
+              // 2026-08-10 사용자 확정 — 세 뷰어 모두 원 서버(A) 순서(DEFAULT_COLUMNS)가 초기 기본.
+              // 구 SV/INFI 원형은 '뷰어 원형 되돌리기' 참고용으로만 남아 있다(Worklist.tsx 주석).
+              const colDefault = vk === "ty" ? columns : DEFAULT_COLUMNS;
               return (
                 <>
                   <Group title={vLabel + " " + tr("워크리스트 — 뷰어별 그리드 컬럼 (계정별 저장)")}>
