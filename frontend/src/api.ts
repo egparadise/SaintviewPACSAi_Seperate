@@ -1852,9 +1852,10 @@ export interface BatchCandidate {
 }
 
 /** 음성 판독 서버 STT (Whisper 로컬/OpenAI API) — FormData라 req() 미사용 */
-export async function sttTranscribe(blob: Blob): Promise<{ text: string; engine: string }> {
+export async function sttTranscribe(blob: Blob, lang = "ko"): Promise<{ text: string; engine: string }> {
   const fd = new FormData();
   fd.append("audio", blob, "dictation.webm");
+  fd.append("language", lang);   // STT 인식 언어(2026-08-11) — 마이크 옆 칩·Alt+L 로 선택된 값
   const res = await fetch(`${BASE}/api/stt`, {
     method: "POST",
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,

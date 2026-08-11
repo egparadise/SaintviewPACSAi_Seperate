@@ -2856,5 +2856,9 @@ const d: Record<string, string> = {
   "전체 사용자": "Tất cả người dùng",
   "서버": "Máy chủ",
   "이 기록은 화면이 '서버가 막고 있다'고 판정한 순간 서버에 남습니다. 같은 원인은 5분에 한 번만 기록합니다.": "Bản ghi được tạo ngay khi màn hình xác định máy chủ đang chặn. Cùng một nguyên nhân chỉ ghi một lần mỗi 5 phút.",
+  "음성 판독 (STT)": "Đọc bằng giọng nói (STT)",
+  "인식 언어": "Ngôn ngữ nhận dạng",
+  "마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).": "Nhấp chip ngôn ngữ cạnh biểu tượng micrô hoặc nhấn Alt+L để chuyển giữa các ngôn ngữ đã chọn. Phải chọn ít nhất hai ngôn ngữ (mặc định: Hàn·Anh).",
+  "음성 인식 언어 — 클릭 또는 Alt+L 로 전환 (설정>판독>음성 판독에서 언어 선택)": "Ngôn ngữ nhận dạng giọng nói — nhấp hoặc Alt+L để chuyển (chọn trong Cài đặt > Đọc > Đọc bằng giọng nói)",
 };
 export default d;

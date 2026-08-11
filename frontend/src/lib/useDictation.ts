@@ -6,6 +6,7 @@
 // Client 는 서버 설정 엔진을 그대로 사용(연동) — 병원/전역 ai.policy 로 통일 구동.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, sttTranscribe } from "../api";
+import { sttBcp, sttLang } from "./sttLang";
 
 type SR = {
   lang: string; continuous: boolean; interimResults: boolean;
@@ -48,7 +49,8 @@ export function useDictation(onText: (text: string) => void) {
           lastBlobRef.current = blob;   // Play 재생용 보관
           setBusy(true);
           try {
-            const r = await sttTranscribe(blob);
+            // 언어는 **전사 시점**의 칩 값 — 녹음 중에 Alt+L 로 바꿔도 반영된다(서버 엔진)
+            const r = await sttTranscribe(blob, sttLang());
             if (r.text) onTextRef.current(r.text);
           } catch (e) { setErr(e instanceof Error ? e.message : "STT 전사 실패"); }
           finally { setBusy(false); }
@@ -68,7 +70,7 @@ export function useDictation(onText: (text: string) => void) {
       return;
     }
     const rec = new SRClass();
-    rec.lang = "ko-KR";
+    rec.lang = sttBcp(sttLang());   // 브라우저 엔진은 시작 시점 언어(중간 전환은 다음 녹음부터)
     rec.continuous = true;
     rec.interimResults = false;
     rec.onresult = (ev) => {

@@ -9,6 +9,8 @@ import { liveViewerSlots, noteViewerSlot } from "../lib/viewerSlots";
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { histThumbLimiter, limitedMap } from "../lib/netLimit";
 import { MicIcon } from "../components/MicIcon";
+import { SttLangChip } from "../components/SttLangChip";
+import { setSttEnabled } from "../lib/sttLang";
 import { t as tr, useLang } from "../lib/i18n";
 
 type Tab = "read" | "hist" | "std" | "tpl";
@@ -376,6 +378,10 @@ export function ReportWindow() {
         api.getSetting("report.prefs").then((r) => {
           const v = r.value as Record<string, unknown>;
           setRdOpts(v);
+          {   // STT 언어 집합 로밍 수신 — 다른 PC 에서 고른 집합이 이 창 칩에도 적용된다
+            const sl = (v as { stt_langs?: unknown }).stt_langs;
+            if (Array.isArray(sl)) setSttEnabled(sl.filter((x): x is string => typeof x === "string"));
+          }
           if (v.worklist_viewer === true) setWlDock(true);
           const wh = Number(v.worklist_viewer_h);
           if (wh >= 120 && wh <= 800) setWlDockH(wh);
@@ -604,6 +610,8 @@ export function ReportWindow() {
           <MicIcon on={dictation.recording} />
           {dictation.busy ? tr("전사 중…") : dictation.recording ? tr("녹음 중") : tr("음성 판독")}
         </button>
+        {/* STT 언어 칩(2026-08-11 사용자 확정) — 클릭·Alt+L 로 한↔EN 등 전환 */}
+        <SttLangChip />
         <span style={{ color: "var(--text-secondary)" }}>Font size</span>
         <button style={{ padding: "0 8px" }} onClick={() => setFontPx((f) => Math.max(10, f - 1))}>−</button>
         <input type="range" min={10} max={24} value={fontPx} onChange={(e) => setFontPx(Number(e.target.value))} />

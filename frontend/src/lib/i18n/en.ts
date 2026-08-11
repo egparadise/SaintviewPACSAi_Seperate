@@ -2856,5 +2856,9 @@ const d: Record<string, string> = {
   "전체 사용자": "All users",
   "서버": "Server",
   "이 기록은 화면이 '서버가 막고 있다'고 판정한 순간 서버에 남습니다. 같은 원인은 5분에 한 번만 기록합니다.": "An entry is written the moment the screen judges that the server is blocking. The same cause is recorded at most once every 5 minutes.",
+  "음성 판독 (STT)": "Voice dictation (STT)",
+  "인식 언어": "Recognition languages",
+  "마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).": "Click the language chip next to the mic icon or press Alt+L to switch among the selected languages. At least two languages must be selected (default: Korean and English).",
+  "음성 인식 언어 — 클릭 또는 Alt+L 로 전환 (설정>판독>음성 판독에서 언어 선택)": "Speech recognition language — click or press Alt+L to switch (choose languages in Settings > Reading > Voice dictation)",
 };
 export default d;

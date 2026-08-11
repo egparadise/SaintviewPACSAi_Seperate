@@ -2856,5 +2856,9 @@ const d: Record<string, string> = {
   "전체 사용자": "Tous les utilisateurs",
   "서버": "Serveur",
   "이 기록은 화면이 '서버가 막고 있다'고 판정한 순간 서버에 남습니다. 같은 원인은 5분에 한 번만 기록합니다.": "Une entrée est écrite dès que l'écran détermine que le serveur bloque. La même cause n'est enregistrée qu'une fois toutes les 5 minutes.",
+  "음성 판독 (STT)": "Dictée vocale (STT)",
+  "인식 언어": "Langues de reconnaissance",
+  "마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).": "Cliquez sur la puce de langue près du micro ou appuyez sur Alt+L pour basculer entre les langues choisies. Au moins deux langues sont requises (défaut : coréen et anglais).",
+  "음성 인식 언어 — 클릭 또는 Alt+L 로 전환 (설정>판독>음성 판독에서 언어 선택)": "Langue de reconnaissance vocale — clic ou Alt+L pour changer (choisir dans Réglages > Lecture > Dictée vocale)",
 };
 export default d;

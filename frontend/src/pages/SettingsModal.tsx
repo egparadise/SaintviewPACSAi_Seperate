@@ -12,6 +12,7 @@ import { MediaPermPanel } from "../components/MediaPermPanel";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
 import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
+import { setSttEnabled } from "../lib/sttLang";
 import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
 import { dlForgetDone, dlProgress, type DlProgress } from "../lib/dlScheduler";
 import { dlInvalidateCache } from "../lib/dlCache";
@@ -635,6 +636,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (v.auto_apply !== undefined) setRptAutoApply(v.auto_apply);
       setCmpBasis(readCompareCfg(v.compare));
       setRdOpts((prev) => ({ ...prev, ...v }));
+      {   // STT 언어 집합 로밍 수신 — 칩·훅이 쓰는 미러(sv_stt_langs)를 맞춘다
+        const sl = (v as { stt_langs?: unknown }).stt_langs;
+        if (Array.isArray(sl)) setSttEnabled(sl.filter((x): x is string => typeof x === "string"));
+      }
     }).catch(() => {});
     api.getSetting("mode.profiles").then((r) => {
       const v = r.value as { profiles?: Record<string, ModeProfile> };
@@ -1861,6 +1866,34 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                           {tr("판독창 하단에 워크리스트를 표시합니다 (판독창 상단 체크와 연동 · 계정별 저장)")}
                         </label>
                       </Row>
+                    </Group>
+                    {/* 음성 판독(STT) 언어(2026-08-11 사용자 확정) — 마이크 옆 칩·Alt+L 로
+                        전환할 언어 집합. 최소 2개(기본 한국어·영어), report.prefs 계정 로밍. */}
+                    <Group title={tr("음성 판독 (STT)")}>
+                      <Row label={tr("인식 언어")}>
+                        <span style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          {LANGS.map((l) => {
+                            const cur = (rdOpts.stt_langs as string[] | undefined) ?? ["ko", "en"];
+                            const on = cur.includes(l.code);
+                            return (
+                              <label key={l.code} style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                                <input type="checkbox" checked={on}
+                                       onChange={(e) => {
+                                         const next = e.target.checked
+                                           ? [...cur, l.code] : cur.filter((c) => c !== l.code);
+                                         if (next.length < 2) return;   // 최소 2개(사용자 확정)
+                                         setRdOpts((p) => ({ ...p, stt_langs: next }));
+                                         setSttEnabled(next);
+                                       }} />
+                                {l.native}
+                              </label>
+                            );
+                          })}
+                        </span>
+                      </Row>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                        {tr("마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).")}
+                      </div>
                     </Group>
                     <Group title={tr("Compare — 비교할 과거 검사를 어디서 고를까")}>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

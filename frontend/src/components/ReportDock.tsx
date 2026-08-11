@@ -6,6 +6,7 @@ import { PERM_DENIED_TIP, api, hasPerm, isLiveId, loadPermMe, type PermMe, type 
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { pollWithGuard } from "../lib/netLimit";
 import { MicIcon } from "./MicIcon";
+import { SttLangChip } from "./SttLangChip";
 import { t as tr, useLang } from "../lib/i18n";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
@@ -351,6 +352,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
           <MicIcon on={dictation.recording} size={13} />
           {dictation.busy ? tr("전사…") : dictation.recording ? tr("녹음") : tr("음성")}
         </button>
+        <SttLangChip compact />
         <span style={{ color: "var(--text-secondary)" }}>Font</span>
         <button style={{ padding: "0 6px" }} onClick={() => setFontPx((f) => Math.max(10, f - 1))}>−</button>
         <span>{fontPx}px</span>

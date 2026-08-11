@@ -11,7 +11,7 @@ import logging
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.deps import current_user
@@ -25,7 +25,12 @@ _MAX_BYTES = 25 * 1024 * 1024
 _model_cache: dict[str, object] = {}
 
 
-def _whisper_local(data: bytes, model_name: str) -> str:
+# STT 인식 언어(2026-08-11 사용자 확정) — UI 설정 언어와 같은 10개(ISO 639-1).
+# 허용 밖 값은 ko 폴백 — 언어 코드가 그대로 Whisper/OpenAI 에 전달되므로 화이트리스트가 문이다.
+_STT_LANGS = {"ko", "en", "ru", "zh", "ja", "es", "de", "fr", "vi", "ar"}
+
+
+def _whisper_local(data: bytes, model_name: str, language: str = "ko") -> str:
     """faster-whisper 우선, openai-whisper 폴백. 모델은 프로세스 캐시."""
     path = ""
     try:
@@ -39,7 +44,7 @@ def _whisper_local(data: bytes, model_name: str) -> str:
             if key not in _model_cache:
                 _model_cache[key] = WhisperModel(model_name, device="cpu", compute_type="int8")
             m = _model_cache[key]
-            segments, _info = m.transcribe(path, language="ko")  # type: ignore[attr-defined]
+            segments, _info = m.transcribe(path, language=language)  # type: ignore[attr-defined]
             return " ".join(s.text.strip() for s in segments).strip()
         except ImportError:
             pass
@@ -49,7 +54,7 @@ def _whisper_local(data: bytes, model_name: str) -> str:
             key = f"ow:{model_name}"
             if key not in _model_cache:
                 _model_cache[key] = whisper.load_model(model_name)
-            r = _model_cache[key].transcribe(path, language="ko")  # type: ignore[attr-defined]
+            r = _model_cache[key].transcribe(path, language=language)  # type: ignore[attr-defined]
             return str(r.get("text", "")).strip()
         except ImportError:
             raise HTTPException(
@@ -64,7 +69,8 @@ def _whisper_local(data: bytes, model_name: str) -> str:
                 pass
 
 
-def _openai_api(data: bytes, filename: str, content_type: str, model_name: str) -> str:
+def _openai_api(data: bytes, filename: str, content_type: str, model_name: str,
+                language: str = "ko") -> str:
     import httpx
 
     key = os.getenv("OPENAI_API_KEY", "")
@@ -73,7 +79,7 @@ def _openai_api(data: bytes, filename: str, content_type: str, model_name: str) 
     r = httpx.post(
         "https://api.openai.com/v1/audio/transcriptions",
         headers={"Authorization": f"Bearer {key}"},
-        data={"model": model_name or "whisper-1", "language": "ko"},
+        data={"model": model_name or "whisper-1", "language": language},
         files={"file": (filename or "dictation.webm", data, content_type or "audio/webm")},
         timeout=120,
     )
@@ -129,6 +135,7 @@ def stt_status(db: Session = Depends(get_db), user: dict = Depends(current_user)
 @router.post("")
 async def transcribe(
     audio: UploadFile = File(...),
+    language: str = Form("ko"),
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),
 ):
@@ -141,10 +148,11 @@ async def transcribe(
     if len(data) > _MAX_BYTES:
         raise HTTPException(status_code=400, detail="오디오는 25MB 이하")
 
+    lang = language if language in _STT_LANGS else "ko"
     if engine == "whisper_local":
-        text = _whisper_local(data, model_name or "base")
+        text = _whisper_local(data, model_name or "base", lang)
     elif engine == "openai_api":
-        text = _openai_api(data, audio.filename or "", audio.content_type or "", model_name)
+        text = _openai_api(data, audio.filename or "", audio.content_type or "", model_name, lang)
     else:
         raise HTTPException(
             status_code=400,
