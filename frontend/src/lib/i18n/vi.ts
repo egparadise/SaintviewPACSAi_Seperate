@@ -2781,5 +2781,7 @@ const d: Record<string, string> = {
   "브라우저 메뉴(⋮) > 저장 및 공유 > '페이지를 앱으로 설치'를 이용하세요": "Dùng menu trình duyệt (⋮) > Lưu và chia sẻ > 'Cài trang dưới dạng ứng dụng'",
   "(원 서버 — 자동 연동)": "(máy chủ gốc — tự đồng bộ)",
   "클릭하면 내용을 불러옵니다 — 저장하면 내 계정 사본이 되고, 원본은 SV70에서 관리됩니다.": "Nhấp để tải nội dung — khi lưu sẽ tạo bản sao trong tài khoản của bạn; bản gốc do SV70 quản lý.",
+  "개 — 기본 8 = 최대 속도(서버의 검사당 예열 워커와 동일).": "cái — mặc định 8 = tốc độ tối đa (bằng số worker nạp trước mỗi ca của máy chủ).",
+  "서버 전역 상한이 로그인·다른 사용자 몫을 지키지만, 여럿이 동시에 받으면 서로 느려질 수 있습니다(원격 PACS 공용).": "Giới hạn toàn máy chủ bảo vệ đăng nhập và người dùng khác, nhưng nhiều người tải cùng lúc có thể làm chậm lẫn nhau (PACS từ xa dùng chung).",
 };
 export default d;

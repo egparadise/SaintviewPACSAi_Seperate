@@ -28,7 +28,13 @@ export interface DlPrefs {
 }
 
 export const DL_DEFAULTS: DlPrefs = {
-  mode: "live", limitGb: 2, concurrency: 2, scope: "list", recentN: 50,
+  // 동시 받기 기본 8 = 최대(2026-08-10 사용자 확정 "받기 속도 최대가 기본") — 서버의
+  // 검사당 예열 워커(prefetch_series 8)와 정합. 폭주 보호는 서버 전역 A 게이트
+  // (SAINTVIEW_A_PIXEL_SLOTS=12)가 담당한다 — 로그인·타 사용자 몫은 거기서 지켜진다.
+  // 모드 기본 download(2026-08-10 사용자 확정 "Live 와 다운받기 중 다운받기가 기본") —
+  // 프로그램이 시작되면 워크리스트 목록(최신순) 그대로 즉시 받기 시작한다(dlScheduler ①→②→③).
+  // 영상을 클릭해 열 때의 동작(열린 검사 우선 dlPromote·뷰어 생존 중 일시정지)은 기존 규칙 그대로.
+  mode: "download", limitGb: 2, concurrency: 8, scope: "list", recentN: 50,
   autoEvict: true, evictBy: "date", warnNearLimit: true, warnAtPct: 90,
 };
 
@@ -38,15 +44,20 @@ function clamp(n: unknown, lo: number, hi: number, d: number): number {
 }
 
 /** viewer.prefs 값 → DlPrefs.
- *  ★ 기본은 **항상 live** 다 — 설정이 깨졌거나 키가 없을 때 다운로드가 저절로 켜지면
- *    환자 영상이 브라우저에 쌓이는 표면이 사용자 동의 없이 생긴다. 정확히 "download" 일 때만 켠다.
+ *  ★ 기본 **download**(2026-08-10 사용자 확정 — 구 기본 live 를 뒤집음). 저장면 우려는
+ *    상한(limitGb)·자동 삭제(autoEvict 기본 켬)가 담당한다. 명시 저장 마커(dl_mode_set)가
+ *    있을 때만 저장값을 존중 — 구 기본(live) 시절 저장된 dl_mode 는 잔재라 download 로 승격.
  *  ★ 숫자는 전부 잘라 넣는다 — 동시 받기가 폭주하면 공용 원격 PACS(A)를 때린다. */
 export function readDlPrefs(value: unknown): DlPrefs {
   const v = (value ?? {}) as Record<string, unknown>;
   return {
-    mode: v.dl_mode === "download" ? "download" : "live",
+    mode: v.dl_mode_set === true ? (v.dl_mode === "live" ? "live" : "download")
+                                 : DL_DEFAULTS.mode,
     limitGb: clamp(v.dl_limit_gb, 1, 200, DL_DEFAULTS.limitGb),
-    concurrency: clamp(v.dl_conc, 1, 4, DL_DEFAULTS.concurrency),
+    // dl_conc_set 마커가 있을 때만 저장값 존중 — 구 UI(상한 4·권장 2) 시절 저장된 dl_conc 는
+    // 옛 권장의 잔재라 무시하고 새 기본(8=최대)으로 승격한다(2026-08-10 사용자 확정).
+    concurrency: v.dl_conc_set === true ? clamp(v.dl_conc, 1, 8, DL_DEFAULTS.concurrency)
+                                        : DL_DEFAULTS.concurrency,
     scope: v.dl_scope === "recent" ? "recent" : "list",
     recentN: clamp(v.dl_recent_n, 1, 500, DL_DEFAULTS.recentN),
     // ★ 자동 삭제·알림은 **정확히 false 일 때만** 끈다(키가 없거나 값이 깨지면 켜진 채로 둔다).

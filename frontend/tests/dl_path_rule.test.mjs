@@ -90,17 +90,27 @@ test("④ 형식이 다르면 키도 파일도 갈린다 — 관리자 PNG(무�
   assert.deepEqual(png.dir, jpg.dir, "형식이 달라도 삭제 단위(검사 폴더)는 같아야 한다");
 });
 
-test("⑤ 영상 취득 모드 기본값은 Live — 키가 없거나 값이 이상해도 다운로드로 켜지지 않는다", () => {
-  assert.equal(readDlPrefs(undefined).mode, "live");
-  assert.equal(readDlPrefs({}).mode, "live");
-  assert.equal(readDlPrefs({ dl_mode: "DOWNLOAD" }).mode, "live", "정확히 'download' 일 때만 켜진다");
-  assert.equal(readDlPrefs({ dl_mode: "download" }).mode, "download");
+test("⑤ 영상 취득 모드 기본값은 download — 시작 즉시 최신부터 받는다(2026-08-10 사용자 확정)", () => {
+  assert.equal(DL_DEFAULTS.mode, "download", "Live 와 다운받기 중 다운받기가 기본");
+  assert.equal(readDlPrefs(undefined).mode, "download");
+  assert.equal(readDlPrefs({}).mode, "download");
+  // 명시 저장(마커)만 존중 — 구 기본(live) 시절 저장값은 잔재라 download 로 승격
+  assert.equal(readDlPrefs({ dl_mode: "live" }).mode, "download", "마커 없는 옛 live 는 승격");
+  assert.equal(readDlPrefs({ dl_mode_set: true, dl_mode: "live" }).mode, "live", "명시 live 는 존중");
+  assert.equal(readDlPrefs({ dl_mode_set: true, dl_mode: "download" }).mode, "download");
+  assert.equal(readDlPrefs({ dl_mode_set: true, dl_mode: "DOWNLOAD" }).mode, "download",
+               "마커가 있으면 live 정확 일치 외에는 기본(download)");
   assert.deepEqual(readDlPrefs({}), DL_DEFAULTS);
 });
 
 test("⑤ 설정값이 범위를 벗어나면 잘린다 — 동시 받기가 폭주해 원격 PACS 를 때리면 안 된다", () => {
-  assert.equal(readDlPrefs({ dl_conc: 99 }).concurrency, 4);
-  assert.equal(readDlPrefs({ dl_conc: 0 }).concurrency, 1);
+  // 2026-08-10 사용자 확정: 기본 = 최대(8). 서버 전역 A 게이트(12)가 폭주 보호를 담당.
+  assert.equal(DL_DEFAULTS.concurrency, 8, "받기 속도 최대가 기본");
+  assert.equal(readDlPrefs({ dl_conc_set: true, dl_conc: 99 }).concurrency, 8);
+  assert.equal(readDlPrefs({ dl_conc_set: true, dl_conc: 0 }).concurrency, 1);
+  assert.equal(readDlPrefs({ dl_conc_set: true, dl_conc: 3 }).concurrency, 3, "명시 저장(마커)은 존중");
+  assert.equal(readDlPrefs({ dl_conc: 2 }).concurrency, 8,
+               "구 UI(권장 2) 시절 저장값은 마커가 없다 — 새 기본(최대)으로 승격");
   assert.equal(readDlPrefs({ dl_conc: "abc" }).concurrency, DL_DEFAULTS.concurrency);
   assert.equal(readDlPrefs({ dl_limit_gb: 100000 }).limitGb, 200);
   assert.equal(readDlPrefs({ dl_recent_n: -5 }).recentN, 1);

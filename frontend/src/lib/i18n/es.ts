@@ -2781,5 +2781,7 @@ const d: Record<string, string> = {
   "브라우저 메뉴(⋮) > 저장 및 공유 > '페이지를 앱으로 설치'를 이용하세요": "Use el menú del navegador (⋮) > Guardar y compartir > 'Instalar página como aplicación'",
   "(원 서버 — 자동 연동)": "(servidor origen — sincronizado)",
   "클릭하면 내용을 불러옵니다 — 저장하면 내 계정 사본이 되고, 원본은 SV70에서 관리됩니다.": "Haga clic para cargar el contenido — al guardar se crea una copia en su cuenta; el original se gestiona en SV70.",
+  "개 — 기본 8 = 최대 속도(서버의 검사당 예열 워커와 동일).": "— predeterminado 8 = velocidad máxima (igual que los workers de precarga por examen).",
+  "서버 전역 상한이 로그인·다른 사용자 몫을 지키지만, 여럿이 동시에 받으면 서로 느려질 수 있습니다(원격 PACS 공용).": "Un límite global del servidor protege los inicios de sesión y a otros usuarios, pero varias descargas simultáneas pueden ralentizarse entre sí (PACS remoto compartido).",
 };
 export default d;

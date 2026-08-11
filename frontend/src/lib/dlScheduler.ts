@@ -62,7 +62,7 @@ export interface DlProgress {
 }
 
 let cfg: DlConfig = {
-  enabled: false, limitGb: 2, concurrency: 2, scope: "list", recentN: 50,
+  enabled: false, limitGb: 2, concurrency: 8, scope: "list", recentN: 50,
   autoEvict: true, evictBy: "date", warnNearLimit: true, warnAtPct: 90,
 };
 let queue: DlQueueItem[] = [];
@@ -369,7 +369,7 @@ async function pump(tasks: Task[], meta: DlMeta, token: number): Promise<number>
   const todo = await pendingTasks(tasks, opfsHas);
   let i = 0;
   let failed = 0;
-  const n = Math.max(1, Math.min(4, cfg.concurrency || 2));
+  const n = Math.max(1, Math.min(8, cfg.concurrency || 8));
   const worker = async () => {
     for (;;) {
       if (stopped || token !== promoteTick) return;
@@ -451,7 +451,7 @@ function noteSkipped(): void {
 /** myGen: 진입 시점의 정지 세대. dlStop 이 gen 을 올리면 stopped 가 곧바로 false 로 뒤집혀도
  *  (닫자마자 다시 열기) 이 루프는 자기 세대가 낡은 것을 보고 접는다 — 그래야 Web Lock 을 놓는다.
  *  ⚠ 진행 중이던 fetch 는 취소하지 않는다(이미 받은 바이트를 버리는 셈 — pump 주석의 결정).
- *    따라서 '닫았는데 잠깐 더 받는다'는 꼬리가 남지만 **유계**다: 동시 fetch(≤concurrency, 최대 4)
+ *    따라서 '닫았는데 잠깐 더 받는다'는 꼬리가 남지만 **유계**다: 동시 fetch(≤concurrency, 최대 8)
  *    + seriesTree 1건이 끝나는 시간까지. 이걸 없애려고 AbortController 를 넣으면 재개 시 그 파일을
  *    처음부터 다시 받게 되므로 별건으로 다룬다. */
 async function loop(myGen: number): Promise<void> {
@@ -504,7 +504,7 @@ async function loop(myGen: number): Promise<void> {
 }
 
 export function dlConfigure(next: DlConfig): void {
-  cfg = { ...next, concurrency: Math.max(1, Math.min(4, next.concurrency || 2)) };
+  cfg = { ...next, concurrency: Math.max(1, Math.min(8, next.concurrency || 8)) };
   // ★ 축출 종결(evicted) 해제 계기 ⑴ — 상한·기준·범위·자동삭제가 바뀌면 판정 자체가 달라지므로
   //   '이 조건에서는 담기지 않는다'는 결론을 버린다.
   //   ⚠ **무조건** 풀면 안 된다. dlConfigure 는 워크리스트 마운트·설정 저장·서버모드 전환마다

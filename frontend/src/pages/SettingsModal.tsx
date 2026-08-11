@@ -768,7 +768,10 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       ohif_enabled: ohifOn,
       wasm_pipeline: wasmPipe,
       // 영상 취득 모드 — 뷰어 2종이 소비하므로 viewer.prefs 에 둔다(worklist.prefs 아님)
-      dl_mode: dl.mode, dl_limit_gb: dl.limitGb, dl_conc: dl.concurrency,
+      // *_set — 새 정책(기본: download·동시 8) 이후의 명시 저장 마커. 마커 없는 옛 저장값은
+      // readDlPrefs 가 새 기본으로 승격한다(2026-08-10 사용자 확정).
+      dl_mode: dl.mode, dl_mode_set: true, dl_limit_gb: dl.limitGb,
+      dl_conc: dl.concurrency, dl_conc_set: true,
       dl_scope: dl.scope, dl_recent_n: dl.recentN,
       // 용량 초과 자동 삭제 — 이 4개를 저장 목록에서 빠뜨리면 UI 는 바뀌는데 저장이 안 돼
       // 모달을 다시 열면 기본값으로 돌아온다(= 설정이 없는 것과 같다)
@@ -1322,11 +1325,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       </Row>
                       <Row label={tr("동시 받기")}>
                         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <input type="number" min={1} max={4} value={dl.concurrency} style={{ width: 60 }}
+                          <input type="number" min={1} max={8} value={dl.concurrency} style={{ width: 60 }}
                                  onChange={(e) => setDl({ ...dl,
-                                   concurrency: Math.min(4, Math.max(1, Math.round(Number(e.target.value) || 2))) })} />
+                                   concurrency: Math.min(8, Math.max(1, Math.round(Number(e.target.value) || 8))) })} />
                           <span style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>
-                            {tr("개 — 크게 잡으면")} <b>{tr("내 화면은 빨라지고 남의 화면은 느려집니다")}</b>{tr("(원격 PACS 공용). 서버가 이미 검사마다 8워커로 예열하므로 2 를 권합니다.")}
+                            {tr("개 — 기본 8 = 최대 속도(서버의 검사당 예열 워커와 동일).")}{" "}
+                            {tr("서버 전역 상한이 로그인·다른 사용자 몫을 지키지만, 여럿이 동시에 받으면 서로 느려질 수 있습니다(원격 PACS 공용).")}
                           </span>
                         </span>
                       </Row>
