@@ -64,6 +64,9 @@ export type CollabEvent =
   | { t: "presence"; id: number; online: boolean }
   | { t: "friend.request"; from: CollabUser; message?: string }
   | { t: "friend.accepted"; from: CollabUser }
+  // 친구 삭제로 그 DM 대화가 **양쪽에서** 지워졌다. 룸 하나에 행 하나라 한쪽만의 삭제는
+  // 없다 — 받은 쪽도 화면을 즉시 비워야 한다(없는 메시지에 답장하려다 실패하지 않게).
+  | { t: "dm.purged"; room: string; by: number; n: number }
   | { t: "invite"; code: string; from: CollabUser; title: string; study_uid: string }
   | { t: "declined"; code: string; id: number }
   | { t: "session"; d: CollabSession }
@@ -145,6 +148,13 @@ class CollabClient {
   me: CollabUser | null = null;
   online = new Set<number>();
 
+  /** 이 창에서 핸드셰이크가 **한 번이라도** 성립했나. 서버 진단의 핵심 근거다 —
+   *  false 인 채 계속 닫히면 nginx 가 업그레이드를 막고 있는 것이고(101 이 안 온다),
+   *  true 였다가 닫히면 서버 재시작·네트워크 순단이다. 이 둘의 조치가 완전히 다르다. */
+  everOpened = false;
+  /** 마지막 close 코드. 1006(close 프레임 없음) + everOpened=false = 프록시가 끊은 것. */
+  lastCloseCode = 0;
+
   /** 지금 이 창이 들어가 있는 세션 code — session.enter 성공 시 채워진다 */
   sessionCode: string | null = null;
 
@@ -164,6 +174,7 @@ class CollabClient {
     this.ws = sock;
     sock.onopen = () => {
       this.retry = 0;
+      this.everOpened = true;
       this.setStatus("open");
       this.startPing();
       // 재연결이면 있던 세션에 자동 복귀 — 사용자가 다시 누르게 하지 않는다
@@ -189,6 +200,7 @@ class CollabClient {
     };
     sock.onclose = (ev) => {
       this.ws = null;
+      this.lastCloseCode = ev.code;
       this.stopPing();
       if (ev.code === CLOSE_UNAUTHORIZED) {
         // 토큰이 죽었다 — 재연결해도 같은 결과다. api.ts 의 401 처리가 곧 로그아웃시킨다.

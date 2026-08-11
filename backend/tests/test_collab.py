@@ -1121,3 +1121,91 @@ def test_adopt_takes_viewport_marks_only(client, db, duo):
     assert "영상 소견" in texts
     assert "낙서" not in texts and "공유 화면" not in texts, \
         "다른 좌표계의 마크가 판독 주석으로 저장됐다"
+
+
+# ═══════════════ 친구 삭제 — 대화 삭제 · 검색 재노출 (2026-08-10) ═══════════════
+def test_unfriend_purges_conversation_for_both_sides(client, db, duo):
+    """친구를 지우면 둘 사이의 대화가 **전부** 사라진다(룸을 공유하므로 양쪽에서).
+
+    사용자 확정: "친구 삭제하면 과거 대화는 모두 지워지게 해줘."
+    """
+    from sqlalchemy import select as _sel
+
+    from app.models import CollabMessage
+    from app.services import collab_service as svc
+
+    _befriend(client, duo)
+    room = svc.dm_room(duo["host"].id, duo["guest"].id)
+    # 메신저 전송은 WS 경로다 — 서비스로 직접 넣어 대화를 만든다
+    svc.post_message(db, duo["host"], room, "host 메시지")
+    svc.post_message(db, duo["guest"], room, "guest 메시지")
+    db.expire_all()
+    # ⚠ 개수를 상수로 박지 않는다 — 앞선 채팅 테스트가 같은 host↔guest 룸을 쓴다.
+    #   고정할 것은 "몇 건이었든 **전부** 사라진다" 이지 특정 숫자가 아니다.
+    before = len(db.execute(_sel(CollabMessage).where(CollabMessage.room_key == room))
+                 .scalars().all())
+    assert before >= 2
+
+    r = client.post("/api/collab/friends/remove", headers=duo["hh"],
+                    json={"other_id": duo["guest"].id})
+    assert r.status_code == 200, r.text
+    assert r.json()["purged"] == before, "일부만 지웠다"
+
+    db.expire_all()
+    assert db.execute(_sel(CollabMessage).where(CollabMessage.room_key == room))\
+             .scalars().all() == [], "친구를 지웠는데 대화가 남아 있다"
+    # 상대 쪽 목록에서도 사라진다(룸이 하나라 조회 결과가 곧 양쪽의 화면이다)
+    assert client.get(f"/api/collab/messages?room={room}",
+                      headers=duo["gh"]).json()["items"] == []
+
+
+def test_unfriend_keeps_the_person_findable_for_re_adding(client, db, duo):
+    """삭제해도 **검색 목록에는 남는다** — 나중에 다시 친구로 추가할 수 있어야 한다.
+
+    directory 는 친구 여부로 거르지 않는다(계정 자체는 건드리지 않으므로). 이 성질이
+    깨지면 한 번 지운 사람은 영영 다시 추가할 수 없게 된다.
+    """
+    _befriend(client, duo)
+    assert client.post("/api/collab/friends/remove", headers=duo["hh"],
+                       json={"other_id": duo["guest"].id}).status_code == 200
+
+    found = client.get(f"/api/collab/directory?q={duo['guest'].username}",
+                       headers=duo["hh"]).json()["items"]
+    hit = next((u for u in found if u["id"] == duo["guest"].id), None)
+    assert hit is not None, "삭제한 사람이 검색에서 사라졌다 — 다시 추가할 길이 없다"
+    assert hit["relation"] == "", "관계가 남아 '이미 친구'로 보인다"
+
+    # 친구 목록에서는 빠져 있다
+    friends = client.get("/api/collab/friends", headers=duo["hh"]).json()["friends"]
+    assert all(u["id"] != duo["guest"].id for u in friends)
+
+    # 그리고 실제로 다시 추가된다
+    assert client.post("/api/collab/friends/request", headers=duo["hh"],
+                       json={"target_id": duo["guest"].id}).status_code == 200
+    assert client.post("/api/collab/friends/respond", headers=duo["gh"],
+                       json={"other_id": duo["host"].id, "accept": True}).status_code == 200
+    again = client.get("/api/collab/friends", headers=duo["hh"]).json()["friends"]
+    assert any(u["id"] == duo["guest"].id for u in again), "다시 친구가 되지 않았다"
+
+
+def test_unfriend_does_not_touch_session_room_chat(client, db, duo):
+    """DM 만 지운다 — 협진 세션 룸 대화는 별개다(다른 사람들의 기록이기도 하다)."""
+    from sqlalchemy import select as _sel
+
+    from app.models import CollabMessage
+    from app.services import collab_service as svc
+
+    code = _open_and_join(client, duo, _study(db, "unfriend_sess", duo["ha"].id).id)
+    sess_room = svc.session_room(code)
+    dm = svc.dm_room(duo["host"].id, duo["guest"].id)
+    svc.post_message(db, duo["host"], sess_room, "세션 발언")
+    svc.post_message(db, duo["host"], dm, "1:1 발언")
+
+    client.post("/api/collab/friends/remove", headers=duo["hh"],
+                json={"other_id": duo["guest"].id})
+    db.expire_all()
+    left = db.execute(_sel(CollabMessage).where(CollabMessage.room_key == sess_room))\
+             .scalars().all()
+    assert len(left) == 1, "세션 룸 대화까지 지웠다"
+    assert db.execute(_sel(CollabMessage).where(CollabMessage.room_key == dm))\
+             .scalars().all() == []

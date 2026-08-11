@@ -18,7 +18,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -401,14 +401,40 @@ def set_block(db: Session, me: Account, other_id: int, blocked: bool) -> None:
     db.commit()
 
 
-def unfriend(db: Session, me: Account, other_id: int) -> None:
+def unfriend(db: Session, me: Account, other_id: int, purge: bool = True) -> int:
+    """친구 해제 — 관계 행을 지우고, 기본적으로 **둘 사이의 대화를 전부 삭제**한다.
+
+    2026-08-10 사용자 확정: "친구 삭제하면 과거 대화는 모두 지워지게 해줘."
+
+    ⚠ DM 룸은 두 사람이 **공유**한다(room_key = dm:<낮은id>:<높은id>). 즉 삭제는
+      한쪽만의 일이 아니라 **양쪽에서** 사라진다. 한쪽 사본만 남기려면 사용자별 팬아웃
+      테이블이 필요한데, 그건 이 메신저의 설계(룸 하나에 행 하나)를 뒤집는 일이다.
+      그래서 UI 가 "상대에게서도 지워집니다" 를 반드시 알린 뒤 부른다.
+
+    ⚠ 관계 행만 지우고 계정은 건드리지 않는다 — 그래서 **검색 목록에는 계속 보인다**
+      (directory 는 친구 여부로 거르지 않는다). 나중에 다시 친구로 추가할 수 있다는
+      요구가 여기서 성립한다. tests/test_collab.py 가 이 성질을 고정한다.
+
+    반환: 지운 메시지 수.
+    """
     link = find_link(db, me.id, other_id)
-    if link is None:
-        return
-    if link.status == "blocked" and link.blocked_by != me.id:
-        raise PermissionError("차단된 관계입니다")
-    db.delete(link)
+    if link is None and not purge:
+        return 0
+    if link is not None:
+        if link.status == "blocked" and link.blocked_by != me.id:
+            raise PermissionError("차단된 관계입니다")
+        db.delete(link)
+    n = 0
+    if purge:
+        # 요청 취소(outgoing)로도 이 경로가 오지만, 그때는 애초에 대화가 없어 0 건이다.
+        n = db.execute(
+            delete(CollabMessage).where(CollabMessage.room_key == dm_room(me.id, other_id)),
+        ).rowcount or 0
     db.commit()
+    if n:
+        _audit(db, me.id, "collab_dm_purge", "collab_friend", str(other_id), {"messages": n})
+        db.commit()
+    return n
 
 
 # ── 메신저 ──────────────────────────────────────────────────────────────────

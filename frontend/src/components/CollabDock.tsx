@@ -8,6 +8,9 @@ import { collab, type CollabEvent } from "../lib/collab";
 import { colorOf, dmRoom } from "../lib/collabState";
 import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
+import { useMediaGuard } from "../lib/useMediaGuard";
+import type { MediaKind } from "../lib/collabPreflight";
+import { CollabBlockDialog } from "./CollabBlockDialog";
 import { showToast } from "../lib/toast";
 import { VideoTile } from "./CollabSessionPanel";
 import { MediaPermPanel } from "./MediaPermPanel";
@@ -95,6 +98,9 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   const [found, setFound] = useState<CollabUser[]>([]);
   const [searching, setSearching] = useState(false);
   const [peer, setPeer] = useState<CollabUser | null>(null);
+  // 친구 삭제 확인 대상. 확인 없이 지우면 안 된다 — **대화가 양쪽에서 사라지고 되돌릴 수 없다**
+  // (룸 하나에 행 하나라 '내 쪽만 삭제'는 이 메신저 설계에 없다).
+  const [unfriendAsk, setUnfriendAsk] = useState<CollabUser | null>(null);
   // 열린 대화들(2026-08-10 사용자 확정 — 사람별 탭). peer = 지금 보이는 탭.
   const [chats, setChats] = useState<CollabUser[]>([]);
   // 협진 창 동작(Setting>협진 로밍) — ✕ 동작·미디어 배타. 기본: 종료 / 배타 켬.
@@ -108,7 +114,6 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   const [mic, setMic] = useState(false);
   const [cam, setCam] = useState(false);
   const [screen, setScreen] = useState(false);
-  const [mediaBusy, setMediaBusy] = useState("");
   const [online, setOnline] = useState<Set<number>>(() => new Set(collab.online));
   // 연결 표시등은 **구독**해야 한다. collab.status 를 렌더 중에 읽기만 하면 WS 가 끊겨도
   // 이 컴포넌트가 다시 그려질 이유가 없어 초록불이 그대로 남는다(거짓 안심).
@@ -161,6 +166,13 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
       reload();
     } else if (e.t === "friend.accepted") {
       showToast(`${e.from.name} ${tr("님과 친구가 되었습니다")}`);
+      reload();
+    } else if (e.t === "dm.purged") {
+      // 상대가 나를 친구에서 지웠다(또는 내가 다른 창에서 지웠다). 이미 없는 메시지를
+      // 계속 보여 주면 다시 보내려다 실패한다 — 화면을 바로 비운다.
+      if (peer && e.room === dmRoom(meId, peer.id)) setMsgs([]);
+      setChats((prev) => prev.filter((x) => dmRoom(meId, x.id) !== e.room));
+      if (peer && e.room === dmRoom(meId, peer.id)) setPeer(null);
       reload();
     } else if (e.t === "chat") {
       const m = e.d;
@@ -244,8 +256,12 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
     if (draftRef.current) draftRef.current.textContent = "";
   };
 
-  const runMedia = async (work: () => Promise<void>, label: string) => {
-    if (mediaBusy) return;
+  /** 미디어 토글 — 켤 때마다 **서버가 막고 있는지 먼저 확인**한다(lib/useMediaGuard).
+   *  협진 패널(뷰어)과 같은 훅이다 — 두 곳에 따로 쓰면 안내가 갈린다. */
+  const guard = useMediaGuard();
+  const runMedia = async (kind: MediaKind, label: string, turningOn: boolean,
+                          work: () => Promise<void>) => {
+    if (guard.busy) return;
     // 다른 대화가 미디어 소유 중 — 배타(기본)면 시작 금지, 설정에서 껐으면 가져온다
     // (mesh.start 는 room 이 다르면 내부적으로 기존 통화를 정리한 뒤 새로 연다).
     if (foreignOwner && peer) {
@@ -256,15 +272,7 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
       mesh.start(meId, dmRoom(meId, peer.id));
       mesh.syncPeers([peer.id]);
     }
-    setMediaBusy(label);
-    try {
-      await work();
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : tr("권한 또는 장치를 확인하세요");
-      showToast(`${label} — ${tr("시작할 수 없습니다")}: ${reason}`, "error");
-    } finally {
-      setMediaBusy("");
-    }
+    await guard.run(kind, label, turningOn, work);
   };
 
   const act = (p: Promise<unknown>, ok: string) =>
@@ -351,6 +359,10 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
                             title={online.has(u.id) ? tr(inviteLabel ?? "협진 초대") : tr("오프라인 — 초대할 수 없습니다")}
                             onClick={() => onInvite(u)}>{tr("초대")}</button>
                   )}
+                  {/* 친구 삭제 — 확인 창을 거친다(대화가 양쪽에서 사라진다) */}
+                  <button style={{ fontSize: 11, padding: "2px 5px", color: "var(--stat-emergency, #f87171)" }}
+                          onClick={() => setUnfriendAsk(u)}
+                          title={tr("친구 삭제 — 대화도 함께 지워집니다")}>✕</button>
                 </span>
               } />
             );
@@ -457,24 +469,24 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
               <div style={{ padding: 6, borderBottom: "1px solid var(--border)",
                             background: "var(--bg-canvas)" }}>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
-                  <button onClick={() => void runMedia(() => mesh.setMicrophone(!mic), tr("음성"))}
-                          disabled={!!mediaBusy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
+                  <button onClick={() => void runMedia("microphone", tr("음성"), !mic, () => mesh.setMicrophone(!mic))}
+                          disabled={!!guard.busy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
                           className={mic ? "primary" : undefined}
                           style={{ fontSize: 11, padding: "4px 2px" }}
                           title={foreignOwner && dockCfg.media_exclusive ? tr("다른 대화에서 사용 중")
                                  : mic ? tr("마이크 끄기") : tr("음성 통화")}>
                     {mic ? `🎤 ${tr("음성 켜짐")}` : `🎤 ${tr("음성")}`}
                   </button>
-                  <button onClick={() => void runMedia(() => mesh.setCamera(!cam), tr("화상"))}
-                          disabled={!!mediaBusy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
+                  <button onClick={() => void runMedia("camera", tr("화상"), !cam, () => mesh.setCamera(!cam))}
+                          disabled={!!guard.busy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
                           className={cam ? "primary" : undefined}
                           style={{ fontSize: 11, padding: "4px 2px" }}
                           title={foreignOwner && dockCfg.media_exclusive ? tr("다른 대화에서 사용 중")
                                  : cam ? tr("카메라 끄기") : tr("화상 통화")}>
                     {cam ? `📹 ${tr("화상 켜짐")}` : `📹 ${tr("화상")}`}
                   </button>
-                  <button onClick={() => void runMedia(() => mesh.setScreenShare(!screen), tr("화면 공유"))}
-                          disabled={!!mediaBusy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
+                  <button onClick={() => void runMedia("display-capture", tr("화면 공유"), !screen, () => mesh.setScreenShare(!screen))}
+                          disabled={!!guard.busy || !peerOnline || (foreignOwner && dockCfg.media_exclusive)}
                           className={screen ? "primary" : undefined}
                           style={{ fontSize: 11, padding: "4px 2px" }}
                           title={foreignOwner && dockCfg.media_exclusive ? tr("다른 대화에서 사용 중")
@@ -487,9 +499,9 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
                     {tr("상대가 오프라인입니다. 접속하면 통화 버튼이 활성화됩니다.")}
                   </div>
                 )}
-                {mediaBusy && (
+                {guard.busy && (
                   <div style={{ marginTop: 4, fontSize: 10, color: "var(--text-secondary)" }}>
-                    {mediaBusy} — {tr("권한 확인 중…")}
+                    {guard.busy} — {tr("권한 확인 중…")}
                   </div>
                 )}
                 {!foreignOwner && (mic || cam || screen || peers.some((p) => (p.stream?.getTracks().length ?? 0) > 0)) && (
@@ -551,6 +563,51 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
               <MediaPermPanel compact />
             </>
           )}
+        </div>
+      )}
+      {/* 서버 차단 알림 — nginx 조치 안내는 토스트에 담기지 않는다 */}
+      <CollabBlockDialog items={guard.blocks} onClose={guard.dismiss} />
+
+      {/* 친구 삭제 확인 — 되돌릴 수 없는 것 두 가지를 **먼저** 말한다.
+          "다시 추가할 수 있다"도 같이 말해야 한다. 안 그러면 영구 차단으로 오해해 못 지운다. */}
+      {unfriendAsk && (
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) setUnfriendAsk(null); }}
+             style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 900,
+                      display: "grid", placeItems: "center" }}>
+          <div style={{ width: "min(400px, 92vw)", padding: 16, borderRadius: 8,
+                        background: "var(--bg-panel)", border: "1px solid var(--border)",
+                        boxShadow: "0 10px 40px rgba(0,0,0,.5)" }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 8 }}>
+              {tr("친구를 삭제할까요?")}
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 1.7, color: "var(--text-secondary)",
+                          marginBottom: 12 }}>
+              <b style={{ color: "var(--text-primary)" }}>{unfriendAsk.name}</b>
+              {unfriendAsk.hospital ? ` (${unfriendAsk.hospital})` : ""}
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18 }}>
+                <li style={{ color: "var(--stat-emergency, #f87171)" }}>
+                  {tr("주고받은 대화가 모두 삭제됩니다 — 상대 화면에서도 사라집니다.")}
+                </li>
+                <li>{tr("검색 목록에는 계속 보이므로 나중에 다시 친구로 추가할 수 있습니다.")}</li>
+                <li>{tr("차단이 아닙니다 — 상대가 다시 친구 요청을 보낼 수 있습니다.")}</li>
+              </ul>
+            </div>
+            <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+              <button onClick={() => setUnfriendAsk(null)} style={{ fontSize: 12 }}>
+                {tr("취소")}
+              </button>
+              <button style={{ fontSize: 12, background: "var(--stat-emergency, #f87171)",
+                               borderColor: "var(--stat-emergency, #f87171)", color: "#fff" }}
+                      onClick={() => {
+                        const u = unfriendAsk;
+                        setUnfriendAsk(null);
+                        closeChat(u);            // 열려 있던 탭·통화를 먼저 정리
+                        act(api.collabRemoveFriend(u.id), tr("친구와 대화를 삭제했습니다"));
+                      }}>
+                {tr("삭제")}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

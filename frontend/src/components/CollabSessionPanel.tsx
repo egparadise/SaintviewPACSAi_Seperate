@@ -9,6 +9,9 @@ import { colorOf, sessionRoom } from "../lib/collabState";
 import { closeAllPopouts, popoutStream, syncPopout } from "../lib/collabPopout";
 import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
+import { checkSocket, type BlockItem } from "../lib/collabPreflight";
+import { useMediaGuard } from "../lib/useMediaGuard";
+import { CollabBlockDialog } from "./CollabBlockDialog";
 import { showToast } from "../lib/toast";
 
 /** 위임 가능한 협진 capability — 백엔드 permissions.COLLAB_CAPS 와 같은 키.
@@ -154,7 +157,6 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
   const [mic, setMic] = useState(false);
   const [cam, setCam] = useState(false);
   const [screen, setScreen] = useState(false);
-  const [mediaBusy, setMediaBusy] = useState("");
   const [showChat, setShowChat] = useState(true);
   const [showVideo, setShowVideo] = useState(true);
   const [wantCaps, setWantCaps] = useState<string[]>(["collab.viewport"]);
@@ -197,18 +199,20 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
     mesh.syncPeers(joined.map((p) => p.id));
   }, [joined.map((p) => p.id).sort().join(",")]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  const runMedia = async (work: () => Promise<void>, label: string) => {
-    if (mediaBusy) return;
-    setMediaBusy(label);
-    try {
-      await work();
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : tr("권한 또는 장치를 확인하세요");
-      showToast(`${label} — ${tr("시작할 수 없습니다")}: ${reason}`, "error");
-    } finally {
-      setMediaBusy("");
-    }
-  };
+  // 미디어 시작 가드 — 켤 때마다 **서버가 막고 있는지 먼저 확인**한다(lib/useMediaGuard).
+  // 도크(CollabDock)와 같은 훅을 쓴다 — 두 곳에 따로 쓰면 안내가 갈린다.
+  const guard = useMediaGuard(session.participants, meId);
+  const mediaBusy = guard.busy;
+
+  // 협진 소켓 상시 감시 — 미디어를 켤 때만 보면 **메신저가 안 가는 것**은 못 잡는다.
+  // (sv70 에서 실제로 그랬다: "연결되었습니다" 라고 떠 있는데 메시지만 안 나갔다)
+  const [wsBlock, setWsBlock] = useState<BlockItem | null>(null);
+  useEffect(() => collab.onStatus((st) => {
+    const hit = checkSocket({ status: st, everOpened: collab.everOpened,
+                              lastCloseCode: collab.lastCloseCode })
+      .find((i) => i.serverSide);
+    setWsBlock(hit ?? null);
+  }), []);
 
   const send = () => {
     const body = draftRef.current?.innerText.trim() ?? "";
@@ -258,6 +262,21 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
           {isHost ? tr("종료") : tr("나가기")}
         </button>
       </div>
+
+      {/* 서버가 협진 소켓을 막고 있다 — 미디어를 켤 때만 알리면 '메시지가 안 가는' 것은
+          영영 원인을 모른다. 세션 중에는 항상 보이게 둔다. */}
+      {wsBlock && (
+        <button onClick={() => guard.showBlocks([wsBlock])}
+                style={{ display: "flex", alignItems: "center", gap: 6, width: "100%",
+                         padding: "5px 8px", fontSize: 11, textAlign: "left", border: "none",
+                         borderBottom: "1px solid var(--border)", cursor: "pointer",
+                         background: "rgba(248,113,113,0.14)",
+                         color: "var(--stat-emergency, #f87171)" }}>
+          <span>⚠</span>
+          <span style={{ flex: 1 }}>{tr("서버가 협진 연결을 막고 있습니다")}</span>
+          <span style={{ textDecoration: "underline" }}>{tr("조치 보기")}</span>
+        </button>
+      )}
 
       {/* ── 제어권 상태 ── */}
       <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)", fontSize: 11.5 }}>
@@ -338,19 +357,19 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
       <Section title={`${tr("화상채팅")} (${joined.length}${tr("명")})`} open={showVideo} onToggle={() => setShowVideo((v) => !v)}>
         <div style={{ padding: 6 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4, marginBottom: 6 }}>
-            <button onClick={() => void runMedia(() => mesh.setMicrophone(!mic), tr("마이크"))}
+            <button onClick={() => void guard.run("microphone", tr("마이크"), !mic, () => mesh.setMicrophone(!mic))}
                     disabled={!!mediaBusy}
                     className={mic ? "primary" : undefined}
                     style={{ flex: 1, fontSize: 11, padding: "3px 4px" }}
                     title={mic ? tr("마이크 끄기") : tr("마이크 켜기")}>{mic ? `🎙 ${tr("켜짐")}` : `🎙 ${tr("꺼짐")}`}</button>
-            <button onClick={() => void runMedia(() => mesh.setCamera(!cam), tr("카메라"))}
+            <button onClick={() => void guard.run("camera", tr("카메라"), !cam, () => mesh.setCamera(!cam))}
                     disabled={!!mediaBusy}
                     className={cam ? "primary" : undefined}
                     style={{ flex: 1, fontSize: 11, padding: "3px 4px" }}
                     title={cam ? tr("카메라 끄기") : screen ? tr("화면 공유를 끄고 카메라 켜기") : tr("카메라 켜기")}>
               {cam ? `📹 ${tr("켜짐")}` : `📹 ${tr("꺼짐")}`}
             </button>
-            <button onClick={() => void runMedia(() => mesh.setScreenShare(!screen), tr("화면 공유"))}
+            <button onClick={() => void guard.run("display-capture", tr("화면 공유"), !screen, () => mesh.setScreenShare(!screen))}
                     disabled={!!mediaBusy}
                     className={screen ? "primary" : undefined}
                     style={{ flex: 1, fontSize: 11, padding: "3px 4px" }}
@@ -360,7 +379,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
           </div>
           {mediaBusy && (
             <div style={{ fontSize: 10, color: "var(--text-secondary)", margin: "-2px 0 5px" }}>
-              {mediaBusy} — {tr("권한 확인 중…")}
+              {mediaBusy} — {tr("서버·권한 확인 중…")}
             </div>
           )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
@@ -506,6 +525,9 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
           );
         })}
       </div>
+      {/* 서버 차단 알림 — 조치가 nginx 설정이라 토스트로는 담기지 않는다. 그리고 이 화면을
+          보는 사람(판독의)과 조치할 사람(서버 관리자)이 다르므로 복사해 전달할 수 있어야 한다. */}
+      <CollabBlockDialog items={guard.blocks} onClose={guard.dismiss} />
     </div>
   );
 }

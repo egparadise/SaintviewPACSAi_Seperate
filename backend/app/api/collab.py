@@ -143,14 +143,23 @@ def friend_block(body: FriendTarget, blocked: bool = True,
 
 
 @router.post("/friends/remove")
-def friend_remove(body: FriendTarget, db: Session = Depends(get_db),
-                  user: dict = Depends(current_user)):
+async def friend_remove(body: FriendTarget, db: Session = Depends(get_db),
+                        user: dict = Depends(current_user)):
+    """친구 해제 — 관계를 지우고 **둘 사이의 대화를 전부 삭제**한다.
+
+    계정은 건드리지 않으므로 검색(디렉터리)에는 계속 보인다 — 나중에 다시 친구로 추가할 수 있다.
+    대화는 룸을 공유하므로 상대 화면에서도 사라진다. 그래서 열려 있는 상대 창에
+    dm.purged 를 보내 즉시 비운다 — 안 보내면 이미 없는 메시지를 계속 보고 있게 된다.
+    """
     me = _me(db, user)
     try:
-        svc.unfriend(db, me, body.other_id)
+        purged = svc.unfriend(db, me, body.other_id)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
-    return {"ok": True}
+    room = svc.dm_room(me.id, body.other_id)
+    await hub.send_many({me.id, body.other_id},
+                        {"t": "dm.purged", "room": room, "by": me.id, "n": purged})
+    return {"ok": True, "purged": purged}
 
 
 # ── 메신저 ──────────────────────────────────────────────────────────────────
