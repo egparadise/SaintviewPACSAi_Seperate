@@ -7,6 +7,7 @@ import {
   SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
+import { CollabDiagPanel } from "../components/CollabDiagPanel";
 import { MediaPermPanel } from "../components/MediaPermPanel";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
 import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
@@ -1692,6 +1693,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
 
             {page === "collab" && (
               <>
+                {/* 연결 문제 보기 — 서버가 막고 있는지 가려내고 조치를 알려 준다.
+                    맨 위에 둔 이유: 협진이 아예 안 될 때 사람이 제일 먼저 여는 곳이다.
+                    (미디어 권한 패널은 '연결은 되는데 장치가 안 되는' 다음 단계다) */}
+                <Group title={tr("연결 문제 보기")}>
+                  <CollabDiagPanel />
+                </Group>
                 {/* 협진 창 하단과 **같은 컴포넌트**(MediaPermPanel) — 두 곳이 갈리면 안내가 어긋난다 */}
                 <Group title={tr("미디어 권한·장치")}>
                   <div style={{ fontSize: 11.5, color: "var(--text-secondary)", marginBottom: 6 }}>

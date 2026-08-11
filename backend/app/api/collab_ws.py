@@ -150,21 +150,51 @@ async def _announce_presence(account_id: int, friends: list[int], online: bool) 
                         {"t": "presence", "id": account_id, "online": online})
 
 
+def _peer(websocket: WebSocket) -> str:
+    """요청 출처 — 프록시 뒤라 X-Forwarded-For 가 실제 클라이언트다.
+    거절 로그에서 "누가 계속 튕기는가" 를 가리는 유일한 단서라 함께 남긴다."""
+    fwd = websocket.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()[:45]
+    return (websocket.client.host if websocket.client else "?")[:45]
+
+
+def _reject(websocket: WebSocket, stat: str, reason: str) -> dict:
+    """거절 사실을 **남긴다**. 예전엔 조용히 close 만 해서, 왜 끊겼는지 사후에 알 길이
+    전혀 없었다(사용자는 '연결이 안 된다'만 말하고 서버에는 아무 흔적도 없었다)."""
+    detail = {"reason": stat, "at": _now_iso(), "ip": _peer(websocket),
+              "ua": websocket.headers.get("user-agent", "")[:120]}
+    hub.bump_stat(stat, detail)
+    logger.warning("collab WS 거절 [%s] %s ip=%s", stat, reason, detail["ip"])
+    return detail
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 @router.websocket("/api/collab/ws")
 async def collab_ws(websocket: WebSocket) -> None:
     user = ws_user(websocket)
     if user is None:
         # accept 전 close = 핸드셰이크 거부(HTTP 403). 브라우저에 자격증명이 되돌아가지 않는다.
+        _reject(websocket, "rej_auth", "토큰 없음·만료(서브프로토콜 sv.bearer 미도달 포함)")
         await websocket.close(code=CLOSE_UNAUTHORIZED)
         return
 
     ctx = await run_in_threadpool(_sync_context, user)
     if ctx is None:
+        _reject(websocket, "rej_account", f"협진 계정 행 없음 (sub={user.get('sub')})")
         await websocket.close(code=CLOSE_NO_ACCOUNT)
         return
 
     # 서브프로토콜을 반드시 echo 해야 브라우저가 핸드셰이크를 받아들인다
     await websocket.accept(subprotocol=WS_SUBPROTOCOL)
+    # 🔴 여기까지 왔다 = 앞단(nginx)이 업그레이드를 통과시켰다는 **증거**다.
+    #    이 값이 0 인데 REST 는 살아 있으면 프록시가 막고 있는 것이다(자가 점검의 근거).
+    hub.bump_stat("accepted")
 
     aid: int = ctx["account_id"]
     friends: list[int] = list(ctx["friend_ids"])
@@ -172,6 +202,7 @@ async def collab_ws(websocket: WebSocket) -> None:
                     display_name=ctx["display_name"], hospital_id=ctx["hospital_id"],
                     role=ctx["role"])
     if not ok:
+        _reject(websocket, "rej_limit", f"계정당 창 수 한도 초과 (account_id={aid})")
         await websocket.close(code=CLOSE_TOO_MANY)
         return
 
@@ -360,8 +391,10 @@ async def collab_ws(websocket: WebSocket) -> None:
                 continue
 
     except WebSocketDisconnect:
-        pass
+        hub.bump_stat("closed")
     except Exception:  # noqa: BLE001 — 소켓 하나의 사고가 서버를 흔들면 안 된다
+        hub.bump_stat("errors", {"reason": "errors", "at": _now_iso(),
+                                 "ip": _peer(websocket), "ua": f"account_id={aid}"})
         logger.exception("collab WS 처리 중 오류 (account_id=%s)", aid)
     finally:
         code = hub.session_of(websocket)

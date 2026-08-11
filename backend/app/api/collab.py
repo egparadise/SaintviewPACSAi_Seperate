@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -338,3 +338,92 @@ async def session_adopt(code: str, body: AdoptBody, db: Session = Depends(get_db
                                              "by": body.target_id})
     await hub.broadcast_session(code, {"t": "adopted", "target": body.target_id, "n": saved})
     return {"ok": True, "adopted": saved}
+
+
+# ── 연결 진단 (2026-08-11) ───────────────────────────────────────────────────
+#
+# 왜 필요한가: 서버가 협진을 막고 있을 때 **우리 시스템 안에는 아무 흔적도 남지 않았다**.
+# nginx 가 WebSocket 업그레이드를 거부하면 요청이 백엔드에 도달조차 못 하므로, 백엔드
+# 로그를 아무리 뒤져도 "아무 일도 없었던 것처럼" 보인다. 그래서 현장에서는 사용자가
+# "연결이 안 돼요" 라고만 말하고 관리자는 확인할 방법이 없었다.
+#
+# 두 방향으로 채운다:
+#   ① 서버가 스스로 아는 것을 보고한다      → GET  /collab/health
+#   ② 클라이언트가 내린 판정을 서버에 남긴다 → POST /collab/diag  (조회는 GET)
+
+class DiagReport(BaseModel):
+    code: str = Field(max_length=40)          # collabPreflight.BlockCode
+    server_side: bool = False
+    title: str = Field(default="", max_length=200)
+    detail: str = Field(default="", max_length=500)
+
+
+# 같은 사람이 같은 원인으로 계속 실패하면(재연결 루프) 감사 로그가 폭주한다.
+# 원인별로 이 간격 안에는 한 번만 남긴다 — 진단에는 '처음 언제부터'가 중요하지 횟수가 아니다.
+_DIAG_TTL = 300.0
+_diag_seen: dict[tuple[int, str], float] = {}
+
+
+@router.get("/health")
+def collab_health(request: Request, user: dict = Depends(current_user)):
+    """서버 자가 점검 — 백엔드가 **스스로 아는 것**만 보고한다.
+
+    🔴 판정의 핵심은 `ws.accepted` 다. 이 REST 응답을 받았다는 것은 프록시가 HTTP 는
+      넘겨 준다는 뜻인데, 그런데도 accepted 가 0 이면 **WebSocket 만** 막혀 있는 것이다
+      = nginx 업그레이드 블록 문제로 확정할 수 있다. 백엔드는 그 요청을 본 적도 없으므로
+      이 카운터가 없으면 영영 구별되지 않는다.
+
+    proxy_proto 는 nginx 가 넘긴 X-Forwarded-Proto — 앞단이 https 로 받았는지 알려 준다
+    (브라우저가 https 로 보였어도 프록시 구간이 http 면 헤더가 http 로 온다).
+    """
+    stat = hub.stats()
+    return {
+        "ok": True,
+        "proxy_proto": request.headers.get("x-forwarded-proto", ""),
+        "proxy_host": request.headers.get("x-forwarded-host", "") or request.headers.get("host", ""),
+        "ws": {k: stat[k] for k in
+               ("accepted", "rej_auth", "rej_account", "rej_limit", "closed", "errors")},
+        "sockets": stat["sockets"],
+        "accounts": stat["accounts"],
+        # WS 가 한 번도 수락되지 않았다 = 이 REST 는 되는데 업그레이드만 안 온다
+        "ws_never_accepted": stat["accepted"] == 0,
+        "recent_rejects": stat["recent_rejects"][-10:],
+    }
+
+
+@router.post("/diag")
+def collab_diag_report(body: DiagReport, db: Session = Depends(get_db),
+                       user: dict = Depends(current_user)):
+    """클라이언트가 내린 차단 판정을 서버에 남긴다(감사 로그).
+
+    사용자 화면에만 뜨고 마는 진단은 관리자에게 닿지 않는다. 판독의는 "안 돼요" 라고만
+    말하지 원인 코드를 옮겨 적지 않는다 — 그래서 화면이 판정한 순간 서버가 받아 둔다.
+    """
+    me = _me(db, user)
+    import time as _t
+
+    key = (me.id, body.code)
+    now = _t.monotonic()
+    seen = _diag_seen.get(key, 0.0)
+    if now - seen < _DIAG_TTL:
+        return {"ok": True, "recorded": False}      # 같은 원인 반복 — 조용히 넘긴다
+    _diag_seen[key] = now
+    svc.record_diag(db, me, code=body.code, server_side=body.server_side,
+                    title=body.title, detail=body.detail)
+    logger.warning("협진 연결 문제 보고 [%s] %s (account=%s)", body.code, body.title, me.username)
+    return {"ok": True, "recorded": True}
+
+
+@router.get("/diag")
+def collab_diag_list(limit: int = 50, mine: bool = True, db: Session = Depends(get_db),
+                     user: dict = Depends(current_user)):
+    """최근 연결 문제 목록.
+
+    범위: 기본은 **내 것만**. 전체(mine=false)는 관리자만 — 다른 사람이 언제 어디서
+    실패했는지는 운영 정보라 아무나 볼 것이 아니다. 관리자가 아니면 조용히 내 것으로
+    되돌린다(403 을 던지면 일반 사용자의 설정 화면이 오류로 보인다).
+    """
+    me = _me(db, user)
+    scope_all = (not mine) and (me.role == "admin")
+    return {"items": svc.list_diag(db, None if scope_all else me.id, limit=min(200, max(1, limit))),
+            "scope": "all" if scope_all else "mine"}

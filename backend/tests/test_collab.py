@@ -1209,3 +1209,66 @@ def test_unfriend_does_not_touch_session_room_chat(client, db, duo):
     assert len(left) == 1, "세션 룸 대화까지 지웠다"
     assert db.execute(_sel(CollabMessage).where(CollabMessage.room_key == dm))\
              .scalars().all() == []
+
+
+# ═══════════════ 연결 진단 — 탐지기 ①② (2026-08-11) ═══════════════
+def test_ws_reject_is_recorded_not_silent(client, db, duo):
+    """거절을 **조용히 하지 않는다** — 예전엔 close 만 해서 왜 끊겼는지 알 길이 없었다."""
+    from app.services.collab_hub import hub
+
+    before = hub.stats()["rej_auth"]
+    with pytest.raises(Exception):          # 인증 없는 핸드셰이크 = 거부
+        with client.websocket_connect("/api/collab/ws"):
+            pass
+    st = hub.stats()
+    assert st["rej_auth"] == before + 1, "거절이 카운트되지 않았다"
+    assert st["recent_rejects"], "거절 사유가 남지 않았다 — 사후 추적 불가"
+    assert st["recent_rejects"][-1]["reason"] == "rej_auth"
+
+
+def test_health_reports_ws_accepted_as_proxy_evidence(client, db, duo):
+    """🔴 REST 는 되는데 accepted 가 0 = 앞단(nginx)이 업그레이드를 막고 있다는 증거.
+
+    백엔드는 막힌 요청을 본 적조차 없으므로, 이 카운터가 없으면 '로그에 아무것도 없다'
+    로만 보인다(실제로 sv70 에서 그랬다).
+    """
+    tok = duo["hh"]["Authorization"].split(" ", 1)[1]
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as ws:
+        ws.receive_json()                    # hello — 여기까지 오면 업그레이드가 통과한 것
+
+    r = client.get("/api/collab/health", headers=duo["hh"])
+    assert r.status_code == 200, r.text
+    h = r.json()
+    assert h["ws"]["accepted"] >= 1
+    assert h["ws_never_accepted"] is False, "수락했는데 '한 번도 없음'으로 보고했다"
+    assert "proxy_proto" in h                # 프록시가 https 로 받았는지 — 앞단 진단용
+
+
+def test_diag_report_is_deduped_and_scoped(client, db, duo):
+    """진단 보고: 같은 원인 반복은 한 번만 남고, 남의 것은 관리자만 본다."""
+    body = {"code": "ws_blocked", "server_side": True, "title": "서버가 WebSocket 연결을 막고 있습니다"}
+    r1 = client.post("/api/collab/diag", headers=duo["hh"], json=body)
+    assert r1.status_code == 200 and r1.json()["recorded"] is True
+    # 재연결 루프로 같은 원인이 초당 몇 번씩 와도 감사 로그가 폭주하면 안 된다
+    r2 = client.post("/api/collab/diag", headers=duo["hh"], json=body)
+    assert r2.json()["recorded"] is False, "같은 원인이 중복 기록됐다"
+
+    mine = client.get("/api/collab/diag", headers=duo["hh"]).json()
+    assert mine["scope"] == "mine"
+    assert any(i["code"] == "ws_blocked" and i["server_side"] for i in mine["items"])
+
+    # 게스트(비관리자)는 전체를 요청해도 자기 것만 — 403 을 던지면 설정 화면이 오류로 보인다
+    other = client.get("/api/collab/diag?mine=false", headers=duo["gh"]).json()
+    assert other["scope"] == "mine"
+    assert all(i["code"] != "ws_blocked" for i in other["items"]), "남의 진단이 새어 나갔다"
+
+
+def test_diag_never_blocks_collab_when_it_fails(client, db, duo):
+    """진단 기록이 실패해도 협진 자체는 막히면 안 된다(본말전도 방지)."""
+    from app.services import collab_service as svc
+
+    me = db.get(type(duo["host"]), duo["host"].id)
+    # detail 이 과하게 길어도 잘라서 저장하고 예외를 밖으로 내지 않는다
+    svc.record_diag(db, me, code="x" * 200, server_side=True, title="t" * 500, detail="d" * 2000)
+    rows = svc.list_diag(db, me.id, limit=5)
+    assert rows and len(rows[0]["code"]) <= 64

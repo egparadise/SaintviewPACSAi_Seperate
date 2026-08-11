@@ -10,7 +10,7 @@ import { closeAllPopouts, popoutStream, syncPopout } from "../lib/collabPopout";
 import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { checkSocket, type BlockItem } from "../lib/collabPreflight";
-import { useMediaGuard } from "../lib/useMediaGuard";
+import { reportServerBlocks, useMediaGuard } from "../lib/useMediaGuard";
 import { CollabBlockDialog } from "./CollabBlockDialog";
 import { showToast } from "../lib/toast";
 
@@ -212,6 +212,8 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
                               lastCloseCode: collab.lastCloseCode })
       .find((i) => i.serverSide);
     setWsBlock(hit ?? null);
+    // 화면에만 띄우면 관리자에게 닿지 않는다 — 판정 순간 서버에 남긴다(서버가 5분 dedup).
+    if (hit) reportServerBlocks([hit]);
   }), []);
 
   const send = () => {

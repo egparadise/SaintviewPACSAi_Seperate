@@ -1084,3 +1084,49 @@ def _audit(db: Session, account_id: int | None, action: str, target_type: str,
            target_id: str, detail: dict) -> None:
     db.add(AuditLog(account_id=account_id, action=action, target_type=target_type,
                     target_id=str(target_id)[:64], detail=detail or {}))
+
+
+# ── 연결 진단 기록 (2026-08-11) ──────────────────────────────────────────────
+#
+# 별도 테이블을 만들지 않고 AuditLog 를 쓴다. 이유:
+#   · 마이그레이션이 필요 없다 — 진단 기능 때문에 스키마를 늘리는 것은 과하다
+#   · 관리자 화면의 감사 로그와 **같은 자리에서** 보인다(운영자가 두 곳을 안 봐도 된다)
+#   · 보존·정리 정책이 이미 있다
+# action 접두사 collab_diag 로 구분한다.
+DIAG_ACTION = "collab_diag"
+
+
+def record_diag(db: Session, me: Account, code: str, server_side: bool,
+                title: str = "", detail: str = "") -> None:
+    """클라이언트가 내린 차단 판정을 남긴다. 실패해도 조용히 넘긴다 —
+    진단 기록이 안 됐다고 협진 자체가 막히면 본말이 전도된다."""
+    try:
+        _audit(db, me.id, DIAG_ACTION, "collab", code[:64], {
+            "server_side": bool(server_side),
+            "title": title[:200],
+            "detail": detail[:500],
+            "username": me.username,
+        })
+        db.commit()
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.debug("협진 진단 기록 실패(무시)", exc_info=True)
+
+
+def list_diag(db: Session, account_id: int | None, limit: int = 50) -> list[dict]:
+    """최근 연결 문제. account_id=None 이면 전체(관리자 조회)."""
+    from app.models import AuditLog
+
+    stmt = select(AuditLog).where(AuditLog.action == DIAG_ACTION)
+    if account_id is not None:
+        stmt = stmt.where(AuditLog.account_id == account_id)
+    rows = db.execute(stmt.order_by(AuditLog.id.desc()).limit(limit)).scalars().all()
+    return [{
+        "id": r.id,
+        "at": r.created_at.isoformat() if r.created_at else None,
+        "code": r.target_id,
+        "server_side": bool((r.detail or {}).get("server_side")),
+        "title": (r.detail or {}).get("title", ""),
+        "detail": (r.detail or {}).get("detail", ""),
+        "who": (r.detail or {}).get("username", ""),
+    } for r in rows]

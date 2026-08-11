@@ -54,6 +54,19 @@ class CollabHub:
         self._annos: dict[str, list[dict[str, Any]]] = {}
         # 세션 code → 주석 id 시퀀스. DB 를 안 쓰므로 여기서 발번한다.
         self._anno_seq: dict[str, int] = {}
+        # ── 연결 통계 (프로세스 시작 이후 누적) ──────────────────────────────
+        # 🔴 진단의 핵심 증거다: **REST 는 되는데 accepted 가 0** 이면 WebSocket 요청이
+        #    백엔드에 도달조차 못 한 것이다 = 앞단(nginx)이 업그레이드를 막고 있다.
+        #    이 값이 없으면 "로그를 봐도 아무 일도 없었다" 로만 보인다(실제로 그랬다).
+        self._stat: dict[str, int] = {
+            "accepted": 0,      # 핸드셰이크 성립
+            "rej_auth": 0,      # 4401 토큰 없음·만료
+            "rej_account": 0,   # 4403 협진 계정 행 없음
+            "rej_limit": 0,     # 4429 창 수 한도
+            "closed": 0,        # 정상 종료
+            "errors": 0,        # 처리 중 예외
+        }
+        self._last_reject: list[dict[str, Any]] = []   # 최근 거절 몇 건(원인 추적용)
 
     # ── 연결 수명 ────────────────────────────────────────────────────────────
     def attach(self, ws: WebSocket, *, account_id: int, username: str,
@@ -189,6 +202,27 @@ class CollabHub:
     def annos_of(self, code: str, account_id: int) -> list[dict[str, Any]]:
         """한 사람이 그린 것만 — Master 의 [채택] 이 이 목록을 DB 로 옮긴다."""
         return [r for r in self._annos.get(code, ()) if r.get("by") == account_id]
+
+    # ── 연결 통계 ────────────────────────────────────────────────────────────
+    MAX_REJECT_LOG = 30      # 최근 거절만 남긴다 — 무한히 쌓으면 그것도 누수다
+
+    def bump_stat(self, key: str, detail: dict[str, Any] | None = None) -> None:
+        """WS 수락·거절 카운트. detail 이 있으면 최근 거절 목록에도 남긴다."""
+        if key in self._stat:
+            self._stat[key] += 1
+        if detail is not None:
+            self._last_reject.append(detail)
+            if len(self._last_reject) > self.MAX_REJECT_LOG:
+                del self._last_reject[: len(self._last_reject) - self.MAX_REJECT_LOG]
+
+    def stats(self) -> dict[str, Any]:
+        """자가 점검용 스냅샷. accepted==0 인데 REST 가 살아 있으면 앞단이 막고 있는 것이다."""
+        return {
+            **self._stat,
+            "sockets": len(self._meta),
+            "accounts": len(self._by_account),
+            "recent_rejects": list(self._last_reject),
+        }
 
     def control_rev(self, code: str) -> int:
         return self._ctl_rev.get(code, 0)

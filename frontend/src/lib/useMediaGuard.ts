@@ -11,6 +11,7 @@
 //      것부터 고친다(collabPreflight.checkMedia 가 그래서 첫 항목에서 멈춘다)
 //   ③ 실패하면 오류를 원인별로 갈라서 '서버 조치'와 '이 PC 에서 해결'을 구분한다
 import { useCallback, useState } from "react";
+import { api } from "../api";
 import type { CollabSeat } from "./collab";
 import { collab } from "./collab";
 import {
@@ -19,6 +20,20 @@ import {
 } from "./collabPreflight";
 import { t as tr } from "./i18n";
 import { showToast } from "./toast";
+
+/** 서버가 막고 있다는 판정을 **서버에 남긴다**.
+ *
+ *  화면에만 띄우고 끝내면 관리자에게 닿지 않는다 — 판독의는 "안 돼요" 라고만 말하지
+ *  원인 코드를 옮겨 적지 않는다. 서버가 같은 원인을 5분에 한 번만 기록하므로(재연결
+ *  루프로 초당 몇 번씩 와도) 여기서는 걸러 내지 않는다.
+ *  기록 실패는 삼킨다 — 진단이 안 됐다고 협진을 막으면 본말이 전도된다. */
+export function reportServerBlocks(items: BlockItem[]): void {
+  for (const it of items) {
+    if (!it.serverSide) continue;      // 이 PC 문제는 서버에 남길 이유가 없다
+    void api.collabDiagReport(it.code, true, it.title, it.subject ?? "")
+      .catch(() => { /* 무해 */ });
+  }
+}
 
 /** 설정에 넣어 둔 ICE 서버 개수 — TURN 경고 판정용(webrtcMesh 와 같은 저장 키). */
 function iceCount(): number {
@@ -67,6 +82,7 @@ export function useMediaGuard(seats?: CollabSeat[], meId = 0): MediaGuard {
         if (stop.length) {
           // 시도조차 하지 않는다 — 어차피 실패하고, 실패 오류가 원인을 덮어 버린다
           setBlocks([...pre, ...ws]);
+          reportServerBlocks([...pre, ...ws]);
           return;
         }
       }
@@ -75,12 +91,12 @@ export function useMediaGuard(seats?: CollabSeat[], meId = 0): MediaGuard {
       // ── ③ 켜졌으면 타 망 경고 ─────────────────────────────────────────
       if (turningOn) {
         const warn = checkTurn(hasCrossSitePeer(seats, meId), iceCount());
-        if (warn.length) setBlocks(warn);
+        if (warn.length) { setBlocks(warn); reportServerBlocks(warn); }
       }
     } catch (e) {
       const item = classifyMediaError(kind, (e as { name?: string })?.name ?? "",
                                       e instanceof Error ? e.message : String(e));
-      if (shouldAlert([item])) setBlocks([item]);
+      if (shouldAlert([item])) { setBlocks([item]); reportServerBlocks([item]); }
       else showToast(`${label} — ${tr(item.title)}`);   // 사용자가 취소한 것 등
     } finally {
       setBusy("");

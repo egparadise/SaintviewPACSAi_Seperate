@@ -943,8 +943,18 @@ export const api = {
     req<{ ok: boolean }>(`/api/collab/friends/block?blocked=${blocked}`,
       { method: "POST", body: JSON.stringify({ other_id }) }),
   collabRemoveFriend: (other_id: number) =>
-    req<{ ok: boolean }>("/api/collab/friends/remove",
+    req<{ ok: boolean; purged: number }>("/api/collab/friends/remove",
       { method: "POST", body: JSON.stringify({ other_id }) }),
+  // ── 연결 진단 — 서버가 막고 있는지 확인·기록·조회 ──
+  /** 서버 자가 점검. ws_never_accepted=true 인데 이 응답을 받았다 = 앞단이 WS 만 막고 있다. */
+  collabHealth: () => req<CollabHealth>("/api/collab/health"),
+  /** 화면이 내린 판정을 서버에 남긴다 — 사용자는 원인 코드를 옮겨 적지 않는다 */
+  collabDiagReport: (code: string, server_side: boolean, title = "", detail = "") =>
+    req<{ ok: boolean; recorded: boolean }>("/api/collab/diag",
+      { method: "POST", body: JSON.stringify({ code, server_side, title, detail }) }),
+  collabDiagList: (mine = true, limit = 50) =>
+    req<{ items: CollabDiagRow[]; scope: "mine" | "all" }>(
+      `/api/collab/diag?mine=${mine}&limit=${limit}`),
   /** 룸 백필 — WS 로는 신규만 오므로 과거 메시지는 여기서 읽는다(before_id = 무한 스크롤) */
   collabMessages: (room: string, before_id = 0) =>
     req<{ items: CollabMessage[] }>(
@@ -1443,6 +1453,31 @@ export interface CollabFriends {
   outgoing: CollabUser[];   // 내가 보낸 요청
   blocked: CollabUser[];
   unread: Record<string, number>;   // room_key → 안읽음 수
+}
+
+/** 협진 서버 자가 점검. 백엔드가 **스스로 아는 것**만 담는다 —
+ *  nginx 가 막은 요청은 여기 도달조차 안 하므로 그 부재(ws_never_accepted)가 증거다. */
+export interface CollabHealth {
+  ok: boolean;
+  proxy_proto: string;      // nginx 가 넘긴 X-Forwarded-Proto ("https" 여야 정상)
+  proxy_host: string;
+  ws: { accepted: number; rej_auth: number; rej_account: number;
+        rej_limit: number; closed: number; errors: number };
+  sockets: number;
+  accounts: number;
+  ws_never_accepted: boolean;
+  recent_rejects: { reason: string; at: string; ip: string; ua: string }[];
+}
+
+/** 기록된 연결 문제 한 건 */
+export interface CollabDiagRow {
+  id: number;
+  at: string | null;
+  code: string;
+  server_side: boolean;
+  title: string;
+  detail: string;
+  who: string;
 }
 export type StudyAdminActionKind = "delete" | "move" | "match" | "unmatch" | "copy";
 
