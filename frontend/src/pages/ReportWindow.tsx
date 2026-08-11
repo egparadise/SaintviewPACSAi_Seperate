@@ -571,6 +571,27 @@ export function ReportWindow() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // ── 단어 자동 완성 — 어휘 = (범위 설정에 따라) 템플릿 문장 + 과거 판독문(코퍼스·열람분) ──
+  // ⚠ 이 훅은 **아래 `if (!detail) return` 보다 반드시 위**에 있어야 한다.
+  //    detail 은 비동기로 온다 — 훅이 조기 반환 뒤에 있으면 첫 렌더에서만 훅 수가 적어
+  //    "Rendered more hooks than during the previous render" 로 판독 창이 통째로 죽는다.
+  //    실제로 그렇게 죽었다(2026-08-12). 타입 검사·빌드는 전부 통과하므로 눈으로는 안 보인다 —
+  //    회귀 방어는 tests/hook_order_rule.test.mjs 가 소스를 훑어서 한다.
+  const wcVocab = useMemo(() => {
+    if (!wcOn) return new Map<string, number>();
+    const texts: string[] = [];
+    if (wcScope.templates) {
+      for (const p of [...phrases, ...localPhrases, ...svPhrases]) {
+        if (p.reading_text) texts.push(p.reading_text);
+        if (p.text) texts.push(p.text);
+      }
+    }
+    if (wcScope.history) for (const t of Object.values(pastTexts)) if (t) texts.push(t);
+    const v = buildVocab(texts);
+    if (wcScope.history) for (const [w, n] of Object.entries(wcCorpus)) v.set(w, (v.get(w) ?? 0) + n);
+    return v;
+  }, [wcOn, wcScope, phrases, localPhrases, svPhrases, pastTexts, wcCorpus]);
+
   if (!detail) {
     return (
       <div style={{ display: "grid", placeItems: "center", height: "100%", color: msg ? "var(--stat-emergency)" : "var(--text-secondary)" }}>
@@ -599,22 +620,6 @@ export function ReportWindow() {
   });
   const phraseList = [...phrases, ...localPhrases, ...svPhrases]
     .filter((p) => p.kind === (rightTab === "std" ? "phrase" : "template"));
-
-  // ── 단어 자동 완성 — 어휘 = (범위 설정에 따라) 템플릿 문장 + 과거 판독문(코퍼스·열람분) ──
-  const wcVocab = useMemo(() => {
-    if (!wcOn) return new Map<string, number>();
-    const texts: string[] = [];
-    if (wcScope.templates) {
-      for (const p of [...phrases, ...localPhrases, ...svPhrases]) {
-        if (p.reading_text) texts.push(p.reading_text);
-        if (p.text) texts.push(p.text);
-      }
-    }
-    if (wcScope.history) for (const t of Object.values(pastTexts)) if (t) texts.push(t);
-    const v = buildVocab(texts);
-    if (wcScope.history) for (const [w, n] of Object.entries(wcCorpus)) v.set(w, (v.get(w) ?? 0) + n);
-    return v;
-  }, [wcOn, wcScope, phrases, localPhrases, svPhrases, pastTexts, wcCorpus]);
 
   /** 입력 변화 → 캐럿 앞 조각으로 예측 갱신 — 입력을 이어가면 후보가 좁혀진다 */
   const wcUpdate = (field: "reading" | "conclusion", el: HTMLTextAreaElement) => {
