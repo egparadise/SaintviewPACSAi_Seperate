@@ -1895,6 +1895,38 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                         {tr("마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).")}
                       </div>
                     </Group>
+                    {/* 문장 자동 완성(2026-08-11 사용자 확정) — 판독창 상단 Word completion 체크와
+                        같은 키(report.prefs.word_complete). 기본 꺼짐. */}
+                    <Group title={tr("문장 자동 완성")}>
+                      <Row label={tr("사용")}>
+                        <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
+                          <input type="checkbox" checked={rdOpts.word_complete === true}
+                                 onChange={(e) => setRdOpts((p) => ({ ...p, word_complete: e.target.checked }))} />
+                          {tr("판독문 입력 중 예측 단어 표시 — Enter 로 완성 (판독창 상단 Word completion 체크와 연동)")}
+                        </label>
+                      </Row>
+                      <Row label={tr("적용 범위")}>
+                        <span style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12 }}>
+                          {([["templates", "템플릿"], ["history", "과거 판독문"]] as const).map(([k, label]) => {
+                            const sc = (rdOpts.word_complete_scope as { templates?: boolean; history?: boolean } | undefined) ?? {};
+                            const on = sc[k] !== false;
+                            return (
+                              <label key={k} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                                <input type="checkbox" checked={on}
+                                       onChange={(e) => setRdOpts((p) => ({
+                                         ...p,
+                                         word_complete_scope: { templates: sc.templates !== false, history: sc.history !== false, [k]: e.target.checked },
+                                       }))} />
+                                {tr(label)}
+                              </label>
+                            );
+                          })}
+                        </span>
+                      </Row>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                        {tr("초성(예: ㅍㄹ)이나 첫 글자를 입력하면 예측 단어가 나타나고, 계속 입력하면 후보가 좁혀집니다. 과거 판독문 어휘는 판독을 저장할 때마다 계정에 누적됩니다(기본 꺼짐).")}
+                      </div>
+                    </Group>
                     <Group title={tr("Compare — 비교할 과거 검사를 어디서 고를까")}>
                       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                         {(["patient", "reader"] as CompareBasisKind[]).map((k) => (

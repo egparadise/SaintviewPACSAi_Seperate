@@ -18,6 +18,7 @@ ALLOWED_KEYS = {
     "viewer.prefs",          # 사용자 뷰어 환경(행잉·오버레이)
     # 기기 프로필(2026-08-10 사용자 확정) — 계정당 3슬롯. 레지스트리 + 장비 의존 오버레이
     "device.slots",          # {devices:[{id,slot,label,screen,last_seen}]} — 슬롯 배정 대장
+    "report.corpus",         # 단어 자동 완성 코퍼스 {words:{단어:빈도}} — 저장 판독문 축적(2026-08-11)
     "viewer.prefs.dev1", "viewer.prefs.dev2", "viewer.prefs.dev3",        # 모니터 구성 오버레이
     "worklist.prefs.dev1", "worklist.prefs.dev2", "worklist.prefs.dev3",  # 패널 크기 오버레이
     "report.phrases",        # 상용구 사전 (화면분석 §5.6 Predefined Readings)
@@ -62,7 +63,7 @@ GLOBAL_ONLY_KEYS = {
 # 규칙: '뷰어에 따라 바꿀 수 있는 모든 값'(툴·레이아웃·글자크기·행잉·워크리스트 구성)은 계정에 귀속.
 USER_ONLY_KEYS = {
     "viewer.prefs", "worklist.prefs", "report.prefs", "viewer.hp",
-    "device.slots",
+    "device.slots", "report.corpus",
     "viewer.prefs.dev1", "viewer.prefs.dev2", "viewer.prefs.dev3",
     "worklist.prefs.dev1", "worklist.prefs.dev2", "worklist.prefs.dev3",
     "worklist.tree", "worklist.tabs", "report.phrases_local",

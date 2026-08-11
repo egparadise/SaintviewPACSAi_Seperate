@@ -1,6 +1,6 @@
 // 전용 판독 창 — 뷰어 [Reading] 버튼으로 열리는 별도 페이지 (?report=1&study=ID)
 // 레이아웃: [판독|판독 기록|단축키|템플릿] 탭 · Font · CVR · ◀▶ · 초기화/저장/승인 · Reading/Conclusion
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail, type StudyRow } from "../api";
 import { StudyGrid, VIEWER_COL_DEFAULT, sbOpParam, sbScopeParam } from "./Worklist";
 import { onStudySync, onViewerCloseAll, postStudySync } from "../lib/sync";
@@ -11,6 +11,7 @@ import { histThumbLimiter, limitedMap } from "../lib/netLimit";
 import { MicIcon } from "../components/MicIcon";
 import { SttLangChip } from "../components/SttLangChip";
 import { setSttEnabled } from "../lib/sttLang";
+import { buildVocab, currentPrefix, mergeVocab, suggestWords } from "../lib/wordComplete";
 import { t as tr, useLang } from "../lib/i18n";
 
 type Tab = "read" | "hist" | "std" | "tpl";
@@ -71,6 +72,27 @@ export function ReportWindow() {
   const [fontPx, setFontPx] = useState(12);
   const [reading, setReading] = useState("");
   const [conclusion, setConclusion] = useState("");
+  // 단어 자동 완성(2026-08-11 사용자 확정) — 기본 uncheck. report.prefs.word_complete 가
+  // 설정>판독 '문장 자동 완성'과 **같은 키**(양방향). 범위: 템플릿 / 과거 판독문.
+  const [wcOn, setWcOn] = useState(false);
+  const [wcScope, setWcScope] = useState<{ templates: boolean; history: boolean }>(
+    { templates: true, history: true });
+  const [wcCorpus, setWcCorpus] = useState<Record<string, number>>({});
+  const [wcSug, setWcSug] = useState<{ field: "reading" | "conclusion"; prefix: string; words: string[] } | null>(null);
+  const readingRef = useRef<HTMLTextAreaElement | null>(null);
+  const conclusionRef = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    api.getSetting("report.corpus").then((r) => {
+      const w = (r.value as { words?: Record<string, number> }).words;
+      if (w) setWcCorpus(w);
+    }).catch(() => {});
+  }, []);
+  const toggleWc = (on: boolean) => {
+    setWcOn(on);
+    if (!on) setWcSug(null);
+    api.getSetting("report.prefs").then((r) =>
+      api.putSetting("report.prefs", { ...r.value, word_complete: on }, "user")).catch(() => {});
+  };
   const [touched, setTouched] = useState(false);
   // 음성 판독(STT) — 마지막 포커스 필드(기본 Reading)에 전사 텍스트 삽입
   const dictField = useRef<"reading" | "conclusion">("reading");
@@ -378,6 +400,11 @@ export function ReportWindow() {
         api.getSetting("report.prefs").then((r) => {
           const v = r.value as Record<string, unknown>;
           setRdOpts(v);
+          if (v.word_complete === true) setWcOn(true);   // 기본 uncheck — 정확히 true 만 켠다
+          {
+            const ws = (v as { word_complete_scope?: { templates?: boolean; history?: boolean } }).word_complete_scope;
+            if (ws) setWcScope({ templates: ws.templates !== false, history: ws.history !== false });
+          }
           {   // STT 언어 집합 로밍 수신 — 다른 PC 에서 고른 집합이 이 창 칩에도 적용된다
             const sl = (v as { stt_langs?: unknown }).stt_langs;
             if (Array.isArray(sl)) setSttEnabled(sl.filter((x): x is string => typeof x === "string"));
@@ -451,6 +478,16 @@ export function ReportWindow() {
       setReports(r.items);
       setTouched(false);
       if (rdOpts.save_alert) alert(tr("리포트가 저장되었습니다")); else setMsg(tr("저장됨"));
+      // 자동 완성 코퍼스 축적(2026-08-11) — 내가 저장한 판독문의 단어를 계정에 누적(상위 3000).
+      // "그 판독자가 과거에 했던 판독문 기반" — 저장할 때마다 어휘가 자란다(Live 저장 포함).
+      if (wcOn) {
+        void api.getSetting("report.corpus").then((r) => {
+          const words = mergeVocab(((r.value as { words?: Record<string, number> }).words) ?? {},
+                                   [reading, conclusion]);
+          setWcCorpus(words);
+          return api.putSetting("report.corpus", { words }, "user");
+        }).catch(() => {});
+      }
     } catch (e) {
       alert(e instanceof Error ? e.message : tr("저장 실패"));
       void syncLock();   // 다른 창에서 잠금 변경(409) 등 — 서버 기준 잠금 상태 재동기화
@@ -562,6 +599,66 @@ export function ReportWindow() {
   });
   const phraseList = [...phrases, ...localPhrases, ...svPhrases]
     .filter((p) => p.kind === (rightTab === "std" ? "phrase" : "template"));
+
+  // ── 단어 자동 완성 — 어휘 = (범위 설정에 따라) 템플릿 문장 + 과거 판독문(코퍼스·열람분) ──
+  const wcVocab = useMemo(() => {
+    if (!wcOn) return new Map<string, number>();
+    const texts: string[] = [];
+    if (wcScope.templates) {
+      for (const p of [...phrases, ...localPhrases, ...svPhrases]) {
+        if (p.reading_text) texts.push(p.reading_text);
+        if (p.text) texts.push(p.text);
+      }
+    }
+    if (wcScope.history) for (const t of Object.values(pastTexts)) if (t) texts.push(t);
+    const v = buildVocab(texts);
+    if (wcScope.history) for (const [w, n] of Object.entries(wcCorpus)) v.set(w, (v.get(w) ?? 0) + n);
+    return v;
+  }, [wcOn, wcScope, phrases, localPhrases, svPhrases, pastTexts, wcCorpus]);
+
+  /** 입력 변화 → 캐럿 앞 조각으로 예측 갱신 — 입력을 이어가면 후보가 좁혀진다 */
+  const wcUpdate = (field: "reading" | "conclusion", el: HTMLTextAreaElement) => {
+    if (!wcOn) { if (wcSug) setWcSug(null); return; }
+    const prefix = currentPrefix(el.value, el.selectionStart ?? el.value.length);
+    const words = prefix ? suggestWords(prefix, wcVocab, 5) : [];
+    setWcSug(words.length ? { field, prefix, words } : null);
+  };
+  /** Enter(또는 후보 클릭) — 조각을 단어로 완성하고 공백 하나를 붙인다 */
+  const wcAccept = (word?: string) => {
+    const s = wcSug;
+    if (!s) return;
+    const el = (s.field === "reading" ? readingRef : conclusionRef).current;
+    if (!el) return;
+    const w = word ?? s.words[0];
+    const caret = el.selectionStart ?? el.value.length;
+    const before = el.value.slice(0, caret - s.prefix.length) + w + " ";
+    const next = before + el.value.slice(caret);
+    (s.field === "reading" ? setReading : setConclusion)(next);
+    setWcSug(null);
+    setTouched(true);
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(before.length, before.length); });
+  };
+  const wcKeyDown = (field: "reading" | "conclusion") =>
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (!wcSug || wcSug.field !== field) return;
+      // 제안이 떠 있을 때만 Enter 를 가로챈다(줄바꿈은 제안이 없을 때 그대로). IME 조합 중 제외.
+      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); wcAccept(); }
+      else if (e.key === "Escape") setWcSug(null);
+    };
+  const wcBar = (field: "reading" | "conclusion") =>
+    wcSug && wcSug.field === field ? (
+      <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12, padding: "2px 2px", flexWrap: "wrap" }}>
+        <span style={{ color: "var(--text-secondary)" }}>{tr("자동 완성")}</span>
+        {wcSug.words.map((w, i) => (
+          <button key={w} onMouseDown={(e) => { e.preventDefault(); wcAccept(w); }}
+                  style={{ fontSize: 12, padding: "1px 8px", borderRadius: 4,
+                           fontWeight: i === 0 ? 700 : 400,
+                           border: i === 0 ? "1px solid var(--accent)" : "1px solid var(--border)" }}>
+            {w}{i === 0 ? " ⏎" : ""}
+          </button>
+        ))}
+      </div>
+    ) : null;
   // History 목록 — Same Compare 시 선택 기준(refExam)과 같은 장비·검사명(부위)만, 검사일 최신순
   const refExam = detail.related_exams.find((e) => e.id === selPast) ?? null;
   const histList = [...detail.related_exams]
@@ -777,6 +874,13 @@ export function ReportWindow() {
               <input type="checkbox" checked={wlDock} onChange={(e) => toggleWlDock(e.target.checked)} />
               {tr("Worklist 뷰어")}
             </label>
+            {/* Word completion(2026-08-11 사용자 확정) — Worklist 체크 옆, 기본 uncheck.
+                설정>판독>문장 자동 완성과 같은 키(report.prefs.word_complete) — 양방향. */}
+            <label title={tr("단어 자동 완성 — 템플릿·과거 판독문 기반 예측, Enter 로 완성 (범위는 설정>판독>문장 자동 완성)")}
+                   style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              <input type="checkbox" checked={wcOn} onChange={(e) => toggleWc(e.target.checked)} />
+              Word completion
+            </label>
             <label title={tr("CVR Notice — critical 소견 경고")} style={{ display: "flex", gap: 4, alignItems: "center" }}>
               <input type="checkbox" checked={!!rdOpts.cvr_notice}
                      onChange={(e) => setRdOpts((p) => ({ ...p, cvr_notice: e.target.checked }))} />
@@ -830,17 +934,21 @@ export function ReportWindow() {
             <div style={labelStyle}>Refer Comment</div>
             <input readOnly value={detail.referring_physician ?? ""} style={inStyle} />
             <div style={labelStyle}>Reading {dictField.current === "reading" && dictation.recording && <span style={{ color: "var(--stat-emergency)" }}>{tr("● 음성 입력 중")}</span>}</div>
-            <textarea value={reading} placeholder={tr("판독 소견을 입력하세요 (마이크로 음성 입력 가능)")} disabled={finalized || locked}
+            <textarea ref={readingRef} value={reading} placeholder={tr("판독 소견을 입력하세요 (마이크로 음성 입력 가능)")} disabled={finalized || locked}
                       title={locked ? LOCK_TIP : undefined}
                       onFocus={() => { dictField.current = "reading"; }}
-                      onChange={(e) => { setReading(e.target.value); setTouched(true); lastTypedRef.current = Date.now(); }}
+                      onKeyDown={wcKeyDown("reading")}
+                      onChange={(e) => { setReading(e.target.value); setTouched(true); lastTypedRef.current = Date.now(); wcUpdate("reading", e.target); }}
                       style={{ ...taStyle, minHeight: 140, flex: 1.2 }} />
+            {wcBar("reading")}
             <div style={labelStyle}>Conclusion {dictField.current === "conclusion" && dictation.recording && <span style={{ color: "var(--stat-emergency)" }}>{tr("● 음성 입력 중")}</span>}</div>
-            <textarea value={conclusion} placeholder={tr("결론을 입력하세요 (마이크로 음성 입력 가능)")} disabled={finalized || locked}
+            <textarea ref={conclusionRef} value={conclusion} placeholder={tr("결론을 입력하세요 (마이크로 음성 입력 가능)")} disabled={finalized || locked}
                       title={locked ? LOCK_TIP : undefined}
                       onFocus={() => { dictField.current = "conclusion"; }}
-                      onChange={(e) => { setConclusion(e.target.value); lastTypedRef.current = Date.now(); }}
+                      onKeyDown={wcKeyDown("conclusion")}
+                      onChange={(e) => { setConclusion(e.target.value); lastTypedRef.current = Date.now(); wcUpdate("conclusion", e.target); }}
                       style={{ ...taStyle, minHeight: 110, flex: 1 }} />
+            {wcBar("conclusion")}
             {sig && (
               <div style={{ fontSize: 12.5, color: "var(--stat-final)" }}>
                 ✍ {sig.name}{sig.license_no && ` (${tr("면허 제")}${sig.license_no}${tr("호")})`}{(sig as { major_no?: string }).major_no && ` · ${tr("전문의 제")}${(sig as { major_no?: string }).major_no}${tr("호")}`} · {sig.signed_at?.slice(0, 16).replace("T", " ")}

@@ -2860,5 +2860,12 @@ const d: Record<string, string> = {
   "인식 언어": "Idiomas de reconocimiento",
   "마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).": "Haga clic en el chip de idioma junto al micrófono o pulse Alt+L para alternar entre los idiomas seleccionados. Debe elegir al menos dos idiomas (predeterminado: coreano e inglés).",
   "음성 인식 언어 — 클릭 또는 Alt+L 로 전환 (설정>판독>음성 판독에서 언어 선택)": "Idioma de reconocimiento de voz — clic o Alt+L para cambiar (elija idiomas en Ajustes > Lectura > Dictado por voz)",
+  "자동 완성": "Sugerencias",
+  "문장 자동 완성": "Autocompletado",
+  "적용 범위": "Fuentes",
+  "과거 판독문": "Informes previos",
+  "단어 자동 완성 — 템플릿·과거 판독문 기반 예측, Enter 로 완성 (범위는 설정>판독>문장 자동 완성)": "Autocompletado — predicciones de sus plantillas e informes previos; Enter para aceptar (fuentes en Ajustes > Lectura > Autocompletado)",
+  "판독문 입력 중 예측 단어 표시 — Enter 로 완성 (판독창 상단 Word completion 체크와 연동)": "Mostrar palabras predichas al escribir — Enter para completar (vinculado a la casilla Word completion de la ventana de lectura)",
+  "초성(예: ㅍㄹ)이나 첫 글자를 입력하면 예측 단어가 나타나고, 계속 입력하면 후보가 좁혀집니다. 과거 판독문 어휘는 판독을 저장할 때마다 계정에 누적됩니다(기본 꺼짐).": "Al escribir consonantes iniciales (p. ej., ㅍㄹ) o las primeras letras aparecen palabras predichas; siga escribiendo para acotar. El vocabulario de informes previos se acumula en su cuenta con cada guardado (desactivado por defecto).",
 };
 export default d;

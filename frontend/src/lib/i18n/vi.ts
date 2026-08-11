@@ -2860,5 +2860,12 @@ const d: Record<string, string> = {
   "인식 언어": "Ngôn ngữ nhận dạng",
   "마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).": "Nhấp chip ngôn ngữ cạnh biểu tượng micrô hoặc nhấn Alt+L để chuyển giữa các ngôn ngữ đã chọn. Phải chọn ít nhất hai ngôn ngữ (mặc định: Hàn·Anh).",
   "음성 인식 언어 — 클릭 또는 Alt+L 로 전환 (설정>판독>음성 판독에서 언어 선택)": "Ngôn ngữ nhận dạng giọng nói — nhấp hoặc Alt+L để chuyển (chọn trong Cài đặt > Đọc > Đọc bằng giọng nói)",
+  "자동 완성": "Gợi ý",
+  "문장 자동 완성": "Tự hoàn thành từ",
+  "적용 범위": "Phạm vi áp dụng",
+  "과거 판독문": "Bài đọc trước đây",
+  "단어 자동 완성 — 템플릿·과거 판독문 기반 예측, Enter 로 완성 (범위는 설정>판독>문장 자동 완성)": "Tự hoàn thành từ — dự đoán từ mẫu và bài đọc trước; nhấn Enter để chấp nhận (phạm vi trong Cài đặt > Đọc > Tự hoàn thành)",
+  "판독문 입력 중 예측 단어 표시 — Enter 로 완성 (판독창 상단 Word completion 체크와 연동)": "Hiển thị từ dự đoán khi nhập bài đọc — Enter để hoàn thành (liên kết với ô Word completion đầu cửa sổ đọc)",
+  "초성(예: ㅍㄹ)이나 첫 글자를 입력하면 예측 단어가 나타나고, 계속 입력하면 후보가 좁혀집니다. 과거 판독문 어휘는 판독을 저장할 때마다 계정에 누적됩니다(기본 꺼짐).": "Gõ phụ âm đầu (vd: ㅍㄹ) hoặc chữ cái đầu sẽ hiện từ dự đoán; gõ tiếp để thu hẹp. Từ vựng bài đọc cũ tích lũy vào tài khoản mỗi lần lưu (mặc định tắt).",
 };
 export default d;

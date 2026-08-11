@@ -2860,5 +2860,12 @@ const d: Record<string, string> = {
   "인식 언어": "Erkennungssprachen",
   "마이크 아이콘 옆 언어 칩을 클릭하거나 Alt+L 을 누르면 선택한 언어들 사이에서 전환됩니다. 최소 2개 언어를 선택해야 합니다(기본: 한국어·영어).": "Klicken Sie auf den Sprach-Chip neben dem Mikrofon oder drücken Sie Alt+L, um zwischen den gewählten Sprachen zu wechseln. Mindestens zwei Sprachen sind nötig (Standard: Koreanisch und Englisch).",
   "음성 인식 언어 — 클릭 또는 Alt+L 로 전환 (설정>판독>음성 판독에서 언어 선택)": "Spracherkennungssprache — Klick oder Alt+L zum Wechseln (Sprachen unter Einstellungen > Befundung > Sprachdiktat)",
+  "자동 완성": "Vervollständigung",
+  "문장 자동 완성": "Wortvervollständigung",
+  "적용 범위": "Quellen",
+  "과거 판독문": "Frühere Befunde",
+  "단어 자동 완성 — 템플릿·과거 판독문 기반 예측, Enter 로 완성 (범위는 설정>판독>문장 자동 완성)": "Wortvervollständigung — Vorhersagen aus Vorlagen und früheren Befunden; Enter übernimmt (Quellen unter Einstellungen > Befundung > Wortvervollständigung)",
+  "판독문 입력 중 예측 단어 표시 — Enter 로 완성 (판독창 상단 Word completion 체크와 연동)": "Wortvorschläge beim Schreiben anzeigen — Enter übernimmt (mit dem Word-completion-Kästchen oben im Befundfenster verknüpft)",
+  "초성(예: ㅍㄹ)이나 첫 글자를 입력하면 예측 단어가 나타나고, 계속 입력하면 후보가 좁혀집니다. 과거 판독문 어휘는 판독을 저장할 때마다 계정에 누적됩니다(기본 꺼짐).": "Anfangskonsonanten (z. B. ㅍㄹ) oder erste Buchstaben zeigen Vorschläge; weiteres Tippen grenzt ein. Der Wortschatz früherer Befunde sammelt sich bei jedem Speichern im Konto (standardmäßig aus).",
 };
 export default d;
