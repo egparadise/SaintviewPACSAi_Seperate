@@ -608,18 +608,48 @@ def session_brief(db: Session, sess: CollabSession, online: set[int] | None = No
     }
 
 
-def open_session(db: Session, host: Account, study_id: int, title: str = "") -> CollabSession:
-    """협진 세션 개설 — 호스트(Master)가 자기 검사 1건을 걸고 연다.
+def _study_uid_for_host(db: Session, host: Account, study_id: int,
+                        user: dict | None = None,
+                        deny_msg: str = "다른 병원의 검사로는 협진을 열 수 없습니다") -> str:
+    """호스트가 이 검사를 협진에 걸 수 있는지 확인하고 study_uid 를 돌려준다.
 
-    호스트는 그 검사를 볼 수 있어야 한다(자기 병원 검사거나 시스템 관리자).
-    이 검사는 곧 게스트에게 열람권이 나갈 대상이므로 여기서 반드시 확인한다.
+    🔴 Live(vid) 검사는 로컬 Study 테이블에 **없다**. sv70 처럼 A 브리지를 쓰는 배치에서
+      뷰어의 검사 id 는 vid(=VID_BASE+A study_idx)라, 로컬만 보면 협진 개설이 전부
+      '검사를 찾을 수 없습니다'로 죽는다 — 세션이 안 만들어지니 **초대 자체가 안 나가서**
+      상대방 화면에는 아무것도 안 뜬다(실사고 2026-08-12: 채팅·화상은 되는데 협진만 불통,
+      연결 진단은 전부 초록 — 전송 계층이 아니라 자료 모델 문제였기 때문).
+
+    Live 검사는 **호스트 본인의 A 자격**으로 존재를 확인한다(뷰어가 여는 경로 그대로 —
+    live_client 가 user.sid 로 그 사용자의 A 세션을 찾고, 없으면 서비스 계정 폴백).
+    A 가 자기 규칙으로 열람을 판정하므로 호스트가 못 보는 검사는 여기서도 안 열린다.
     """
-    study = db.get(Study, int(study_id))
+    from app.services import webpacs_live as live
+
+    sid = int(study_id)
+    if live.is_live_id(sid):
+        try:
+            row = live.live_detail(db, sid, user=user, with_related=False)
+        except Exception as e:  # noqa: BLE001 — A 오류는 종류와 무관하게 '확인 불가'로 수렴
+            raise LookupError(f"원격 검사를 확인할 수 없습니다 — {e}")
+        return str(row.get("study_uid") or "")
+    study = db.get(Study, sid)
     if study is None:
         raise LookupError("검사를 찾을 수 없습니다")
     is_sys_admin = host.role == "admin" and not host.hospital_id
     if not is_sys_admin and host.hospital_id and study.hospital_id != host.hospital_id:
-        raise PermissionError("다른 병원의 검사로는 협진을 열 수 없습니다")
+        raise PermissionError(deny_msg)
+    return study.study_uid or ""
+
+
+def open_session(db: Session, host: Account, study_id: int, title: str = "",
+                 user: dict | None = None) -> CollabSession:
+    """협진 세션 개설 — 호스트(Master)가 자기 검사 1건을 걸고 연다.
+
+    호스트는 그 검사를 볼 수 있어야 한다(자기 병원 검사거나 시스템 관리자, Live 는 A 판정).
+    이 검사는 곧 게스트에게 열람권이 나갈 대상이므로 여기서 반드시 확인한다.
+    user: 호출자의 JWT dict — Live 검사 확인 시 그 사람의 A 세션(sid)을 쓰기 위해 받는다.
+    """
+    study_uid = _study_uid_for_host(db, host, study_id, user=user)
     # 같은 검사로 이미 열어 둔 세션이 있으면 재사용 — 버튼 두 번 눌러 세션이 둘 생기는 것 방지
     existing = db.execute(
         select(CollabSession).where(CollabSession.host_id == host.id,
@@ -630,7 +660,7 @@ def open_session(db: Session, host: Account, study_id: int, title: str = "") -> 
         return existing
     sess = CollabSession(
         code=uuid.uuid4().hex, host_id=host.id, host_hospital_id=host.hospital_id,
-        study_id=int(study_id), study_uid=study.study_uid or "",
+        study_id=int(study_id), study_uid=study_uid,
         title=(title or "")[:256], status="open", created_at=_now(),
     )
     db.add(sess)
@@ -759,7 +789,8 @@ def close_session(db: Session, sess: CollabSession, by: Account | None = None) -
     db.commit()
 
 
-def set_share_study(db: Session, sess: CollabSession, host: Account, study_id: int) -> list[int]:
+def set_share_study(db: Session, sess: CollabSession, host: Account, study_id: int,
+                    user: dict | None = None) -> list[int]:
     """Master 가 공유 검사를 바꿨다 → 참가자 전원에게 그 검사 열람권 발급.
 
     ⚠ 이 함수는 **다른 환자의 영상이 게스트에게 열리는 순간**이다. 그래서
@@ -772,14 +803,11 @@ def set_share_study(db: Session, sess: CollabSession, host: Account, study_id: i
         raise LookupError("종료된 세션입니다")
     if sess.host_id != host.id:
         raise PermissionError("공유 검사 변경은 개설자(Master)만 할 수 있습니다")
-    study = db.get(Study, int(study_id))
-    if study is None:
-        raise LookupError("검사를 찾을 수 없습니다")
-    is_sys_admin = host.role == "admin" and not host.hospital_id
-    if not is_sys_admin and host.hospital_id and study.hospital_id != host.hospital_id:
-        raise PermissionError("다른 병원의 검사는 공유할 수 없습니다")
+    # Live(vid) 검사 분기 포함 — open_session 과 같은 판정(_study_uid_for_host 주석 참조)
+    study_uid = _study_uid_for_host(db, host, study_id, user=user,
+                                    deny_msg="다른 병원의 검사는 공유할 수 없습니다")
     sess.study_id = int(study_id)
-    sess.study_uid = study.study_uid or ""
+    sess.study_uid = study_uid
     granted: list[int] = []
     for p in participants(db, sess.id):
         if p.state != "joined" or p.account_id == host.id:
@@ -962,20 +990,24 @@ def take_control(db: Session, sess: CollabSession, actor: Account) -> CollabPart
 
 
 def adopt_annotations(db: Session, sess: CollabSession, host: Account, rows: list,
-                      author_name: str = "") -> int:
-    """세션 주석 → 정식 Annotation. **Master 만** 부른다(호출부가 확인).
+                      author_name: str = "", user: dict | None = None) -> int:
+    """세션 주석 → 정식 판독 주석. **Master 만** 부른다(호출부가 확인).
 
-    책임 주체를 흐리지 않는 것이 요점이다: 저장은 Master 이름(created_by)으로 하되
+    책임 주체를 흐리지 않는 것이 요점이다: 저장은 Master 이름으로 하되
     text 앞에 원 작성자를 남긴다. 협진에서 나온 소견이라는 사실이 판독 기록에 보여야 한다.
 
     ⚠ **뷰포트(pane) 마크만 채택한다.** 화이트보드·공유 화면 마크는 좌표계가 완전히 다르다
       (화이트보드 정규화 / 비디오 프레임 정규화 vs 이미지 정규화). 그대로 저장하면 영상
       위 엉뚱한 자리에 도형이 박히고, sop_uid 도 없어서 어느 슬라이스 것인지조차 없다.
       '남길 가치가 있는 것'은 영상 위에 그린 것뿐이다 — 화이트보드는 논의용 스케치다.
-    """
-    from app.models import Annotation
 
-    n = 0
+    ⚠ 저장소가 검사 종류에 따라 **둘**이다:
+      · 로컬 검사 → Annotation 테이블 (created_by=Master)
+      · Live(vid) 검사 → **A 서버의 주석 저장소**(live_annotations_*). 로컬 Annotation 에
+        넣으면 study_id FK(studies.id)가 vid 를 참조해 **저장 자체가 터진다** — 그리고
+        설령 들어가도 뷰어는 Live 검사의 주석을 A 에서 읽으므로 아무에게도 안 보인다.
+    """
+    adoptable = []
     for r in rows:
         if str(r.get("surface") or "pane") != "pane":
             continue
@@ -985,23 +1017,38 @@ def adopt_annotations(db: Session, sess: CollabSession, host: Account, rows: lis
         note = str(r.get("text") or "")
         if author_name:
             note = f"[{author_name}] {note}".strip()
-        db.add(Annotation(
-            study_id=sess.study_id,
-            series_uid=str(r.get("series_uid") or ""),
-            sop_uid=str(r.get("sop_uid") or ""),
-            kind=str(r.get("kind") or "line"),
-            points=pts,
-            value=r.get("value"),
-            unit=str(r.get("unit") or ""),
-            text=note[:512],
-            source="user",
-            created_by=host.username,
-        ))
-        n += 1
-    if n:
-        _audit(db, host.id, "collab_adopt_annos", "collab_session", sess.code,
-               {"count": n, "author": author_name, "study_id": sess.study_id})
-        db.commit()
+        adoptable.append({
+            "series_uid": str(r.get("series_uid") or ""),
+            "sop_uid": str(r.get("sop_uid") or ""),
+            "kind": str(r.get("kind") or "line"),
+            "points": pts,
+            "value": r.get("value"),
+            "unit": str(r.get("unit") or ""),
+            "text": note[:512],
+            "source": "user",
+        })
+    if not adoptable:
+        return 0
+
+    from app.services import webpacs_live as live
+
+    if live.is_live_id(sess.study_id):
+        # A 저장소는 '검사당 주석 목록 JSON 한 벌'이다 — 읽어서 덧붙이고 되쓴다.
+        # Master 의 A 자격(user.sid)으로 쓴다: A 쪽 기록도 Master 계정으로 귀속된다.
+        try:
+            cur = live.live_annotations_get(db, sess.study_id, user).get("items") or []
+            live.live_annotations_put(db, sess.study_id, [*cur, *adoptable], user)
+        except Exception as e:  # noqa: BLE001 — A 실패는 종류와 무관하게 사용자 문구로
+            raise LookupError(f"원격 판독 주석 저장에 실패했습니다 — {e}")
+    else:
+        from app.models import Annotation
+
+        for a in adoptable:
+            db.add(Annotation(study_id=sess.study_id, created_by=host.username, **a))
+    n = len(adoptable)
+    _audit(db, host.id, "collab_adopt_annos", "collab_session", sess.code,
+           {"count": n, "author": author_name, "study_id": sess.study_id})
+    db.commit()
     return n
 
 

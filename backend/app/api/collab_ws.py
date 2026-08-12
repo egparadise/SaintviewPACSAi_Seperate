@@ -380,7 +380,9 @@ async def collab_ws(websocket: WebSocket) -> None:
                 code = hub.session_of(websocket)
                 if not code:
                     continue
-                res = await run_in_threadpool(_do_switch, aid, code, int(msg.get("study_id") or 0))
+                # user(JWT dict)를 넘긴다 — Live(vid) 검사 전환은 이 사람의 A 세션으로 확인한다
+                res = await run_in_threadpool(_do_switch, aid, code,
+                                              int(msg.get("study_id") or 0), user)
                 if res.get("error"):
                     await websocket.send_json({"t": "error", "detail": res["error"]})
                     continue
@@ -505,7 +507,7 @@ def _do_control(kind: str, account_id: int, code: str, msg: dict) -> dict:
                 "session": svc.session_brief(db, sess, online=hub.online_ids())}
 
 
-def _do_switch(account_id: int, code: str, study_id: int) -> dict:
+def _do_switch(account_id: int, code: str, study_id: int, user: dict | None = None) -> dict:
     from app.models import Account
 
     with SessionLocal() as db:
@@ -514,7 +516,7 @@ def _do_switch(account_id: int, code: str, study_id: int) -> dict:
         if sess is None or me is None:
             return {"error": "세션을 찾을 수 없습니다"}
         try:
-            granted = svc.set_share_study(db, sess, me, study_id)
+            granted = svc.set_share_study(db, sess, me, study_id, user=user)
         except (PermissionError, LookupError) as e:
             return {"error": str(e)}
         return {"granted": granted,

@@ -1272,3 +1272,137 @@ def test_diag_never_blocks_collab_when_it_fails(client, db, duo):
     svc.record_diag(db, me, code="x" * 200, server_side=True, title="t" * 500, detail="d" * 2000)
     rows = svc.list_diag(db, me.id, limit=5)
     assert rows and len(rows[0]["code"]) <= 64
+
+
+# ═══════════ Live(vid) 검사 협진 — sv70 초대 불통 실사고 (2026-08-12) ═══════════
+def test_live_vid_session_opens_without_local_study_row(client, db, duo, monkeypatch):
+    """Live 모드(vid ≥ 90,000,000)에서 협진 개설이 되어야 한다.
+
+    실사고: sv70 에서 [초대]를 누르면 '검사를 찾을 수 없습니다' — 뷰어의 검사 id 가
+    vid 인데 open_session 이 로컬 Study 만 봤다. 세션이 안 만들어지니 초대 자체가
+    안 나가서 상대방 화면에는 아무것도 안 떴다(채팅·화상은 정상, 진단은 전부 초록).
+    """
+    from app.services import collab_service as svc
+    from app.services import webpacs_live as live
+
+    vid = live.VID_BASE + 777
+    calls: list[tuple] = []
+
+    def fake_detail(db_, v, user=None, with_related=True):
+        calls.append((v, (user or {}).get("sub"), with_related))
+        return {"study_uid": "9.9.777", "id": v}
+
+    monkeypatch.setattr(live, "live_detail", fake_detail)
+
+    _befriend(client, duo)
+    r = client.post("/api/collab/sessions", headers=duo["hh"],
+                    json={"study_id": vid, "title": "Live 협진"})
+    assert r.status_code == 200, f"Live 검사로 세션이 안 열린다: {r.text}"
+    body = r.json()
+    assert body["study_id"] == vid
+    code = body["code"]
+
+    # 확인은 **호스트 본인의 자격(user dict)** 으로 갔고, 과거검사 조회는 건너뛰었다
+    assert calls and calls[0][2] is False
+    assert calls[0][1] == duo["host"].username
+
+    # study_uid 가 A 응답에서 채워졌다(초대 배너·감사 로그가 이 값을 쓴다)
+    from app.db import SessionLocal
+    with SessionLocal() as s:
+        assert svc.get_session(s, code).study_uid == "9.9.777"
+
+    # 초대 → 참가 → 열람권(grant)까지 로컬 Study 행 없이 성립한다
+    assert client.post(f"/api/collab/sessions/{code}/invite", headers=duo["hh"],
+                       json={"target_id": duo["guest"].id}).status_code == 200
+    with SessionLocal() as s:
+        from app.models import Account, CollabGrant
+        from sqlalchemy import select as _sel
+        sess = svc.get_session(s, code)
+        svc.join(s, sess, s.get(Account, duo["guest"].id))
+        g = s.execute(_sel(CollabGrant).where(CollabGrant.session_id == sess.id,
+                                              CollabGrant.account_id == duo["guest"].id))\
+             .scalars().first()
+        assert g is not None and g.study_id == vid, "vid 열람권 행이 안 만들어졌다"
+
+
+def test_live_vid_share_switch_and_unreachable_a(client, db, duo, monkeypatch):
+    """검사 전환도 vid 로 되고, A 가 죽어 있으면 명확한 사유로 거절된다(500 금지)."""
+    from app.db import SessionLocal
+    from app.models import Account
+    from app.services import collab_service as svc
+    from app.services import webpacs_live as live
+
+    monkeypatch.setattr(live, "live_detail",
+                        lambda db_, v, user=None, with_related=True: {"study_uid": f"u.{v}"})
+    code = _open_and_join(client, duo, _study(db, "live_sw", duo["ha"].id).id)
+    vid = live.VID_BASE + 555
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        granted = svc.set_share_study(s, sess, s.get(Account, duo["host"].id), vid)
+        assert duo["guest"].id in granted, "vid 전환에서 게스트 열람권이 안 나갔다"
+        s.refresh(sess)
+        assert sess.study_id == vid and sess.study_uid == f"u.{vid}"
+
+    # A 불통 — WebPacsError 든 뭐든 '확인 불가' 사유가 사용자에게 그대로 가야 한다
+    def boom(db_, v, user=None, with_related=True):
+        raise live.WebPacsError("A 서버 응답 없음")
+    monkeypatch.setattr(live, "live_detail", boom)
+    r = client.post("/api/collab/sessions", headers=duo["hh"],
+                    json={"study_id": live.VID_BASE + 1, "title": ""})
+    assert r.status_code == 404, r.text
+    assert "원격 검사를 확인할 수 없습니다" in r.json()["detail"]
+
+
+def test_live_vid_adopt_goes_to_a_not_local_annotation(client, db, duo, monkeypatch):
+    """Live 세션의 [채택]은 **A 주석 저장소**로 간다 — 로컬 Annotation 에 넣으면
+    study_id FK(studies.id)가 vid 를 참조해 터지고, 들어가도 뷰어는 A 에서 읽으므로
+    아무에게도 안 보인다."""
+    from sqlalchemy import select as _sel
+
+    from app.db import SessionLocal
+    from app.models import Account, Annotation
+    from app.services import collab_service as svc
+    from app.services import collab_hub as hub_mod
+    from app.services import webpacs_live as live
+
+    monkeypatch.setattr(live, "live_detail",
+                        lambda db_, v, user=None, with_related=True: {"study_uid": "a.b.c"})
+    existing = [{"kind": "line", "points": [[0, 0], [1, 1]], "text": "기존 A 주석",
+                 "series_uid": "", "sop_uid": "s0", "value": None, "unit": "", "source": "user"}]
+    put_calls: list[list] = []
+    monkeypatch.setattr(live, "live_annotations_get",
+                        lambda db_, v, user=None: {"items": list(existing)})
+    monkeypatch.setattr(live, "live_annotations_put",
+                        lambda db_, v, items, user=None: put_calls.append(items) or {"ok": True})
+
+    vid = live.VID_BASE + 888
+    _befriend(client, duo)
+    code = client.post("/api/collab/sessions", headers=duo["hh"],
+                       json={"study_id": vid, "title": ""}).json()["code"]
+    assert client.post(f"/api/collab/sessions/{code}/invite", headers=duo["hh"],
+                       json={"target_id": duo["guest"].id}).status_code == 200
+    with SessionLocal() as s:
+        sess = svc.get_session(s, code)
+        svc.join(s, sess, s.get(Account, duo["guest"].id))
+    hub_mod.hub.anno_add(code, {"kind": "arrow", "points": [[0.2, 0.2], [0.3, 0.3]],
+                                "surface": "pane", "sop_uid": "1.2.3",
+                                "text": "결절 의심"}, duo["guest"].id)
+    hub_mod.hub.anno_add(code, {"kind": "pen", "points": [[0.1, 0.1], [0.9, 0.9]],
+                                "surface": "wb", "text": "화이트보드"}, duo["guest"].id)
+
+    before = len(db.execute(_sel(Annotation)).scalars().all())
+    r = client.post(f"/api/collab/sessions/{code}/adopt", headers=duo["hh"],
+                    json={"target_id": duo["guest"].id})
+    assert r.status_code == 200, r.text
+    assert r.json()["adopted"] == 1, "pane 마크 1건만 채택되어야 한다(wb 제외)"
+
+    assert len(put_calls) == 1
+    merged = put_calls[0]
+    assert merged[0]["text"] == "기존 A 주석", "기존 A 주석이 날아갔다(덮어쓰기 금지)"
+    assert any("결절 의심" in a["text"] and a["text"].startswith("[") for a in merged), \
+        "채택분에 원 작성자 표기가 없다"
+    assert all("화이트보드" not in a["text"] for a in merged)
+
+    db.expire_all()
+    assert len(db.execute(_sel(Annotation)).scalars().all()) == before, \
+        "Live 채택이 로컬 Annotation 에 들어갔다(FK 사고 경로)"

@@ -198,7 +198,8 @@ def session_open(body: OpenBody, db: Session = Depends(get_db),
     """협진 세션 개설 — 개설자가 Master 가 된다."""
     me = _me(db, user)
     try:
-        sess = svc.open_session(db, me, body.study_id, body.title)
+        # user 를 넘긴다 — Live(vid) 검사는 이 사람의 A 세션(sid)으로 존재를 확인한다
+        sess = svc.open_session(db, me, body.study_id, body.title, user=user)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except PermissionError as e:
@@ -331,7 +332,11 @@ async def session_adopt(code: str, body: AdoptBody, db: Session = Depends(get_db
         return {"ok": True, "adopted": 0}
     author = db.get(Account, body.target_id)
     name = svc.display_of(author)
-    saved = svc.adopt_annotations(db, sess, me, rows, author_name=name)
+    try:
+        # Live(vid) 검사면 A 주석 저장소로 쓴다 — Master 의 A 자격(user.sid) 사용
+        saved = svc.adopt_annotations(db, sess, me, rows, author_name=name, user=user)
+    except LookupError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     for r in rows:                       # 채택된 것은 세션 목록에서 뺀다(중복 저장 방지)
         hub.anno_remove(code, str(r.get("id") or ""), body.target_id, force=True)
         await hub.send_session_socket(code, {"t": "anno.remove", "id": r.get("id"),
