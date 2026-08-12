@@ -2867,5 +2867,7 @@ const d: Record<string, string> = {
   "단어 자동 완성 — 템플릿·과거 판독문 기반 예측, Enter 로 완성 (범위는 설정>판독>문장 자동 완성)": "Tự hoàn thành từ — dự đoán từ mẫu và bài đọc trước; nhấn Enter để chấp nhận (phạm vi trong Cài đặt > Đọc > Tự hoàn thành)",
   "판독문 입력 중 예측 단어 표시 — Enter 로 완성 (판독창 상단 Word completion 체크와 연동)": "Hiển thị từ dự đoán khi nhập bài đọc — Enter để hoàn thành (liên kết với ô Word completion đầu cửa sổ đọc)",
   "초성(예: ㅍㄹ)이나 첫 글자를 입력하면 예측 단어가 나타나고, 계속 입력하면 후보가 좁혀집니다. 과거 판독문 어휘는 판독을 저장할 때마다 계정에 누적됩니다(기본 꺼짐).": "Gõ phụ âm đầu (vd: ㅍㄹ) hoặc chữ cái đầu sẽ hiện từ dự đoán; gõ tiếp để thu hẹp. Từ vựng bài đọc cũ tích lũy vào tài khoản mỗi lần lưu (mặc định tắt).",
+  "검사 코멘트": "Ghi chú ca chụp",
+  "병원 코멘트": "Ghi chú bệnh viện",
 };
 export default d;

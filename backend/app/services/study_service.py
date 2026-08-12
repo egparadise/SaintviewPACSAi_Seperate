@@ -349,6 +349,8 @@ def _study_row(study: Study, patient: Patient, latest: Report | None, *,
         "hospital_name": study.institution,
         "center_name": "",
         "assigned_doctor": "",
+        "exam_comment": "",
+        "hospital_comment": "",
         "memo": study.memo,
         "finalized_at": (
             latest.finalized_at.isoformat() if latest and latest.finalized_at else ""

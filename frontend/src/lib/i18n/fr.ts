@@ -2867,5 +2867,7 @@ const d: Record<string, string> = {
   "단어 자동 완성 — 템플릿·과거 판독문 기반 예측, Enter 로 완성 (범위는 설정>판독>문장 자동 완성)": "Complétion — prédictions à partir de vos modèles et comptes rendus passés ; Entrée pour accepter (sources : Réglages > Lecture > Complétion)",
   "판독문 입력 중 예측 단어 표시 — Enter 로 완성 (판독창 상단 Word completion 체크와 연동)": "Afficher des mots prédits pendant la saisie — Entrée pour compléter (lié à la case Word completion en haut de la fenêtre de lecture)",
   "초성(예: ㅍㄹ)이나 첫 글자를 입력하면 예측 단어가 나타나고, 계속 입력하면 후보가 좁혀집니다. 과거 판독문 어휘는 판독을 저장할 때마다 계정에 누적됩니다(기본 꺼짐).": "Saisir les consonnes initiales (ex. ㅍㄹ) ou les premières lettres affiche des prédictions ; continuez pour affiner. Le vocabulaire des comptes rendus passés s'accumule à chaque enregistrement (désactivé par défaut).",
+  "검사 코멘트": "Commentaire d'examen",
+  "병원 코멘트": "Commentaire de l'hôpital",
 };
 export default d;

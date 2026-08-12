@@ -785,3 +785,16 @@ def test_live_phrases_local_account_gets_empty_not_error(client, auth_headers):
     r = client.get("/api/webpacs/live/phrases", headers=auth_headers)
     assert r.status_code == 200, r.text
     assert r.json() == {"live": False, "shortcuts": [], "templates": []}
+
+
+def test_worklist_rows_carry_a_comments(client, live_ready):
+    """A 코멘트 2종(2026-08-12 사용자 확정) — 검사 코멘트(study_comment)·병원 코멘트
+    (original_comments)가 워크리스트 행에 그대로 실린다(들어오는 값 확인 가능)."""
+    tok = _a_doctor_headers(client)
+    r = client.get("/api/webpacs/live/worklist", headers=tok, params={"limit": 5})
+    assert r.status_code == 200, r.text
+    rows = r.json()["items"]
+    assert rows, "모의 A 에 검사가 있어야 한다"
+    assert all("exam_comment" in x and "hospital_comment" in x for x in rows)
+    assert any(x["exam_comment"].startswith("검사코멘트") for x in rows), "A study_comment 원천"
+    assert any(x["hospital_comment"].startswith("-/-/병원메모") for x in rows), "A original_comments 원천"

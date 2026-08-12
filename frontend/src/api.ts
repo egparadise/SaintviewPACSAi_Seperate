@@ -358,6 +358,8 @@ export interface StudyRow {
   request_datetime?: string;   // 의뢰 일시(등록) — 표시 형식은 설정>워크리스트
   hospital_name?: string;      // 의뢰병원
   center_name?: string;        // 원격판독 센터(강남미래·써밋 등)
+  exam_comment?: string;       // 검사 코멘트(A study_comment — 2026-08-12)
+  hospital_comment?: string;   // 병원 코멘트(A original_comments)
   assigned_doctor?: string;    // 센터별 배정 판독의
   referring_physician: string;
   memo: string;

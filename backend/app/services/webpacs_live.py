@@ -263,6 +263,11 @@ def _row_of(r: dict) -> dict:
         "hospital_name": str(r.get("hospital_name") or ""),             # 의뢰병원
         "center_name": str(r.get("center_name") or ""),                 # 원격판독 센터
         "assigned_doctor": doctor,                                      # 센터별 배정 판독의
+        # ── 2026-08-12 사용자 확정 — A 코멘트 2종(들어오는 값 확인용, 원천 그대로) ──
+        #    A 워크리스트 뷰(PacsStudyView)의 컬럼명이 원천: 검사 코멘트=study_comment,
+        #    병원 코멘트=original_comments (A 클라이언트 locales/ko/workList.json 으로 확정).
+        "exam_comment": str(r.get("study_comment") or ""),
+        "hospital_comment": str(r.get("original_comments") or ""),
         "memo": memo,
         "finalized_at": "",
         "department": str(r.get("center_name") or ""),

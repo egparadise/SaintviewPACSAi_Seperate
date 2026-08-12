@@ -260,6 +260,9 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
   hospital_name: { label: "병원명 (의뢰병원)", render: (r) => r.hospital_name ?? r.institution },
   center_name: { label: "센터명 (판독센터)", render: (r) => r.center_name ?? "" },
   assigned_doctor: { label: "배정의사", render: (r) => r.assigned_doctor ?? "" },
+  // A 코멘트 2종(2026-08-12 사용자 확정) — Live 는 A 원천(study_comment/original_comments), 로컬 공란
+  exam_comment: { label: "검사 코멘트", render: (r) => r.exam_comment ?? "" },
+  hospital_comment: { label: "병원 코멘트", render: (r) => r.hospital_comment ?? "" },
   referring_physician: { label: "의뢰의 (Ref.Phys)", render: (r) => r.referring_physician },
   finalized_at: {
     label: "판독일시",
@@ -288,7 +291,8 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
 export const DEFAULT_COLUMNS = [
   "read_state", "status", "request_datetime", "center_name", "patient_name", "patient_key",
   "modality", "study_date", "study_time", "assigned_doctor", "body_part", "hospital_name",
-  "instance_count", "study_desc", "priority", "memo", "accession_no", "age", "sex",
+  "instance_count", "study_desc", "priority", "exam_comment", "hospital_comment",
+  "memo", "accession_no", "age", "sex",
   "birth_date", "finalized_at", "impression",
 ];
 // Infi(INFINITT) 컬럼 순서 — 원본 Exam List: Status | ID | Name | Sex | Study Date | MOD | Srs | Img | Body | Desc | AETitle
@@ -1223,6 +1227,7 @@ const GRID_COL_DEF_W: Record<string, number> = {
   impression: 220, order_name: 170, source_aet: 120, body_part: 110,
   age: 56, sex: 48, study_time: 76, accession_no: 140, finalized_at: 130,
   request_datetime: 150, hospital_name: 170, center_name: 130, assigned_doctor: 100,
+  exam_comment: 150, hospital_comment: 150,
   priority: 80, instance_count: 56, series_count: 50, modality: 56, read_state: 52, status: 76,
 };
 export function StudyGrid({
