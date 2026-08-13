@@ -8,6 +8,9 @@ import {
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
 import { CollabDiagPanel } from "../components/CollabDiagPanel";
+import { collab } from "../lib/collab";
+import { ICE_LS_KEY, hasTurn, parseIceJson } from "../lib/collabIce";
+import { effectiveIce } from "../lib/useMediaGuard";
 import { MediaPermPanel } from "../components/MediaPermPanel";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
 import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
@@ -1703,6 +1706,12 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                     (미디어 권한 패널은 '연결은 되는데 장치가 안 되는' 다음 단계다) */}
                 <Group title={tr("연결 문제 보기")}>
                   <CollabDiagPanel />
+                </Group>
+                {/* 통화 경로(ICE) — "연결 중…이 떴다가 사라지는" 실사고(2026-08-12)의 조치 자리.
+                    해석 우선순위(이 PC > 서버 > 기본 STUN)는 lib/collabIce 한 곳뿐이고,
+                    여기는 그 값을 보여 주고 고치는 화면이다. */}
+                <Group title={tr("통화 연결 (STUN/TURN)")}>
+                  <IceSettingRows />
                 </Group>
                 {/* 협진 창 하단과 **같은 컴포넌트**(MediaPermPanel) — 두 곳이 갈리면 안내가 어긋난다 */}
                 <Group title={tr("미디어 권한·장치")}>
@@ -4367,3 +4376,106 @@ function FolderPickerModal({ initial, onPick, onClose }: {
     </div>
   );
 }
+
+/** Setting > 협진 > 통화 연결 — ICE(STUN/TURN) 구성 보기·수정.
+ *
+ *  · 유효 구성: webrtcMesh 가 실제로 쓰는 해석(effectiveIce)을 **그대로** 보여 준다
+ *  · 이 PC 설정: localStorage(sv_collab_ice) — 좌석별 예외. 빈 칸 저장 = 설정 제거
+ *  · 서버 설정: 관리자만. 저장하면 다음 접속(hello)부터 전 좌석에 배달된다 */
+function IceSettingRows() {
+  const eff = effectiveIce();
+  const [localVal, setLocalVal] = useState(() => {
+    try { return localStorage.getItem(ICE_LS_KEY) ?? ""; } catch { return ""; }
+  });
+  const [serverVal, setServerVal] = useState("");
+  const [serverLoaded, setServerLoaded] = useState(false);
+  const [msg, setMsg] = useState("");
+  const isAdmin = collab.me?.role === "admin";
+  const srcLabel = eff.source === "local" ? tr("이 PC 설정")
+    : eff.source === "server" ? tr("서버 설정")
+    : eff.source === "default" ? tr("기본 STUN")
+    : tr("없음 (사설망)");
+
+  useEffect(() => {
+    // 서버 저장값은 health 가 실어 준다(관리자 편집 초기값). 실패는 무해 — 편집만 비활성.
+    let alive = true;
+    api.collabHealth().then((h) => {
+      if (!alive) return;
+      setServerVal(h.ice_servers === null ? "" : JSON.stringify(h.ice_servers));
+      setServerLoaded(true);
+    }).catch(() => { /* 오프라인 등 — 표시만 생략 */ });
+    return () => { alive = false; };
+  }, []);
+
+  const saveLocal = () => {
+    const v = localVal.trim();
+    if (v && parseIceJson(v) === null) { setMsg(tr("JSON 형식이 올바르지 않습니다")); return; }
+    try {
+      if (v) localStorage.setItem(ICE_LS_KEY, v); else localStorage.removeItem(ICE_LS_KEY);
+      setMsg(tr("저장했습니다 — 다음 통화부터 적용됩니다"));
+    } catch { setMsg(tr("저장할 수 없습니다")); }
+  };
+
+  const saveServer = async (clear: boolean) => {
+    let servers: RTCIceServer[] | null = null;
+    if (!clear) {
+      const parsed = parseIceJson(serverVal.trim() || "[]");
+      if (parsed === null) { setMsg(tr("JSON 형식이 올바르지 않습니다")); return; }
+      servers = parsed;
+    }
+    try {
+      const r = await api.collabSetIce(servers);
+      setServerVal(r.servers === null ? "" : JSON.stringify(r.servers));
+      setMsg(tr("서버에 저장했습니다 — 각 사용자의 다음 접속부터 적용됩니다"));
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : tr("저장할 수 없습니다"));
+    }
+  };
+
+  const ta: React.CSSProperties = {
+    width: "100%", minHeight: 44, fontFamily: "monospace", fontSize: 11,
+    background: "var(--bg-elevated)", color: "var(--text-primary)",
+    border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px",
+  };
+  return (
+    <>
+      <div style={{ fontSize: 11.5, color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: 6 }}>
+        {tr("서로 다른 망(다른 건물·집) 사이의 화상·음성은 STUN/TURN 서버가 길을 찾아 줍니다. 지금 적용 중:")}
+        {" "}<b style={{ color: "var(--text-primary)" }}>{srcLabel}</b> · {eff.servers.length}
+        {hasTurn(eff.servers) ? ` · TURN ${tr("있음")}` : ` · TURN ${tr("없음")}`}
+      </div>
+      <div style={{ fontSize: 11.5, marginBottom: 2 }}>{tr("이 PC 설정 (비우면 서버·기본값 사용)")}</div>
+      <textarea value={localVal} onChange={(e) => setLocalVal(e.target.value)} style={ta}
+                placeholder={String.raw`[{"urls":"turn:서버주소:3478","username":"아이디","credential":"비밀번호"}]`} />
+      <div style={{ display: "flex", gap: 6, margin: "4px 0 10px" }}>
+        <button onClick={saveLocal} style={{ fontSize: 11, padding: "2px 10px" }}>{tr("이 PC 에 저장")}</button>
+      </div>
+      {isAdmin && (
+        <>
+          <div style={{ fontSize: 11.5, marginBottom: 2 }}>
+            {tr("서버 설정 (관리자) — 저장하면 모든 사용자에게 적용됩니다")}
+          </div>
+          <textarea value={serverVal} onChange={(e) => setServerVal(e.target.value)} style={ta}
+                    disabled={!serverLoaded}
+                    placeholder={String.raw`[{"urls":"turn:서버주소:3478","username":"아이디","credential":"비밀번호"}]`} />
+          <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+            <button className="primary" onClick={() => void saveServer(false)}
+                    disabled={!serverLoaded} style={{ fontSize: 11, padding: "2px 10px" }}>
+              {tr("서버에 저장")}
+            </button>
+            <button onClick={() => void saveServer(true)} disabled={!serverLoaded}
+                    title={tr("설정을 지우고 기본 동작(공인망=기본 STUN)으로 되돌립니다")}
+                    style={{ fontSize: 11, padding: "2px 10px" }}>
+              {tr("설정 삭제")}
+            </button>
+          </div>
+        </>
+      )}
+      {msg && <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 5 }}>{msg}</div>}
+      <div style={{ fontSize: 10.5, color: "var(--text-disabled)", marginTop: 6, lineHeight: 1.6 }}>
+        {tr("STUN 만으로는 일부 망(대칭 NAT)을 넘지 못합니다 — 그때는 서버에 coturn 을 설치하고 turn: 주소를 등록하세요.")}
+      </div>
+    </>
+  );
+}
+

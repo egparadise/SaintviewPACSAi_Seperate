@@ -121,6 +121,8 @@ def _sync_context(user: dict) -> dict[str, Any] | None:
             "me": svc.user_brief(db, me),
             "friend_ids": sorted(svc.friend_ids(db, me.id)),
             "sessions": [svc.session_brief(db, s) for s in svc.open_sessions_for(db, me.id)],
+            # 서버 설정 STUN/TURN — null=미설정(클라 기본), []=명시적 끔(폐쇄망)
+            "ice_servers": svc.get_ice_servers(db),
         }
 
 
@@ -222,6 +224,7 @@ async def collab_ws(websocket: WebSocket) -> None:
             "me": ctx["me"],
             "online": sorted(f for f in friends if hub.is_online(f)),
             "sessions": ctx["sessions"],
+            "ice_servers": ctx["ice_servers"],
         })
         if was_first:
             await _announce_presence(aid, friends, True)

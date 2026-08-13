@@ -59,7 +59,10 @@ export interface CollabMessage {
 
 /** 서버 → 클라 이벤트. `t` 로 판별한다(백엔드 collab_ws.py 와 1:1). */
 export type CollabEvent =
-  | { t: "hello"; me: CollabUser; online: number[]; sessions: CollabSession[] }
+  // ice_servers: 서버(AppSetting collab.ice_servers)가 정한 STUN/TURN. **null = 미설정**
+  // (클라이언트 기본 로직으로), [] = 명시적으로 끔(폐쇄망). lib/collabIce 가 해석한다.
+  | { t: "hello"; me: CollabUser; online: number[]; sessions: CollabSession[];
+      ice_servers?: RTCIceServer[] | null }
   | { t: "pong" }
   | { t: "presence"; id: number; online: boolean }
   | { t: "friend.request"; from: CollabUser; message?: string }
@@ -147,6 +150,8 @@ class CollabClient {
   status: CollabStatus = "idle";
   me: CollabUser | null = null;
   online = new Set<number>();
+  /** 서버 설정 ICE(hello). null = 서버 미설정 — 그때만 클라이언트 기본 로직이 돈다. */
+  iceServers: RTCIceServer[] | null = null;
 
   /** 이 창에서 핸드셰이크가 **한 번이라도** 성립했나. 서버 진단의 핵심 근거다 —
    *  false 인 채 계속 닫히면 nginx 가 업그레이드를 막고 있는 것이고(101 이 안 온다),
@@ -187,6 +192,8 @@ class CollabClient {
       if (msg.t === "hello") {
         this.me = msg.me;
         this.online = new Set(msg.online ?? []);
+        // 서버가 정한 ICE — mesh 가 연결을 만들 때 lib/collabIce 로 해석한다.
+        this.iceServers = msg.ice_servers === undefined ? null : msg.ice_servers;
       } else if (msg.t === "presence") {
         if (msg.online) this.online.add(msg.id); else this.online.delete(msg.id);
       } else if (msg.t === "session") {

@@ -370,7 +370,8 @@ _diag_seen: dict[tuple[int, str], float] = {}
 
 
 @router.get("/health")
-def collab_health(request: Request, user: dict = Depends(current_user)):
+def collab_health(request: Request, db: Session = Depends(get_db),
+                  user: dict = Depends(current_user)):
     """서버 자가 점검 — 백엔드가 **스스로 아는 것**만 보고한다.
 
     🔴 판정의 핵심은 `ws.accepted` 다. 이 REST 응답을 받았다는 것은 프록시가 HTTP 는
@@ -384,6 +385,9 @@ def collab_health(request: Request, user: dict = Depends(current_user)):
     stat = hub.stats()
     return {
         "ok": True,
+        # 서버 설정 STUN/TURN — 연결 문제 보기가 '유효 ICE 구성'을 표시하는 근거.
+        # null=미설정(클라 기본 STUN 로직), []=명시적 끔(폐쇄망).
+        "ice_servers": svc.get_ice_servers(db),
         "proxy_proto": request.headers.get("x-forwarded-proto", ""),
         "proxy_host": request.headers.get("x-forwarded-host", "") or request.headers.get("host", ""),
         "ws": {k: stat[k] for k in
@@ -432,3 +436,24 @@ def collab_diag_list(limit: int = 50, mine: bool = True, db: Session = Depends(g
     scope_all = (not mine) and (me.role == "admin")
     return {"items": svc.list_diag(db, None if scope_all else me.id, limit=min(200, max(1, limit))),
             "scope": "all" if scope_all else "mine"}
+
+
+class IceBody(BaseModel):
+    """servers: null = 설정 삭제(미설정으로 되돌림 → 클라 기본), [] = 명시적 끔(폐쇄망)."""
+
+    servers: list | None = None
+
+
+@router.put("/ice")
+def collab_ice_put(body: IceBody, db: Session = Depends(get_db),
+                   user: dict = Depends(current_user)):
+    """기관 전체 STUN/TURN 설정 — **관리자만**.
+
+    좌석별 localStorage 로는 운영이 안 된다(누가 어느 PC 에 넣었는지 아무도 모른다).
+    여기 저장하면 다음 접속의 hello 부터 전 좌석에 배달된다.
+    """
+    me = _me(db, user)
+    if me.role != "admin":
+        raise HTTPException(status_code=403, detail="ICE 서버 설정은 관리자만 바꿀 수 있습니다")
+    saved = svc.set_ice_servers(db, me, body.servers)
+    return {"ok": True, "servers": saved}

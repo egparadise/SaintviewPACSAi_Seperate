@@ -954,6 +954,10 @@ export const api = {
   collabDiagReport: (code: string, server_side: boolean, title = "", detail = "") =>
     req<{ ok: boolean; recorded: boolean }>("/api/collab/diag",
       { method: "POST", body: JSON.stringify({ code, server_side, title, detail }) }),
+  /** 기관 전체 STUN/TURN 저장(관리자). servers=null 은 설정 삭제(미설정으로 되돌림) */
+  collabSetIce: (servers: RTCIceServer[] | null) =>
+    req<{ ok: boolean; servers: RTCIceServer[] | null }>("/api/collab/ice",
+      { method: "PUT", body: JSON.stringify({ servers }) }),
   collabDiagList: (mine = true, limit = 50) =>
     req<{ items: CollabDiagRow[]; scope: "mine" | "all" }>(
       `/api/collab/diag?mine=${mine}&limit=${limit}`),
@@ -1461,6 +1465,8 @@ export interface CollabFriends {
  *  nginx 가 막은 요청은 여기 도달조차 안 하므로 그 부재(ws_never_accepted)가 증거다. */
 export interface CollabHealth {
   ok: boolean;
+  /** 서버 설정 STUN/TURN. null=미설정(클라 기본), []=명시적 끔(폐쇄망) */
+  ice_servers: RTCIceServer[] | null;
   proxy_proto: string;      // nginx 가 넘긴 X-Forwarded-Proto ("https" 여야 정상)
   proxy_host: string;
   ws: { accepted: number; rej_auth: number; rej_account: number;

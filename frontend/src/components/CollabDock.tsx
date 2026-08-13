@@ -8,7 +8,9 @@ import { collab, type CollabEvent } from "../lib/collab";
 import { colorOf, dmRoom } from "../lib/collabState";
 import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
-import { useMediaGuard } from "../lib/useMediaGuard";
+import { effectiveIce, reportServerBlocks, useMediaGuard } from "../lib/useMediaGuard";
+import { hasTurn } from "../lib/collabIce";
+import { p2pFailedItem } from "../lib/collabPreflight";
 import type { MediaKind } from "../lib/collabPreflight";
 import { CollabBlockDialog } from "./CollabBlockDialog";
 import { showToast } from "../lib/toast";
@@ -259,6 +261,18 @@ export function CollabDock({ open, onClose, onInvite, inviteLabel, width = 260,
   /** 미디어 토글 — 켤 때마다 **서버가 막고 있는지 먼저 확인**한다(lib/useMediaGuard).
    *  협진 패널(뷰어)과 같은 훅이다 — 두 곳에 따로 쓰면 안내가 갈린다. */
   const guard = useMediaGuard();
+  // 최신 peer 참조 — onPeerIssue 는 마운트 시 1회 구독이라 상태를 직접 캡처하면 낡는다
+  const issuePeerRef = useRef<CollabUser | null>(null);
+  useEffect(() => { issuePeerRef.current = peer; }, [peer]);
+  // 같은 상대와 연결이 두 번 연속 실패 — "연결 중…"이 떴다가 조용히 사라지던 실사고의
+  // 가시화. 원인(STUN/TURN 부재)과 조치를 띄우고 서버 진단 로그에도 남긴다.
+  const showBlocksRef = useRef(guard.showBlocks);
+  useEffect(() => { showBlocksRef.current = guard.showBlocks; }, [guard.showBlocks]);
+  useEffect(() => mesh.onPeerIssue(() => {
+    const item = p2pFailedItem(issuePeerRef.current?.name ?? "", hasTurn(effectiveIce().servers));
+    showBlocksRef.current([item]);
+    reportServerBlocks([item]);
+  }), []);
   const runMedia = async (kind: MediaKind, label: string, turningOn: boolean,
                           work: () => Promise<void>) => {
     if (guard.busy) return;

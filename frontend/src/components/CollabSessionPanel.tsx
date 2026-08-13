@@ -10,7 +10,9 @@ import { closeAllPopouts, popoutStream, syncPopout } from "../lib/collabPopout";
 import { t as tr, useLang } from "../lib/i18n";
 import { mesh, type PeerView } from "../lib/webrtcMesh";
 import { checkSocket, type BlockItem } from "../lib/collabPreflight";
-import { reportServerBlocks, useMediaGuard } from "../lib/useMediaGuard";
+import { effectiveIce, reportServerBlocks, useMediaGuard } from "../lib/useMediaGuard";
+import { hasTurn } from "../lib/collabIce";
+import { p2pFailedItem } from "../lib/collabPreflight";
 import { CollabBlockDialog } from "./CollabBlockDialog";
 import { showToast } from "../lib/toast";
 
@@ -192,6 +194,7 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
     };
   }, [meId]);
   useEffect(() => mesh.onChange(setPeers), []);
+
   useEffect(() => mesh.onMediaChange((s) => {
     setMic(s.mic); setCam(s.camera); setScreen(s.screen);
   }), []);
@@ -203,6 +206,19 @@ export function CollabSessionPanel({ session, onLeave, isHost, meId, width = 250
   // 도크(CollabDock)와 같은 훅을 쓴다 — 두 곳에 따로 쓰면 안내가 갈린다.
   const guard = useMediaGuard(session.participants, meId);
   const mediaBusy = guard.busy;
+
+  // 참가자와의 미디어 연결 2회 실패 — 원인·조치 안내 + 서버 진단 기록(dock 과 같은 규칙).
+  // onPeerIssue 는 마운트 시 1회 구독이라, 나중에 바뀌는 값(명단·showBlocks)은 ref 로 본다.
+  const issueCtxRef = useRef({ participants: session.participants, show: guard.showBlocks });
+  useEffect(() => {
+    issueCtxRef.current = { participants: session.participants, show: guard.showBlocks };
+  }, [session.participants, guard.showBlocks]);
+  useEffect(() => mesh.onPeerIssue((pid) => {
+    const ctx = issueCtxRef.current;
+    const who = ctx.participants.find((x) => x.id === pid)?.name ?? "";
+    ctx.show([p2pFailedItem(who, hasTurn(effectiveIce().servers))]);
+    reportServerBlocks([p2pFailedItem(who, hasTurn(effectiveIce().servers))]);
+  }), []);
 
   // 협진 소켓 상시 감시 — 미디어를 켤 때만 보면 **메신저가 안 가는 것**은 못 잡는다.
   // (sv70 에서 실제로 그랬다: "연결되었습니다" 라고 떠 있는데 메시지만 안 나갔다)

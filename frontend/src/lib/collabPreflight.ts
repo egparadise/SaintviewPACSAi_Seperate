@@ -24,6 +24,7 @@ export type BlockCode =
   | "policy_blocked"      // 서버: Permissions-Policy 헤더
   | "ws_blocked"          // 서버: nginx WebSocket 업그레이드
   | "no_turn"             // 서버: 타 망 참가자용 TURN 부재(경고)
+  | "p2p_failed"          // 서버: 미디어 경로 없음 — 실제 연결이 두 번 실패(STUN/TURN 필요)
   | "no_api"              // 브라우저: 지원하지 않음
   | "user_denied"         // 사용자: 거부
   | "no_device"           // 사용자: 장치 없음/점유 중
@@ -230,6 +231,26 @@ export function checkTurn(crossSite: boolean, iceCount: number): BlockItem[] {
     action: "TURN 서버를 두고 Setting > 협진 > ICE 서버에 등록하세요.",
     snippet: TURN_SETUP,
   }];
+}
+
+/** 상대와의 미디어 연결이 **두 번 연속** 실패했다 — "연결 중…"이 떴다가 사라지는 증상.
+ *
+ *  신호(offer/answer)는 서버로 정상으로 오갔는데 두 PC 사이의 미디어 경로(ICE)를 못
+ *  찾은 것이다. 원인은 거의 항상 STUN/TURN 부재 + 서로 다른 망이다(실사고 2026-08-12,
+ *  sv70). turnConfigured 에 따라 안내가 갈린다 — STUN 까지는 있는데 실패했으면 남은
+ *  답은 TURN 뿐이다(대칭 NAT 은 STUN 으로 뚫리지 않는다). */
+export function p2pFailedItem(peerName: string, turnConfigured: boolean): BlockItem {
+  return {
+    code: "p2p_failed", blocking: true, serverSide: true, subject: peerName,
+    title: "상대와 미디어 경로를 찾지 못했습니다",
+    why: "연결 신호는 정상으로 오갔지만(서버·권한 문제 아님) 두 PC 사이에 영상·음성이"
+       + " 지나갈 네트워크 길이 없습니다. 서로 다른 망(다른 건물·집·통신사)이거나, 같은"
+       + " 망이라도 P2P 가 차단된 경우입니다.",
+    action: turnConfigured
+      ? "TURN 서버가 설정되어 있는데도 실패했습니다 — TURN 주소·계정이 맞는지, 서버 방화벽(3478/UDP·TCP)이 열려 있는지 확인하세요."
+      : "서버 관리자가 TURN 서버를 설치하고 Setting > 협진의 ICE 서버 설정에 등록해야 합니다. STUN 만으로는 일부 망(대칭 NAT)을 넘을 수 없습니다.",
+    snippet: TURN_SETUP,
+  };
 }
 
 /** 실제 시도가 실패했을 때 — 오류를 원인별로 가른다.

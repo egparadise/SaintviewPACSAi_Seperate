@@ -17,6 +17,7 @@ import {
   checkSocket, preflightMedia, type BlockItem, type MediaKind,
 } from "../lib/collabPreflight";
 import { t as tr } from "../lib/i18n";
+import { effectiveIce } from "../lib/useMediaGuard";
 import { showToast } from "../lib/toast";
 
 const KINDS: MediaKind[] = ["microphone", "camera", "display-capture"];
@@ -130,6 +131,16 @@ export function CollabDiagPanel() {
               label={health ? `${tr("서버 수락")} ${health.ws.accepted}` : tr("서버 점검 실패")} />
         <Chip ok={server.length === 0} label={server.length
           ? `${tr("서버 조치 필요")} ${server.length}` : tr("서버 문제 없음")} />
+        {(() => {
+          // 통화 경로(ICE) — mesh 와 같은 해석 함수. 어느 층에서 온 값인지가 곧 진단이다.
+          const ice = effectiveIce();
+          const label = ice.source === "local" ? tr("통화 경로: 이 PC 설정")
+            : ice.source === "server" ? tr("통화 경로: 서버 설정")
+            : ice.source === "default" ? tr("통화 경로: 기본 STUN")
+            : tr("통화 경로: 없음 (사설망)");
+          return <Chip ok={ice.servers.length > 0 || ice.source === "none"}
+                       label={`${label} · ${ice.servers.length}`} />;
+        })()}
       </div>
 
       {/* 🔴 가장 중요한 단정 — 이 한 줄이 nginx 를 지목한다 */}

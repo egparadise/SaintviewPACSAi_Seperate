@@ -1177,3 +1177,72 @@ def list_diag(db: Session, account_id: int | None, limit: int = 50) -> list[dict
         "detail": (r.detail or {}).get("detail", ""),
         "who": (r.detail or {}).get("username", ""),
     } for r in rows]
+
+
+# ── ICE(STUN/TURN) 서버 설정 (2026-08-12) ───────────────────────────────────
+#
+# 왜 서버 설정인가: sv70(클라우드 배치)에서 1:1 통화가 "연결 중…" 뒤 조용히 실패했다.
+# 신호는 정상, ICE(미디어 경로) 실패 — 기본 ICE 가 빈 배열이라 서로 다른 망 사이에 길이
+# 없었다. 좌석마다 localStorage 에 넣게 하는 것은 운영이 안 된다(누가 어느 PC 에 넣었는지
+# 아무도 모른다) — 기관 전체 값은 서버가 한 곳에서 정하고 hello 로 배달한다.
+ICE_SETTING_KEY = "collab.ice_servers"
+_ICE_URL_OK = ("stun:", "turn:", "turns:")
+
+
+def sanitize_ice_servers(value) -> list[dict]:
+    """설정으로 들어온 ICE 목록 정규화 — 프론트 lib/collabIce.sanitizeIceServers 와 같은 규칙.
+
+    stun:/turn:/turns: 외 URL 과 모르는 키를 버린다. 오타 하나가 RTCPeerConnection 생성
+    예외로 이어지면 통화가 통째로 죽으므로, 저장 시점에 거른다(읽기 쪽은 신뢰).
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[dict] = []
+    for it in value:
+        if not isinstance(it, dict):
+            continue
+        urls = it.get("urls")
+        urls = urls if isinstance(urls, (list, tuple)) else [urls]
+        good = [str(u).strip() for u in urls
+                if isinstance(u, str) and str(u).strip().lower().startswith(_ICE_URL_OK)]
+        if not good:
+            continue
+        row: dict = {"urls": good}
+        if isinstance(it.get("username"), str) and it["username"]:
+            row["username"] = it["username"][:128]
+        if isinstance(it.get("credential"), str) and it["credential"]:
+            row["credential"] = it["credential"][:256]
+        out.append(row)
+    return out
+
+
+def get_ice_servers(db: Session) -> list[dict] | None:
+    """서버 설정 ICE. **None = 미설정**(클라이언트 기본 로직), [] = 명시적 끔(폐쇄망).
+
+    이 구분이 무너지면 안 된다 — 폐쇄망 관리자가 '끔'으로 저장했는데 None 으로 읽히면
+    클라이언트가 기본 STUN 을 되살려 매 통화 외부 질의를 하게 된다.
+    """
+    try:
+        from app.services.settings_service import get_setting
+
+        v = get_setting(db, ICE_SETTING_KEY, default=None)
+    except Exception:  # noqa: BLE001 — 설정 조회 실패가 협진 접속을 막으면 안 된다
+        return None
+    if v is None:
+        return None
+    servers = v.get("servers") if isinstance(v, dict) else v
+    if servers is None:
+        return None
+    return sanitize_ice_servers(servers)
+
+
+def set_ice_servers(db: Session, admin: Account, servers: list | None) -> list[dict] | None:
+    """관리자 저장. None = 설정 삭제(미설정으로 되돌림). 반환 = 저장된 정규화 목록."""
+    from app.services.settings_service import set_setting
+
+    clean = None if servers is None else sanitize_ice_servers(servers)
+    set_setting(db, ICE_SETTING_KEY, {"servers": clean})
+    _audit(db, admin.id, "collab_ice_set", "setting", ICE_SETTING_KEY,
+           {"count": len(clean) if clean is not None else -1})
+    db.commit()
+    return clean

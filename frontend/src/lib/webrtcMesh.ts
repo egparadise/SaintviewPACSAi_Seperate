@@ -13,6 +13,7 @@
 // 열어 보지 않고 지정 상대에게 넘기기만 한다(백엔드 collab_ws.py 릴레이 분기).
 
 import { collab } from "./collab";
+import { ICE_LS_KEY, resolveIceServers } from "./collabIce";
 import { CAM_DEV_KEY, MIC_DEV_KEY, preferredDevice } from "./mediaPerms";
 
 /** 저해상 고정 — 판독 화면 옆의 작은 타일이 목적이지 화상회의 품질이 목적이 아니다.
@@ -24,16 +25,20 @@ const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   echoCancellation: true, noiseSuppression: true, autoGainControl: true,
 };
 
-/** ICE 서버 — 기본은 **비어 있다**(사내망 host candidate 만으로 연결된다).
- *  병원 밖 협진이 필요하면 설정에서 STUN/TURN 을 넣는다. 공개 STUN 을 기본값으로 박아 두면
- *  폐쇄망 병원에서 매 통화마다 못 나가는 외부 주소로 질의하다 연결이 느려진다. */
+/** ICE 서버 — 해석은 lib/collabIce 한 곳뿐이다(이 PC 설정 > 서버 설정 > 기본).
+ *
+ *  ⚠ 예전엔 기본이 빈 배열이었다("사내망은 host candidate 로 충분"). 그 가정이 sv70 에서
+ *    깨졌다 — 클라우드 배치라 사용자들이 서로 다른 망에서 접속하고, 같은 LAN 이어도
+ *    브라우저가 호스트 후보를 mDNS 로 가려 멀티캐스트 막힌 망에서는 못 붙는다.
+ *    그래서 "연결 중…"이 떴다가(신호는 정상) 조용히 사라졌다(경로 없음 → ICE 실패).
+ *    폐쇄망 배려는 유지된다 — 사설 주소로 접속한 배치는 여전히 기본 STUN 을 켜지 않는다. */
 function iceServers(): RTCIceServer[] {
-  try {
-    const raw = localStorage.getItem("sv_collab_ice");
-    if (!raw) return [];
-    const v = JSON.parse(raw);
-    return Array.isArray(v) ? (v as RTCIceServer[]) : [];
-  } catch { return []; }
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(ICE_LS_KEY); } catch { /* 프라이버시 모드 등 */ }
+  return resolveIceServers({
+    localRaw: raw, server: collab.iceServers,
+    hostname: typeof window !== "undefined" ? window.location.hostname : "",
+  }).servers;
 }
 
 export interface PeerView {
@@ -57,6 +62,10 @@ export class WebrtcMesh {
   private videoSource: "camera" | "screen" | null = null;
   private listeners = new Set<Listener>();
   private mediaListeners = new Set<MediaListener>();
+  // 연결 실패 재시도 — 상대별 1회. 성공(connected)하거나 정상 정리(dropPeer)되면 리셋.
+  private retryCount = new Map<number, number>();
+  private retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private issueHandlers = new Set<(id: number) => void>();
   private off: (() => void) | null = null;
   private myId = 0;
   // null=검사 기반 협진 세션, dm:...=1:1 친구 통화. 서로 다른 통화의
@@ -293,7 +302,13 @@ export class WebrtcMesh {
     };
     pc.onconnectionstatechange = () => {
       this.states.set(id, pc.connectionState);
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") this.dropPeer(id);
+      if (pc.connectionState === "connected") this.retryCount.delete(id);
+      // ⚠ failed 를 조용히 지우면 안 된다 — 실사고: ICE 실패 시 타일이 "연결 중…" 뒤에
+      //   소리 없이 사라져서, 사용자도 관리자도 무엇이 잘못됐는지 알 길이 없었다.
+      //   한 번은 자동 재시도(순간적인 경로 단절은 이걸로 살아난다), 두 번째 실패는
+      //   원인 안내로 넘긴다(onPeerIssue → 진단 창 + 서버 기록).
+      if (pc.connectionState === "failed") this.handleFailure(id);
+      else if (pc.connectionState === "closed") this.dropPeer(id);
       else this.emit();
     };
     if (this.local) this.attachTracks(pc);
@@ -367,9 +382,43 @@ export class WebrtcMesh {
     for (const cand of queued) await pc.addIceCandidate(cand).catch(() => {});
   }
 
+  /** 연결 실패 처리 — 1회는 조용히 재시도, 그 다음은 사용자에게 원인을 알린다. */
+  private handleFailure(id: number) {
+    const n = (this.retryCount.get(id) ?? 0) + 1;
+    this.dropPeer(id);
+    this.retryCount.set(id, n);
+    if (n <= 1) {
+      // 재시도 — 기존 복구 신호를 그대로 쓴다: 큰 id 가 offer, 작은 id 는 rtc.ready 로
+      // 상대의 재-offer 를 유도한다(신규 연결 규칙과 동일 — glare 없음).
+      const timer = setTimeout(() => {
+        this.retryTimers.delete(id);
+        if (!this.off) return;                       // 이미 stop() 됐다
+        void this.connectTo(id);
+        if (this.myId < id) this.sendRtc("rtc.ready", id, null);
+      }, 1500);
+      this.retryTimers.set(id, timer);
+      return;
+    }
+    // 두 번째 실패 — 경로가 정말 없다(대개 STUN/TURN 부재 + 서로 다른 망).
+    // UI 가 진단 창을 띄우고 서버에 기록하도록 알린다.
+    for (const fn of [...this.issueHandlers]) {
+      try { fn(id); } catch { /* 리스너 예외 격리 */ }
+    }
+  }
+
+  /** 같은 상대에게 두 번 연속 연결이 실패했다 — 원인 안내가 필요하다는 신호.
+   *  (한 번의 실패는 자동 재시도로 조용히 넘어간다) */
+  onPeerIssue(fn: (id: number) => void): () => void {
+    this.issueHandlers.add(fn);
+    return () => { this.issueHandlers.delete(fn); };
+  }
+
   private dropPeer(id: number) {
     const pc = this.pcs.get(id);
     if (pc) { try { pc.close(); } catch { /* 무시 */ } }
+    const t = this.retryTimers.get(id);
+    if (t !== undefined) { clearTimeout(t); this.retryTimers.delete(id); }
+    this.retryCount.delete(id);
     this.pcs.delete(id);
     this.streams.delete(id);
     this.states.delete(id);

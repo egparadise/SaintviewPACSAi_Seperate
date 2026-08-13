@@ -14,6 +14,7 @@ import { useCallback, useState } from "react";
 import { api } from "../api";
 import type { CollabSeat } from "./collab";
 import { collab } from "./collab";
+import { ICE_LS_KEY, resolveIceServers, type IceResolution } from "./collabIce";
 import {
   checkSocket, checkTurn, classifyMediaError, preflightMedia, shouldAlert,
   type BlockItem, type MediaKind,
@@ -35,12 +36,15 @@ export function reportServerBlocks(items: BlockItem[]): void {
   }
 }
 
-/** 설정에 넣어 둔 ICE 서버 개수 — TURN 경고 판정용(webrtcMesh 와 같은 저장 키). */
-function iceCount(): number {
-  try {
-    const v = JSON.parse(localStorage.getItem("sv_collab_ice") ?? "[]");
-    return Array.isArray(v) ? v.length : 0;
-  } catch { return 0; }
+/** 지금 이 창에 실제로 적용될 ICE 구성 — webrtcMesh 가 쓰는 해석과 **같은 함수**를 쓴다.
+ *  (여기와 mesh 가 다른 값을 보면 "설정 화면엔 있다는데 통화는 안 되는" 어긋남이 생긴다) */
+export function effectiveIce(): IceResolution {
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(ICE_LS_KEY); } catch { /* 프라이버시 모드 */ }
+  return resolveIceServers({
+    localRaw: raw, server: collab.iceServers,
+    hostname: typeof window !== "undefined" ? window.location.hostname : "",
+  });
 }
 
 /** 참가자 중 나와 **다른 병원**이 있나 — 있으면 망이 갈릴 가능성이 크다(TURN 경고). */
@@ -90,7 +94,7 @@ export function useMediaGuard(seats?: CollabSeat[], meId = 0): MediaGuard {
       await work();
       // ── ③ 켜졌으면 타 망 경고 ─────────────────────────────────────────
       if (turningOn) {
-        const warn = checkTurn(hasCrossSitePeer(seats, meId), iceCount());
+        const warn = checkTurn(hasCrossSitePeer(seats, meId), effectiveIce().servers.length);
         if (warn.length) { setBlocks(warn); reportServerBlocks(warn); }
       }
     } catch (e) {

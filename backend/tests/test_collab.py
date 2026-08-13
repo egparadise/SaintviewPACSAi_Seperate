@@ -1406,3 +1406,52 @@ def test_live_vid_adopt_goes_to_a_not_local_annotation(client, db, duo, monkeypa
     db.expire_all()
     assert len(db.execute(_sel(Annotation)).scalars().all()) == before, \
         "Live 채택이 로컬 Annotation 에 들어갔다(FK 사고 경로)"
+
+
+# ═══════════ ICE(STUN/TURN) 설정 — 화상·음성 경로 (2026-08-12) ═══════════
+def test_ice_servers_delivered_in_hello_and_health(client, db, duo):
+    """서버 ICE 설정이 hello 와 health 로 배달된다 — null(미설정)과 [](끔)를 구분한다.
+
+    이 구분이 무너지면 폐쇄망 관리자가 '끔'으로 저장했는데 클라이언트가 기본 STUN 을
+    되살린다(원래 설계 취지 훼손). 실사고의 반대 방향 회귀 방지.
+    """
+    from app.services import collab_service as svc
+
+    tok = duo["hh"]["Authorization"].split(" ", 1)[1]
+    # ① 미설정 — null
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as ws:
+        hello = ws.receive_json()
+        assert hello["t"] == "hello" and hello["ice_servers"] is None
+    assert client.get("/api/collab/health", headers=duo["hh"]).json()["ice_servers"] is None
+
+    # ② 관리자 저장 — 다음 접속부터 배달
+    admin = _account(db, "ice_admin", duo["ha"].id, role="admin")
+    ahdr = _headers(db, admin)
+    r = client.put("/api/collab/ice", headers=ahdr,
+                   json={"servers": [{"urls": "turn:sv70:3478", "username": "u",
+                                      "credential": "c", "이상한키": 1},
+                                     {"urls": ["http://evil", "stun:ok:3478"]},
+                                     {"username": "고아"}]})
+    assert r.status_code == 200, r.text
+    saved = r.json()["servers"]
+    assert saved == [{"urls": ["turn:sv70:3478"], "username": "u", "credential": "c"},
+                     {"urls": ["stun:ok:3478"]}], "정규화가 안 됐다(오타가 통화를 죽인다)"
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as ws:
+        assert ws.receive_json()["ice_servers"] == saved
+
+    # ③ 명시적 끔([]) — null 로 뭉개지면 안 된다
+    assert client.put("/api/collab/ice", headers=ahdr, json={"servers": []}).status_code == 200
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as ws:
+        assert ws.receive_json()["ice_servers"] == []
+
+    # ④ 설정 삭제(null) — 미설정으로 복귀
+    assert client.put("/api/collab/ice", headers=ahdr, json={"servers": None}).status_code == 200
+    with client.websocket_connect("/api/collab/ws", subprotocols=["sv.bearer", tok]) as ws:
+        assert ws.receive_json()["ice_servers"] is None
+
+
+def test_ice_put_is_admin_only(client, db, duo):
+    """ICE 설정 변경은 관리자만 — 일반 사용자가 기관 전체 통화 경로를 바꾸면 안 된다."""
+    r = client.put("/api/collab/ice", headers=duo["gh"],
+                   json={"servers": [{"urls": "turn:x:1"}]})
+    assert r.status_code == 403
