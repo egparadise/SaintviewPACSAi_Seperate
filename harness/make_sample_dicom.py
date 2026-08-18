@@ -17,6 +17,9 @@ def make_ct_instance(
     patient_name: str = "SMOKE^TEST",
     study_uid: str | None = None,
     series_uid: str | None = None,
+    # (0020,0052) 기준 좌표계 — 좌표 정합(Crosslink·3D Cursor) 적격성 판정의 근거.
+    # 같은 시리즈는 같은 값을 넘겨야 실제 촬영과 같아진다(미지정이면 인스턴스마다 새로 만든다).
+    frame_of_reference_uid: str | None = None,
     study_date: str = "20260611",
     study_desc: str = "CT Chest (smoke)",
     body_part: str = "CHEST",
@@ -37,6 +40,7 @@ def make_ct_instance(
     ds.PatientSex = "M"
     ds.StudyInstanceUID = study_uid or generate_uid()
     ds.SeriesInstanceUID = series_uid or generate_uid()
+    ds.FrameOfReferenceUID = frame_of_reference_uid or generate_uid()
     ds.StudyDate = study_date
     ds.StudyTime = "120000"
     ds.AccessionNumber = f"ACC{patient_id[-3:]}"

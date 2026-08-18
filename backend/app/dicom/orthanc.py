@@ -146,6 +146,9 @@ class OrthancClient:
                 "pixel_spacing": _floats(itags.get("PixelSpacing", "")),       # [row, col] mm
                 "position": _floats(itags.get("ImagePositionPatient", "")),    # [x,y,z]
                 "orientation": _floats(itags.get("ImageOrientationPatient", "")),  # [rx..cz] 6개
+                # (0020,0052) 기준 좌표계 — Crosslink/3D Cursor 가 '정합이 성립하나'를 판정하는 근거.
+                # 없으면 빈 문자열이고, 그때는 판정이 통과한다(모름 ≠ 다름 — lib/spatialSync 계약).
+                "frame_of_reference_uid": str(itags.get("FrameOfReferenceUID", "") or "").strip(),
                 # MG 4-view 표준 배치용 — Live 경로(webpacs_live)와 같은 필드명
                 "view_position": str(itags.get("ViewPosition", "") or "").strip().upper(),
                 "laterality": str(itags.get("ImageLaterality", "")
@@ -164,6 +167,7 @@ class OrthancClient:
                 f"/studies/{orthanc_study_id}/instances",
                 params={"requestedTags": "SOPInstanceUID;InstanceNumber;Rows;Columns;"
                                          "PixelSpacing;ImagePositionPatient;ImageOrientationPatient;"
+                                         "FrameOfReferenceUID;"
                                          "ViewPosition;ImageLaterality;Laterality"},
                 timeout=120,
             )

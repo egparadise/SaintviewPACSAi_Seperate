@@ -2895,5 +2895,13 @@ const d: Record<string, string> = {
   "연결 신호는 정상으로 오갔지만(서버·권한 문제 아님) 두 PC 사이에 영상·음성이 지나갈 네트워크 길이 없습니다. 서로 다른 망(다른 건물·집·통신사)이거나, 같은 망이라도 P2P 가 차단된 경우입니다.": "La señalización funcionó (no es problema de servidor ni permisos), pero no hay ruta de red para el audio/vídeo entre los dos PC. Están en redes distintas (otro edificio, casa, operador) o el P2P está bloqueado incluso en la misma red.",
   "TURN 서버가 설정되어 있는데도 실패했습니다 — TURN 주소·계정이 맞는지, 서버 방화벽(3478/UDP·TCP)이 열려 있는지 확인하세요.": "Falló incluso con TURN configurado: revise la dirección/credenciales de TURN y que el cortafuegos del servidor (3478/UDP·TCP) esté abierto.",
   "서버 관리자가 TURN 서버를 설치하고 Setting > 협진의 ICE 서버 설정에 등록해야 합니다. STUN 만으로는 일부 망(대칭 NAT)을 넘을 수 없습니다.": "El administrador debe instalar un servidor TURN y registrarlo en Setting > Colaboración (ajustes ICE). Solo con STUN no se cruzan algunas redes (NAT simétrico).",
+  "Stack 동기 방식 (G 키)": "Modo de sincronización de pila (G)",
+  "Stack 동기 방식 (G 키) — Spatial: 같은 기준 좌표계·같은 단면 방향·겹치는 범위일 때 DICOM 좌표로 정합(그 밖에는 인덱스로 폴백하고 사유를 알립니다) / Index: 1:1 인덱스": "Modo de sincronización de pila (G) — Spatial: alinea por coordenadas DICOM cuando coinciden el sistema de referencia, la orientación del corte y la cobertura (si no, recurre al índice e indica el motivo) / Index: índice 1:1",
+  "3D Cursor — 좌표계가 다르거나 촬영 범위 밖인 화면에는 표시하지 않았습니다": "Cursor 3D — no se muestra en paneles con otro sistema de referencia o fuera del rango explorado",
+  "3D Cursor — 이 영상에는 좌표 정보가 없어 다른 화면으로 연동하지 않습니다": "Cursor 3D — esta imagen no tiene datos de coordenadas, por lo que no se vincula a otros paneles",
+  "기준 좌표계(Frame of Reference)가 달라 좌표 정합을 쓸 수 없습니다 — 인덱스로 동기합니다": "Sistema de referencia distinto: la alineación por coordenadas no es válida, se sincroniza por índice",
+  "단면 방향이 달라 '같은 레벨'이 성립하지 않습니다 — 인덱스로 동기합니다": "Orientación de corte distinta: no existe un nivel equivalente, se sincroniza por índice",
+  "겹치는 촬영 범위가 없어 좌표 정합을 쓸 수 없습니다 — 인덱스로 동기합니다": "Sin solapamiento del rango explorado: no es posible alinear por coordenadas, se sincroniza por índice",
+  "좌표 정보(DICOM 위치)가 없어 인덱스로 동기합니다": "Sin datos de coordenadas (posición DICOM): se sincroniza por índice",
 };
 export default d;

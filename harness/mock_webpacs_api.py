@@ -48,12 +48,13 @@ def build_app(*, num_studies: int = 2, instances_per_study: int = 3,
     for n in range(1, num_studies + 1):
         study_uid = generate_uid()
         series_uid = generate_uid()
+        for_uid = generate_uid()          # 같은 시리즈 = 같은 기준 좌표계(실제 촬영과 동형)
         pid = f"WPX{n:04d}"
         images = []
         for i in range(1, instances_per_study + 1):
             ds = make_ct_instance(
                 patient_id=pid, patient_name=f"WEBPACS^MOCK{n}",
-                study_uid=study_uid, series_uid=series_uid,
+                study_uid=study_uid, series_uid=series_uid, frame_of_reference_uid=for_uid,
                 study_desc=f"CT Chest (webpacs mock {n})", instance_number=i,
             )
             buf = io.BytesIO()

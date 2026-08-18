@@ -798,3 +798,19 @@ def test_worklist_rows_carry_a_comments(client, live_ready):
     assert all("exam_comment" in x and "hospital_comment" in x for x in rows)
     assert any(x["exam_comment"].startswith("검사코멘트") for x in rows), "A study_comment 원천"
     assert any(x["hospital_comment"].startswith("-/-/병원메모") for x in rows), "A original_comments 원천"
+
+
+def test_series_tree_carries_frame_of_reference(client, live_ready):
+    """FrameOfReferenceUID(0020,0052) 가 Live 시리즈 트리에 실린다 — 좌표 정합(Crosslink·
+    3D Cursor) 적격성 판정의 **유일한 근거**다. 이 태그가 빠지면 프론트는 '모름'으로 보고
+    가드를 통과시키므로, 빠진 것을 화면에서는 알 수 없다(그래서 여기서 고정한다)."""
+    tok = _a_doctor_headers(client)
+    wl = client.get("/api/webpacs/live/worklist", headers=tok, params={"limit": 1}).json()
+    vid = wl["items"][0]["id"]
+    r = client.get(f"/api/webpacs/live/studies/{vid}/series-tree", headers=tok)
+    assert r.status_code == 200, r.text
+    insts = [i for s in r.json()["series"] for i in s["instances"]]
+    assert insts, "인스턴스가 있어야 한다"
+    fors = {i.get("frame_of_reference_uid", "") for i in insts}
+    assert all(fors), f"모든 인스턴스에 FoR 이 실려야 한다: {fors}"
+    assert len(fors) == 1, "같은 시리즈는 같은 기준 좌표계"

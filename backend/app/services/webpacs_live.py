@@ -609,6 +609,8 @@ def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
                 "pixel_spacing": [float(x) for x in spacing][:2],
                 "position": [float(x) for x in position][:3],
                 "orientation": [float(x) for x in orientation][:6],
+                # (0020,0052) 기준 좌표계 — 좌표 정합 적격성 판정의 근거(없으면 빈 값 → 판정 통과).
+                "frame_of_reference_uid": str(_tag1(m, "00200052", "") or "").strip(),
                 # MG 4-view 표준 배치(RCC|LCC / RMLO|LMLO)의 근거 — 4장이 한 시리즈에 든 검사는
                 # 이 태그 없이는 어느 장이 어느 뷰인지 알 수 없어 **저장 순서대로** 깔렸다
                 # (실제 증상: L 유방이 화면 왼쪽에 왔다). 화면의 큰 LCC/RCC 글자는 픽셀에

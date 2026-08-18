@@ -1678,6 +1678,10 @@ export interface InstanceNode {
   study_uid?: string;        // Combine 시 인스턴스의 원본 검사 UID — 다른 검사(과거/비교) 시리즈 결합 시 정확한 스터디로 요청
   view_position?: string;    // (0018,5101) MG 뷰(CC/MLO) — 4-view 표준 배치의 근거
   laterality?: string;       // (0020,0062) 좌우 — R 은 화면 왼쪽, L 은 오른쪽에 걸어야 한다
+  /** (0020,0052) FrameOfReferenceUID — 좌표 정합(Crosslink·3D Cursor)의 적격성 판정 근거.
+   *  **없을 수 있다**(구형 데이터·태그 미수집). 그때는 '모름'으로 다루고 막지 않는다 —
+   *  판정 규칙은 lib/spatialSync 한 곳에 있다. */
+  frame_of_reference_uid?: string;
 }
 
 export interface SeriesNode {

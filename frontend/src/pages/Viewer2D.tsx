@@ -8,13 +8,15 @@ import { GridPicker } from "../lib/GridPicker";
 import { openReportWindow, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab, postViewerOpened } from "../lib/sync";
 import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerClosing, markViewerMounted } from "../lib/viewerClose";
+import { type SyncReason, nearestSlice, projectPoint, syncReasonText } from "../lib/spatialSync";
 import { focusWorklistWindow } from "../lib/worklistFocus";
 import { clearViewerSlots, isViewerSlotName, otherLiveViewerCount, releaseViewerSlot, startViewerSlotHeartbeat } from "../lib/viewerSlots";
 import { releaseHeldStudies, startHeldStudiesHeartbeat } from "../lib/dlHeld";
 import { Splitter, clampSz } from "../lib/Splitter";
 import { hpExamOf, hpRuleOrder, matchHpRule, readHpDoc, type HpRule } from "../lib/hangingProtocol";
+// vdot/vsub 는 더 이상 여기서 쓰지 않는다 — 3D Cursor 투영 계산이 lib/spatialSync 로 옮겨갔다.
 import { XLINK_DEFAULT, geomOf, lineStyle, pickLineSources, positionLabel, scoutSegment,
-         vdot, vsub, type V3, type XlinkState } from "../lib/scoutLines";
+         type V3, type XlinkState } from "../lib/scoutLines";
 import { railSpec, railStyle, readToolPanelOpen, writeToolPanelOpen } from "../lib/toolPanel";
 import { hpCaptureScreen, hpMonitorIndex, hpPlanCells, hpScreenHasPlacement, pickHpScreen } from "../lib/hpCapture";
 import HpMenu, { type HpMenuCapture } from "../components/HpMenu";
@@ -231,22 +233,11 @@ function seriesTag(s: SeriesNode): string {
   if (g) { const x = Math.abs(g.n[0]), y = Math.abs(g.n[1]), z = Math.abs(g.n[2]); plane = z >= x && z >= y ? "AX" : x >= y ? "SAG" : "COR"; }
   return [seq, plane].filter(Boolean).join(" ");
 }
-/* Spatial cross-reference (Infinitt식) — 마스터 슬라이스의 DICOM 위치를 타깃 시리즈 슬라이스 법선에 투영,
-   해부학적으로 가장 가까운 슬라이스 index 반환. 두께·장수·각도가 달라도 정합. 좌표 없으면 null(→ 인덱스 폴백). */
-function nearestSliceIndex(masterInst: InstanceNode, target: SeriesNode): number | null {
-  const gm = geomOf(masterInst);
-  if (!gm) return null;
-  let best = -1, bestD = Infinity;
-  for (let i = 0; i < target.instances.length; i++) {
-    const gt = geomOf(target.instances[i]);
-    if (!gt) continue;
-    const nn = Math.hypot(gt.n[0], gt.n[1], gt.n[2]) || 1;
-    const loc = (p: V3) => (p[0] * gt.n[0] + p[1] * gt.n[1] + p[2] * gt.n[2]) / nn;   // 슬라이스 위치(법선 투영)
-    const d = Math.abs(loc(gm.pos) - loc(gt.pos));
-    if (d < bestD) { bestD = d; best = i; }
-  }
-  return best >= 0 ? best : null;
-}
+/* Spatial cross-reference — **lib/spatialSync.nearestSlice 한 곳**을 쓴다.
+   여기 있던 사본(nearestSliceIndex)을 지웠다: 그 판은 FrameOfReference·거리 상한·평면 평행성을
+   전혀 보지 않아, 좌표계가 다른 과거검사나 축이 다른 시리즈에서도 '가장 가까운 슬라이스'를
+   **정답처럼** 돌려줬다(2026-08-12 감사 확정). 공용 판은 성립하지 않으면 사유와 함께 null 을 주고,
+   호출부는 예전 동작(인덱스 1:1)으로 폴백하면서 화면에 사유를 알린다. */
 
 /* ── TY-3: 작업 히스토리 스냅샷 — 시각조정(줌/팬/회전/반전/W-L/필터/셔터)+주석 (In takeSnap 이식) ── */
 type VisSnap = Pick<PaneState, "zoom" | "tx" | "ty" | "rot" | "flipH" | "flipV" | "invert" | "wl" | "fx" | "shutter">;
@@ -794,6 +785,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   useEffect(() => { xlinkRef.current = xlink; }, [xlink]);
   // 듀얼모드 Stack 동기 — true=Spatial(DICOM 좌표 해부학적 정합, Infinitt식), false=Index(1:1 인덱스, TY식). 'G' 로 토글.
   const [spatialSync, setSpatialSync] = useState(true);
+  // 좌표 정합이 성립하지 않아 인덱스로 폴백한 사유 — Spatial 버튼 ⚠ 배지 + 상태바 안내.
+  // setPanes 업데이터(순수해야 함) 안에서는 ref 에만 적고, panes 변경 후 effect 가 화면에 반영한다.
+  const [syncWarn, setSyncWarn] = useState<SyncReason | null>(null);
+  const syncWarnRef = useRef<SyncReason | null>(null);
   const spatialSyncRef = useRef(spatialSync);
   useEffect(() => { spatialSyncRef.current = spatialSync; }, [spatialSync]);
   // TY-3(2): 멀티 페인 선택 — Shift=범위/Ctrl=토글/A=전체, 선택 페인 연동 조작 (In selPanes 이식)
@@ -1078,6 +1073,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /* ── TY-3(1): 작업 히스토리 ◀◯▶ — 스냅샷 최대 50, Undo/초기화/Redo (In pushHist/histGo 이식) ── */
   const panesRef = useRef(panes);
   useEffect(() => { panesRef.current = panes; }, [panes]);
+  // 좌표 정합 폴백 사유를 화면으로 — step 업데이터가 ref 에 남긴 값을 여기서 상태로 옮긴다.
+  useEffect(() => {
+    const w = syncWarnRef.current;
+    setSyncWarn((prev) => (prev === w ? prev : w));
+    if (w) setStatus(tr(syncReasonText(w)));
+  }, [panes]);
   const annosRef = useRef(annos);
   useEffect(() => { annosRef.current = annos; }, [annos]);
   // 저장 기준선 — 서버에 저장된 주석의 JSON 집합. 툴 Off/Rfsh 시 '미저장 작업'만 지우는 판별 기준.
@@ -2055,27 +2056,72 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       const targets = new Set<string>();
       // I-View 와 같은 판정: crosslink 마스터가 켜져 있어야 하고, 그 안에서
       // auto_sync=같은 검사 / sync_other=다른 검사(과거). 둘 다 켜면 둘 다 따라온다.
-      if (xlink.crosslink) vis.forEach((v) => {
-        if (v === pid) return;
-        const same = prev[v]?.studyUid === prev[pid]?.studyUid;
-        if ((xlink.auto_sync && same) || (xlink.sync_other && !same)) targets.add(v);
-      });
-      const sel = selPanesRef.current;
-      if (sel.size > 1 && sel.has(pid)) sel.forEach((v) => { if (v !== pid) targets.add(v); });
-      // 3) 타깃 동기 — 듀얼모드: Spatial(DICOM 좌표 해부학적 최근접) 우선, 좌표 없으면 Index(1:1) 폴백
+      if (xlink.crosslink) {
+        vis.forEach((v) => {
+          if (v === pid) return;
+          const same = prev[v]?.studyUid === prev[pid]?.studyUid;
+          if ((xlink.auto_sync && same) || (xlink.sync_other && !same)) targets.add(v);
+        });
+        // 멀티선택 연동도 **마스터 게이트 안**이다(2026-08-12 수정) — 예전엔 이 줄이 밖에 있어
+        // Crosslink 를 꺼도 페인 2개를 선택해 두면 다른 검사가 따라 움직였다(targetsOf 와 정책이 갈렸다).
+        const sel = selPanesRef.current;
+        if (sel.size > 1 && sel.has(pid)) sel.forEach((v) => { if (v !== pid) targets.add(v); });
+      }
+      // 3) 타깃 동기 — Spatial(좌표 정합)이 **성립할 때만** 좌표, 아니면 사유를 남기고 Index 폴백
+      let warn: SyncReason | null = null;
       targets.forEach((id) => {
         const tp = next[id];
         if (!tp?.series) return;
         let ti: number | null = null;
         if (spatialSyncRef.current && mInst) {
-          ti = tp.series.series_uid === mSeriesUid   // 같은 시리즈면 동일 위치(정확·경량)
-            ? mIdx : nearestSliceIndex(mInst, tp.series);
+          if (tp.series.series_uid === mSeriesUid) {
+            ti = mIdx;                                  // 같은 시리즈면 동일 위치(정확·경량)
+          } else {
+            const r = nearestSlice(mInst, tp.series.instances);
+            ti = r.index;
+            if (r.reason !== "ok") warn = r.reason;      // 폴백 사유 — 화면에 알린다
+          }
         }
         next[id] = { ...tp, index: ti != null ? ti : clampI(tp.series.instances.length, tp.index + dir * stride) };
       });
+      syncWarnRef.current = warn;
       return next;
     });
   }, [xlink, layout]);
+
+  /** 점프 계열(처음/끝·썸네일 클릭·타일 더블클릭)의 크로스링크 동기 — step 과 같은 정책.
+   *  step 은 '한 칸 이동'이라 정합 실패 시 델타 폴백이 자연스럽지만, 점프는 기준 델타가 없으므로
+   *  **정합이 성립할 때만** 타깃을 옮긴다(없는 정합을 만들어 내지 않는다).
+   *  2026-08-12 수정 이전에는 이 경로들에 동기가 아예 없어, Crosslink 를 켜 두고 끝으로 점프하면
+   *  과거검사 페인만 이전 레벨에 남았다(화면은 여전히 연동 중이라고 표시). */
+  const syncJump = useCallback((pid: string, newIndex: number) => {
+    if (!xlinkRef.current.crosslink || !spatialSyncRef.current) return;
+    setPanes((prev) => {
+      const mp = prev[pid];
+      const mInst = mp?.series?.instances[newIndex];
+      if (!mInst) return prev;
+      const vis = PANE_IDS.slice(0, LAYOUTS[layout].count);
+      const next = { ...prev };
+      let warn: SyncReason | null = null;
+      let moved = false;
+      for (const v of vis) {
+        if (v === pid) continue;
+        const tp = prev[v];
+        if (!tp?.series) continue;
+        const same = tp.studyUid === mp?.studyUid;
+        const selHit = selPanesRef.current.size > 1 && selPanesRef.current.has(pid) && selPanesRef.current.has(v);
+        if (!((xlinkRef.current.auto_sync && same) || (xlinkRef.current.sync_other && !same) || selHit)) continue;
+        if (tp.series.series_uid === mp?.series?.series_uid) {
+          next[v] = { ...tp, index: newIndex }; moved = true; continue;
+        }
+        const r = nearestSlice(mInst, tp.series.instances);
+        if (r.index != null) { next[v] = { ...tp, index: r.index }; moved = true; }
+        else warn = r.reason;
+      }
+      syncWarnRef.current = warn;
+      return moved || warn ? next : prev;
+    });
+  }, [layout]);
 
   // ── 인접 슬라이스 프리페치 — 인덱스/시리즈가 바뀔 때만 진행 방향 앞 8·뒤 3장 선제 로드.
   //    (W/L·zoom 등 다른 페인 상태 변경에는 발동하지 않음 — 드래그 중 요청 폭주 방지) ──
@@ -2513,11 +2559,17 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
      open-ended(spineCurve/poly/shutPoly)는 점 수 제한 없이 수집, 더블클릭(finishOpenEnded)으로 종료 */
   const handleAnnoPoint = (pid: string, e: React.MouseEvent) => {
     const p = panes[pid];
-    const inst = p.series?.instances[p.index];
+    // Image Layout(N×M 타일) — **클릭한 타일**의 사각형·인스턴스를 기준으로 좌표를 만든다.
+    // 2026-08-12 수정 이전에는 항상 tile-0 과 페인 전체 rect 를 써서, 2×2 에서 타일 중앙을 찍으면
+    // 0.5 가 아니라 0.25 로 해석됐다(어느 타일을 찍든 틀렸다). 3D Cursor 뿐 아니라 이 함수를
+    // 공유하는 계측·주석 전부가 틀린 좌표로 생성되고 있었다. 1×1 페인은 타일 요소가 없어 종전과 동일.
+    const tileEl = (e.target as HTMLElement)?.closest?.("[data-tile-k]") as HTMLElement | null;
+    const tileK = tileEl ? Number(tileEl.dataset.tileK) || 0 : 0;
+    const inst = p.series?.instances[p.index + tileK] ?? p.series?.instances[p.index];
     if (!tool || !p.series || !inst) return;
     if (OPEN_ENDED.has(tool) && e.detail > 1) return;  // 더블클릭 2번째 mousedown 은 점 추가 안 함
     const aspect = inst.cols && inst.rows ? inst.cols / inst.rows : 1;
-    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+    const rect = (tileEl ?? (e.currentTarget as HTMLDivElement)).getBoundingClientRect();
     const pt = screenToImage(e.clientX, e.clientY, rect, mgAt(p, rect), aspect);
     if (!pt) return;
     const need = TOOL_PTS[tool] ?? 2;
@@ -2574,53 +2626,41 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         const g = geomOf(inst);
         const markers: Record<string, { sop: string; x: number; y: number }> = {};
         if (g) {
-          // 기하 있음 — 클릭점을 3D 좌표로 → 각 페인 시리즈에서 평면 거리 최소 인스턴스로 이동
+          // 클릭점을 3D 환자좌표로 → 각 페인에 투영. **적격성은 lib/spatialSync.projectPoint 한 곳**:
+          // 기준 좌표계(FoR) 충돌·볼륨(슬랩) 밖·FOV 밖이면 그 페인은 건너뛴다.
+          // 2026-08-12 수정 이전에는 무조건 '가장 가까운 슬라이스' 하나를 골라 마커를 찍었고,
+          // 좌표가 화면 밖이면 십자선은 잘려 보이지 않은 채 **슬라이스만 조용히 튀었다**.
+          // ※ 평행성은 일부러 보지 않는다 — Axial 클릭 → Sagittal 십자선이 3D Cursor 의 존재 이유다.
           const px = points[0][0] * (inst.cols || 1), py = points[0][1] * (inst.rows || 1);
           const P: V3 = [0, 1, 2].map((k) => g.pos[k] + px * g.cs * g.row[k] + py * g.rs * g.col[k]);
+          const cur = panesRef.current;
+          const moveTo: Record<string, number> = {};
+          let skipped = 0;
+          for (const id of vis) {
+            const s = cur[id]?.series;
+            if (!s) continue;
+            const hit = projectPoint(P, inst, s.instances);
+            if (!hit) { if (id !== pid) skipped++; continue; }
+            markers[id] = { sop: s.instances[hit.index].sop_uid, x: hit.x, y: hit.y };
+            moveTo[id] = hit.index;
+          }
           setPanes((prev) => {
             const next = { ...prev };
-            for (const id of vis) {
-              const q = prev[id];
-              const s = q?.series;
-              if (!s) continue;
-              let best = -1, bd = Infinity;
-              for (let k = 0; k < s.instances.length; k++) {
-                const qg = geomOf(s.instances[k]);
-                if (!qg) continue;
-                const nl = Math.hypot(...qg.n) || 1;
-                const dist = Math.abs(vdot(qg.n, vsub(P, qg.pos))) / nl;
-                if (dist < bd) { bd = dist; best = k; }
-              }
-              if (best < 0) continue;
-              const bi = s.instances[best];
-              const bg = geomOf(bi)!;
-              const dv = vsub(P, bg.pos);
-              markers[id] = { sop: bi.sop_uid,
-                              x: vdot(dv, bg.row) / bg.cs / (bi.cols || 1),
-                              y: vdot(dv, bg.col) / bg.rs / (bi.rows || 1) };
-              next[id] = { ...q, index: best };
+            for (const [id, k] of Object.entries(moveTo)) {
+              if (next[id]) next[id] = { ...next[id], index: k };
             }
             return next;
           });
+          if (skipped) {
+            setStatus(tr("3D Cursor — 좌표계가 다르거나 촬영 범위 밖인 화면에는 표시하지 않았습니다"));
+          }
         } else {
-          // 기하 정보 없음 — 같은 시리즈 index 비율 동기 근사 (마커는 동일 정규화 좌표)
-          const src = p.series!;
-          const ratio = src.instances.length > 1 ? p.index / (src.instances.length - 1) : 0;
-          setPanes((prev) => {
-            const next = { ...prev };
-            for (const id of vis) {
-              const q = prev[id];
-              const s = q?.series;
-              if (!s) continue;
-              const k = Math.round(ratio * (s.instances.length - 1));
-              const bi = s.instances[k];
-              if (!bi) continue;
-              markers[id] = { sop: bi.sop_uid, x: points[0][0], y: points[0][1] };
-              next[id] = { ...q, index: k };
-            }
-            return next;
-          });
-          setStatus(tr("3D Cursor — 기하 정보 없음: index 비율 근사 동기"));
+          // 좌표 정보가 없는 영상(구형 CR/DX·2차 캡처 등) — **클릭한 화면에만** 마커를 남긴다.
+          // 예전에는 같은 정규화 좌표를 모든 페인에 복사하고 index 비율로 옮겼는데, 그러면
+          // 기하가 멀쩡한 CT/MR 페인까지 해부학적으로 무의미한 지점을 정상 커서와 똑같은 모양으로
+          // 지시했다(판독 안전 문제라 축소했다).
+          markers[pid] = { sop: inst.sop_uid, x: points[0][0], y: points[0][1] };
+          setStatus(tr("3D Cursor — 이 영상에는 좌표 정보가 없어 다른 화면으로 연동하지 않습니다"));
         }
         setCross3d(markers);
         return;
@@ -3827,7 +3867,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                   const tIdx = p.index + k;          // 이 타일이 실제로 보여 주는 이미지 번호
                   const nInst = p.series?.instances.length ?? 0;
                   return (
-                    <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)}
+                    <div key={k} ref={sizeRef(`${pid}:${k}`)} data-sv-mg={mgStamp(fk)} data-tile-k={k}
                          // 타일 더블클릭 = 이 이미지를 1×1 로 펼치고, 이후 스크롤로 시리즈 전체를 본다.
                          // 페인 더블클릭(최대화)으로 번지지 않게 stopPropagation.
                          onDoubleClick={(e) => {
@@ -3835,6 +3875,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                            e.stopPropagation();
                            setImgLay({ r: 1, c: 1 });
                            patch(pid, { il: { r: 1, c: 1 }, index: tIdx, ilPrev: p.il ?? null });
+                           syncJump(pid, tIdx);
                            setActivePane(pid);
                            setStatus(`${tr("이미지")} ${tIdx + 1}/${nInst} — ${tr("스크롤로 시리즈 전체 이동 (더블클릭: 분할 복귀)")}`);
                          }}
@@ -4210,11 +4251,16 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             ))}
           </div>
           {/* 듀얼모드 Stack 동기 방식 (G 키) — Spatial=DICOM 좌표 정합 / Index=1:1 */}
-          <button title={tr("Stack 동기 방식 (G 키) — Spatial: DICOM 좌표로 해부학적 정합(두께·각도·장수 달라도) / Index: 1:1 인덱스(좌표 없는 로컬 데이터·강제 정합)")}
+          {/* ⚠ 배지 = 좌표 정합이 성립하지 않아 인덱스로 폴백 중(사유는 상태바). 예전에는 이 경우에도
+              'Spatial(해부학적 정합)'이라고만 표시해 **틀린 정합을 맞다고 믿게** 만들었다. */}
+          <button title={syncWarn
+                    ? `${tr("Stack 동기 방식 (G 키)")} — ⚠ ${tr(syncReasonText(syncWarn))}`
+                    : tr("Stack 동기 방식 (G 키) — Spatial: 같은 기준 좌표계·같은 단면 방향·겹치는 범위일 때 DICOM 좌표로 정합(그 밖에는 인덱스로 폴백하고 사유를 알립니다) / Index: 1:1 인덱스")}
                   onClick={() => setSpatialSync((s) => !s)}
                   style={{ fontSize: 10.5, padding: "4px 2px", width: paletteHoriz ? 62 : "100%",
-                           background: spatialSync ? "var(--accent)" : undefined, color: spatialSync ? "#fff" : undefined }}>
-            {spatialSync ? "◈ Spatial" : "▤ Index"}
+                           background: spatialSync ? (syncWarn ? "var(--stat-reading)" : "var(--accent)") : undefined,
+                           color: spatialSync ? "#fff" : undefined }}>
+            {spatialSync ? (syncWarn ? "◈ Spatial ⚠" : "◈ Spatial") : "▤ Index"}
           </button>
         </>
       )}
@@ -4683,10 +4729,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         break;
       case "save": void saveAnnos(); break;
       case "refresh": act("rfsh"); break;
-      case "img_first": patch(activePane, { index: 0 }); break;
+      case "img_first": patch(activePane, { index: 0 }); syncJump(activePane, 0); break;
       case "img_last": {
         const pl = panes[activePane]?.series?.instances.length ?? 0;
-        if (pl > 0) patch(activePane, { index: pl - 1 });
+        if (pl > 0) { patch(activePane, { index: pl - 1 }); syncJump(activePane, pl - 1); }
         break;
       }
       case "rotate_l": act("rotL"); break;
@@ -4878,7 +4924,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
               {s.instances.slice(0, 60).map((inst, idx) => (
                 <div key={inst.sop_uid} data-sop={inst.sop_uid} style={{ position: "relative", flexShrink: 0 }}>
                   <img src={inst.preview_url} alt="" loading="lazy" decoding="async" title={`Img ${inst.instance_number}${keyMarks.has(inst.sop_uid) ? " · 🔑 KEY" : ""}`}
-                       onClick={() => patch(activePane, { studyUid: uidOfSeries(s.series_uid), series: s, index: idx })}
+                       onClick={() => { patch(activePane, { studyUid: uidOfSeries(s.series_uid), series: s, index: idx }); syncJump(activePane, idx); }}
                        style={{ width: ts * 0.6, height: ts * 0.45, objectFit: "cover", borderRadius: 2, cursor: "pointer", display: "block",
                                 border: inst.sop_uid === curInstAP?.sop_uid
                                   ? "2px solid #4ade80"   // 현재 표시 이미지(Combine 포함)
