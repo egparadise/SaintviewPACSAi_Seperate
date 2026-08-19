@@ -62,15 +62,20 @@ const ANATOMY_ICONS: Record<string, React.ReactNode> = {
       <line x1="2" y1="12" x2="22" y2="12" stroke="#38bdf8" strokeWidth="0.9" strokeDasharray="2 1.6" />
     </svg>
   ),
-  spine: (   // 척추 — 추체 스택
+  spine: (   // Spine Label — 추체 스택(I-View 톤) + **번호 라벨 칩**(실제 화면의 노란 L1/L2 마커색)
+    // 2026-08-19: 예전에는 우측 칩이 뼈색이라 '추체 그림'으로만 읽혔다. 이 툴의 기능은
+    // '클릭한 지점에 연번을 붙이는 것'이므로 라벨 칩을 노랗게 해 기능이 드러나게 했다.
+    // 칩 3개(추체는 4개)로 줄여 13~28px 에서 칩이 뭉개지지 않는다.
     <svg width="1.2em" height="1.2em" viewBox="0 0 24 24">
-      {[3.4, 7.2, 11, 14.8, 18.6].map((y, i) => (
-        <g key={i}>
-          <rect x="8.6" y={y} width="6.8" height="2.9" rx="1.2" fill="#e7d8b8" stroke="#8a744a" strokeWidth="0.7" />
-          <rect x="15.8" y={y + 0.6} width="3.2" height="1.7" rx="0.8" fill="#cbb58c" />
-        </g>
+      {[3.6, 8.4, 13.2, 18].map((y) => (
+        <rect key={y} x="6.4" y={y} width="6.6" height="3.2" rx="1.2"
+              fill="#e7d8b8" stroke="#8a744a" strokeWidth="0.7" />
       ))}
-      <path d="M12 2.6 V21.4" stroke="#8a744a" strokeWidth="0.6" opacity="0.5" />
+      {[4.1, 8.9, 13.7].map((y) => (
+        <rect key={y} x="14.4" y={y} width="5" height="2.2" rx="0.9"
+              fill="#facc15" stroke="#a16207" strokeWidth="0.55" />
+      ))}
+      <path d="M9.7 2.8 V21.6" stroke="#8a744a" strokeWidth="0.6" opacity="0.45" />
     </svg>
   ),
   cobb: (   // 측만 척추 + 각도선

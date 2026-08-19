@@ -4127,6 +4127,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       mkItem("arrow", "Arrow", () => pickTool("arrow")),
       mkItem("angle", "Angle", () => pickTool("angle")),
       mkItem("text", "Text", () => pickTool("text")),
+      // SpLbl(연번 라벨) — T-View 에만 있던 것을 SaintView 메뉴에도(2026-08-19 사용자 확정).
+      // 로직은 case "spine" 한 곳을 그대로 쓰고(중복 구현 금지), **아이콘만** SaintView 전용
+      // id(spineSaint)로 갈라 각 뷰어의 아이콘 톤을 지킨다.
+      { ...mkItem("spine", "Spine Label", () => pickTool("spine")), icon: "spineSaint" },
       mkItem("ellipse", "Oval ROI", () => pickTool("ellipse")),
       mkItem("rect", "Rectangle ROI", () => pickTool("rect")),
       mkItem("poly", "Free ROI", () => pickTool("poly")),

@@ -139,6 +139,20 @@ const TY2: Record<string, IconDef> = {
     ),
     spec: [8.3, 4.3, 1.1, 0.7, -30],
   },
+  // Spine Label (SaintView 전용) — '지점을 순서대로 찍는다'를 두 마커 + 순서 화살로 표현.
+  // T-View 판(spine: 추체 점 3개 + 라벨 틱)과 **일부러 다른 실루엣**이다(2026-08-19 사용자 확정).
+  // SaintMenuBar 는 flat 렌더(currentColor)이므로 채움/테두리 대비로 순서를 읽게 했다.
+  spineSaint: {
+    g: "anno",
+    body: (p) => (
+      <g>
+        <circle cx="7" cy="7" r="3.1" fill={p} />
+        <circle cx="16.6" cy="16.6" r="3.1" fill="none" stroke={p} strokeWidth="2.2" />
+        <line x1="9.6" y1="9.6" x2="13.6" y2="13.6" {...LN} stroke={p} strokeWidth="2" strokeDasharray="2.2 2" />
+      </g>
+    ),
+    spec: [6.2, 5.8, 1.5, 0.8, -30],
+  },
   // Marking — 깃대(스트로크) + 볼륨 깃발(면)
   marking: {
     g: "anno",
