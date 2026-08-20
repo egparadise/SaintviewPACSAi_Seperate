@@ -19,7 +19,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  applyFavFilter, matchesCond, parseFavQuery, readFavs, removeFav, upsertFav,
+  applyFavFilter, clientCondsFor, matchesCond, parseFavQuery, readFavs, removeFav, upsertFav,
 } from "../src/lib/searchFav.ts";
 import { buildWorklistQuery } from "../src/lib/worklistQuery.ts";
 
@@ -169,4 +169,52 @@ test("조건이 하나여도(`CT`) FAV 검색으로 동작한다 — 실제 사�
   const q = parseFavQuery("CT");
   assert.equal(q.server.modality, "CT", "장비로 승격");
   assert.deepEqual(q.client, [], "남는 값 조건 없음 — 받은 목록을 그대로 보여 준다");
+});
+
+/* ── 사용자 확인 요청(2026-08-20): 판독센터·부위도 검색되는가 ────────────────── */
+
+test("판독센터(써밋영상의원)·부위(Brain·Chest) — 행에 실린 값으로 걸러진다", () => {
+  const rows = [
+    { center_name: "써밋영상의원", body_part: "Brain", modality: "CT", patient_name: "김지숙" },
+    { center_name: "강남미래", body_part: "Brain", modality: "CT", patient_name: "박용성" },
+    { center_name: "써밋영상의원", body_part: "Chest", modality: "CT", patient_name: "이종만" },
+  ];
+  assert.equal(applyFavFilter(rows, parseFavQuery("써밋영상의원").client).length, 2, "센터 전체 이름");
+  assert.equal(applyFavFilter(rows, parseFavQuery("써밋").client).length, 2, "일부만 써도 걸린다");
+  assert.equal(applyFavFilter(rows, parseFavQuery("Brain").client).length, 2, "부위");
+  assert.equal(applyFavFilter(rows, parseFavQuery("chest").client).length, 1, "대소문자 무관");
+  // 조합 — 사용자 원 예시 형태
+  const q = parseFavQuery("써밋영상의원#CT#Brain");
+  assert.equal(q.server.modality, "CT", "장비는 서버가 좁힌다");
+  assert.equal(applyFavFilter(rows, q.client).length, 1, "센터 AND 부위");
+});
+
+/* ── 실제 결함(2026-08-20): Live 에서 '미판독' 조건이 증발 ──────────────────
+ * Live(원격 A 직결)는 status 파라미터 자체가 없다(LIVE_QUERY_KEYS). 그래서 상태를 서버로
+ * 승격만 하고 끝내면 아무 데서도 걸러지지 않아, 미판독만 보려던 목록에 확정 검사가 섞였다. */
+
+test("Live 에서는 상태 조건을 받은 목록에서 거른다 — 증발 금지", () => {
+  const q = parseFavQuery("MR#미판독");
+  assert.equal(q.server.status, "received");
+  assert.deepEqual(q.client, [], "일반 모드에서는 서버가 걸러 준다");
+
+  const live = clientCondsFor(q, { liveMode: true });
+  assert.deepEqual(live, [{ field: "status", value: "received", exact: true }],
+    "Live 는 status 를 못 보내므로 클라이언트 조건으로 되돌린다");
+
+  const rows = [
+    { status: "received", modality: "MR" },
+    { status: "finalized", modality: "MR" },
+    { status: "reading", modality: "MR" },
+  ];
+  assert.equal(applyFavFilter(rows, live).length, 1, "미판독만 남는다");
+  assert.equal(applyFavFilter(rows, clientCondsFor(q, { liveMode: false })).length, 3,
+    "일반 모드는 서버가 이미 걸렀으므로 여기서 또 거르지 않는다");
+});
+
+test("상태 코드는 정확히 일치해야 한다 — draft 가 draft_ready 에 걸리지 않게", () => {
+  const rows = [{ status: "draft" }, { status: "draft_ready" }];
+  assert.equal(applyFavFilter(rows, [{ field: "status", value: "draft", exact: true }]).length, 1);
+  assert.equal(applyFavFilter(rows, [{ field: "status", value: "draft" }]).length, 2,
+    "exact 가 아니면 종전처럼 부분 일치(자유어 조건의 기존 동작은 그대로)");
 });

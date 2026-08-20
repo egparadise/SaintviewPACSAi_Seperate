@@ -43,6 +43,9 @@ export interface FavCond {
   /** 대조할 컬럼 키. 빈 값이면 **모든 항목** 대상(기본) — 사용자는 값만 쓰기 때문이다. */
   field: string;
   value: string;
+  /** 정확히 같아야 하는가(기본은 부분 일치). 상태 코드처럼 값이 서로 겹치는 축에 쓴다
+   *  — 'draft' 가 'draft_ready' 에 걸리면 안 된다. */
+  exact?: boolean;
 }
 
 export interface FavQuery {
@@ -101,10 +104,29 @@ export function matchesCond(row: Record<string, unknown>, c: FavCond): boolean {
   const want = norm(c.value);
   if (!want) return true;
   if (c.field) {
-    const v = row?.[c.field];
-    return String(v ?? "").toLowerCase().includes(want);
+    const v = norm(String(row?.[c.field] ?? ""));
+    return c.exact ? v === want : v.includes(want);
   }
   return rowHaystack(row).includes(want);
+}
+
+/**
+ * 실제로 **받은 목록에서 걸러야 할** 조건들.
+ *
+ * 서버가 아는 축(status·modality)은 질의로 승격하는 것이 기본이지만, **Live(원격 A 직결)는
+ * status 파라미터 자체가 없다**(worklistQuery 의 LIVE_QUERY_KEYS: q·pid·pname·modality·기간만).
+ * 그래서 승격만 하고 끝내면 '센터#MR#병원명#미판독' 의 마지막 조건이 **아무 데서도 걸리지 않고
+ * 증발한다** — 사용자는 미판독만 보려 했는데 확정된 검사까지 섞여 나온다.
+ *
+ * 여기서 그 축을 클라이언트 조건으로 돌려놓는다. Live 행의 status 값은
+ * received / reading / finalized 로 이 파일의 상태 낱말 매핑과 같은 코드다(webpacs_live._map_status).
+ */
+export function clientCondsFor(q: FavQuery, opts: { liveMode?: boolean } = {}): FavCond[] {
+  const out = [...q.client];
+  if (opts.liveMode && q.server.status) {
+    out.push({ field: "status", value: q.server.status, exact: true });
+  }
+  return out;
 }
 
 /** 조건 전부(AND)를 만족하는 행만 남긴다. 조건이 없으면 원본 그대로(=필터 없음). */

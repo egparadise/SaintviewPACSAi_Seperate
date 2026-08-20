@@ -76,7 +76,7 @@ import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { openReportWindow, screenFeatures, screenFeaturesList } from "../lib/screens";
 import {
-  applyFavFilter, parseFavQuery, readFavs, removeFav, upsertFav,
+  applyFavFilter, clientCondsFor, parseFavQuery, readFavs, removeFav, upsertFav,
   type SearchFav,
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
@@ -3758,10 +3758,10 @@ export function Worklist() {
   const gridItems = useMemo(() => {
     const q = committed.searchText ?? "";
     const filtered = committed.favMode && q.trim()
-      ? applyFavFilter(items, parseFavQuery(q).client)
+      ? applyFavFilter(items, clientCondsFor(parseFavQuery(q), { liveMode }))
       : items;
     return sortRows(filtered, sort);   // 헤더 클릭 정렬 — 정렬이 없으면 서버가 준 순서 그대로
-  }, [items, committed.searchText, committed.favMode, sort]);
+  }, [items, committed.searchText, committed.favMode, liveMode, sort]);
 
   /** 💾 — 지금 입력한 식을 이름 붙여 Search Favorite 에 저장(같은 이름이면 수정). */
   const saveSearchFav = useCallback(() => {
