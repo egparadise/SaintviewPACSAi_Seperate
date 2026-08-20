@@ -64,8 +64,12 @@ body {
   font-weight: 600;
   text-align: left;
   padding: 5px 8px;
+  /* 제목 줄 고정 — 목록을 내려도 항목 이름이 남아야 한다(2026-08-20 사용자 지적).
+     z-index 가 없으면 배경이 있는 본문 행(선택·응급 강조)이 헤더 위로 겹쳐 보인다.
+     ⚠ 이 규칙은 컴포넌트의 인라인 style 이 position 을 덮으면 그대로 죽는다 — 실제 사고. */
   position: sticky;
   top: 0;
+  z-index: 2;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }

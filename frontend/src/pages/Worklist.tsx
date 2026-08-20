@@ -1454,7 +1454,12 @@ export function StudyGrid({
                   // — 같은 헤더가 '이동(DnD)·폭 조절·정렬' 셋을 겸하므로 서로를 막아야 한다.
                   onClick={() => { if (!resizingRef.current && !dragCol) onSort?.(c); }}
                   title={onSort ? tr("클릭 = 정렬(다시 클릭하면 역순) · 드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 = 폭 조절") : undefined}
-                  style={{ position: "relative", overflow: "hidden", textOverflow: "ellipsis",
+                  // ⚠ position 은 **sticky** 여야 한다. theme.css 의 `.grid-table th{position:sticky;top:0}`
+                  //   을 인라인 relative 로 덮는 바람에 목록을 내리면 제목 줄이 같이 밀려 올라갔다
+                  //   (인라인 스타일이 없는 '#' 열 헤더만 붙어 있어 증상이 더 헷갈렸다).
+                  //   sticky 도 relative 처럼 absolute 자식의 기준 상자가 되므로 폭 조절 손잡이는 그대로다.
+                  style={{ position: "sticky", top: 0, zIndex: 2,
+                           overflow: "hidden", textOverflow: "ellipsis",
                            whiteSpace: "nowrap",
                            cursor: onSort ? "pointer" : onReorder ? "grab" : undefined,
                            opacity: dragCol === c ? 0.4 : undefined,
@@ -4847,7 +4852,10 @@ export function Worklist() {
         } />
         <Splitter dir="v" onEnd={persistSizes}
                   onDrag={(dx) => setSizes((s) => ({ ...s, railW: clampSz(s.railW + dx, 100, 420) }))} />
-        <div style={{ flex: 1, minWidth: 0, display: "flex",
+        {/* minHeight:0 — flex 자식의 기본 min-height:auto 는 내용만큼 부풀어서, 스크롤이 이
+            상자가 아니라 **바깥**에서 일어난다. 그러면 안쪽 thead 의 sticky 는 기준 상자가
+            스크롤되지 않으니 아무 일도 하지 않는다(제목 줄이 같이 밀려 올라간다). */}
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex",
                       ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
           <StudyGrid items={gridItems} columns={columns} sort={sort} onSort={onSortCol} selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                      treeDisabled={localMode}
