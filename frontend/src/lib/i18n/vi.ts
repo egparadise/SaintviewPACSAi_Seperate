@@ -2923,5 +2923,10 @@ const d: Record<string, string> = {
   "개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)": " vùng đã được kết hợp riêng (so sánh bằng cuộn hoặc cine)",
   "상태로 필터 · 클릭할 때마다 이 항목 기준 정렬 ↔ 역순 ↔ 해제": "lọc theo trạng thái · mỗi lần nhấp: sắp xếp theo mục này ↔ đảo ngược ↔ tắt",
   "Search Favorite — 조건을 # 로 나열 (예: 센터#MR#병원명#미판독). 조건이 하나면 그냥 CT": "Search Favorite — liệt kê điều kiện bằng # (vd: trung tâm#MR#bệnh viện#chưa đọc). Chỉ một điều kiện? Gõ CT",
+  "모든 과거검사를 보여 준다": "Hiển thị tất cả các lần chụp trước",
+  "같은 장비로 촬영한 과거검사만": "Chỉ các lần chụp trước cùng thiết bị",
+  "같은 부위(Chest·Abdomen·Brain 등)를 촬영한 과거검사만": "Chỉ các lần chụp trước cùng vùng cơ thể (Chest, Abdomen, Brain …)",
+  "보이는 과거검사 / 전체": "Đang hiển thị / tổng",
+  "이 분류에 해당하는 과거검사가 없습니다 — All 로 전부 보기": "Không có lần chụp trước nào khớp bộ lọc này — chọn All để xem tất cả",
 };
 export default d;

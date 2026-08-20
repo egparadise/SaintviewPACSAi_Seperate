@@ -403,6 +403,9 @@ def study_detail(db: Session, study_id: int) -> dict | None:
             "modality": s.modality,
             "study_desc": s.study_desc,
             "status": s.status,
+            # 2026-08-20 사용자 확정 — History 의 'SameBodyPart' 분류가 이 값으로 거른다.
+            # 예전에는 Compare 후보(compare_basis)에만 실려서, 그 필터를 켜면 목록이 통째로 비었다.
+            "body_part": s.body_part,
         }
         for s in sorted(patient.studies, key=lambda x: x.study_date, reverse=True)
         # 테넌시 — 같은 환자라도 원 검사와 동일 병원 검사만 노출(교차 병원 메타데이터 누출 차단)

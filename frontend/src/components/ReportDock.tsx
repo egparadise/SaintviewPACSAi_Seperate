@@ -1,13 +1,17 @@
 // 판독 도크 — Viewer2D 에서 추출한 공유 컴포넌트 (레퍼런스 Report Window 디자인)
 // [Report|History|Shortcuts|Templates] 탭 · Font size · CVR Notice · ◀▶ · Reset/Save/Approve
 // 동작은 Viewer2D 내장 시절과 완전 동일(이사만) — 리포트 로드/저장/승인/상용구/단축키 포함.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PERM_DENIED_TIP, api, hasPerm, isLiveId, loadPermMe, type PermMe, type PhraseRow, type Report, type StudyDetail } from "../api";
 import { dictationLabel, useDictation } from "../lib/useDictation";
 import { pollWithGuard } from "../lib/netLimit";
 import { MicIcon } from "./MicIcon";
 import { SttLangChip } from "./SttLangChip";
 import { t as tr, useLang } from "../lib/i18n";
+import {
+  PRIOR_FILTER_LABEL, filterPriors, isAll, loadPriorFilter, nextPriorFilter, savePriorFilter,
+  type PriorFilter,
+} from "../lib/priorFilter";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   detail: StudyDetail;
@@ -262,7 +266,14 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   // In Viewer 는 related_exams 를 옵셔널로 다룬다(런타임에 없을 수 있음) — 방어적 기본값
-  const relExams = detail.related_exams ?? [];
+  const relAll = detail.related_exams ?? [];
+  // 과거검사 분류(2026-08-20 사용자 확정) — SameModality · SameBodyPart · All.
+  // 규칙은 lib/priorFilter 한 곳(둘 다 켜면 AND · All 은 필터 없음 · 값이 비면 제외).
+  const [pf, setPf] = useState<PriorFilter>(() => loadPriorFilter());
+  const applyPf = (k: "modality" | "bodyPart" | "all") => {
+    setPf((cur) => { const nx = nextPriorFilter(cur, k); savePriorFilter(nx); return nx; });
+  };
+  const relExams = useMemo(() => filterPriors(detail, relAll, pf), [detail, relAll, pf]);
   // Prior Studies 미니 썸네일 — 검사당 대표 1장(첫 영상 시리즈 중간 인스턴스), 캐시
   const [priorThumbs, setPriorThumbs] = useState<Record<number, string>>({});
   // 과거검사 판독 펼침 — 행 클릭 시 그 검사의 최신 판독(Reading/Conclusion)을 아래로 표시(1건 캐시)
@@ -287,7 +298,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   };
   useEffect(() => {
     let alive = true;
-    (relExams.slice(0, 12)).forEach((e) => {
+    (relAll.slice(0, 12)).forEach((e) => {
       if (priorThumbs[e.id] !== undefined) return;
       api.seriesTree(e.id).then((r) => {
         const s0 = r.series.find((x) => !["SR", "KO", "PR", "SEG"].includes(x.modality) && x.instances.length);
@@ -297,7 +308,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detail.id, relExams.length]);
+  }, [detail.id, relAll.length]);
   const dockSig = (report?.diff_metrics as { signature?: { name: string; license_no: string; signed_at: string } })?.signature;
   const taStyle: React.CSSProperties = {
     width: "100%", background: "var(--bg-canvas)", color: "var(--text-primary)",
@@ -456,6 +467,25 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
                         background: "var(--bg-elevated)", borderTop: "1px solid var(--border)" }}>
             {tr("Prior Studies (클릭=판독 펼침 · 썸네일 클릭=비교 로드)")}
           </div>
+          {/* 과거검사 분류 — 같은 장비 / 같은 부위 / 전부. 둘을 함께 켜면 둘 다 만족하는 것만.
+              라벨은 사용자가 정한 제품 용어라 번역하지 않는다(비교값·제품명 tr 금지 규정). */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 8px",
+                        fontSize: 10.5, background: "var(--bg-elevated)",
+                        borderBottom: "1px solid var(--border)" }}>
+            {(["modality", "bodyPart", "all"] as const).map((k) => (
+              <label key={k} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}
+                     title={k === "all" ? tr("모든 과거검사를 보여 준다")
+                            : k === "modality" ? tr("같은 장비로 촬영한 과거검사만")
+                            : tr("같은 부위(Chest·Abdomen·Brain 등)를 촬영한 과거검사만")}>
+                <input type="checkbox"
+                       checked={k === "all" ? isAll(pf) : pf[k]}
+                       onChange={() => applyPf(k)} />
+                {PRIOR_FILTER_LABEL[k]}
+              </label>
+            ))}
+            <span style={{ marginLeft: "auto", color: "var(--text-secondary)" }}
+                  title={tr("보이는 과거검사 / 전체")}>{relExams.length}/{relAll.length}</span>
+          </div>
           {relExams.map((e) => (
             <div key={e.id}>
               <div onClick={() => togglePriorReport(e.id)}
@@ -496,7 +526,11 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
             </div>
           ))}
           {relExams.length === 0 && (
-            <div style={{ padding: 8, fontSize: 11, color: "var(--text-secondary)" }}>No prior studies</div>
+            <div style={{ padding: 8, fontSize: 11, color: "var(--text-secondary)" }}>
+              {relAll.length === 0
+                ? "No prior studies"
+                : tr("이 분류에 해당하는 과거검사가 없습니다 — All 로 전부 보기")}
+            </div>
           )}
         </div>
       )}

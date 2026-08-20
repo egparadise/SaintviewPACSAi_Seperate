@@ -50,6 +50,10 @@ def test_full_reading_workflow(client, auth_headers):
         _register(db, "1.2.840.999.1.2", date="20250101", desc="CT Chest (prior)")
     detail = client.get(f"/api/studies/{study_id}", headers=auth_headers).json()
     assert any(e["study_uid"] == "1.2.840.999.1.2" for e in detail["related_exams"])
+    # History 'SameBodyPart' 분류(2026-08-20 사용자 확정)가 이 값으로 거른다 —
+    # 예전에는 Compare 후보에만 실려서, 그 필터를 켜면 과거검사 목록이 통째로 비었다.
+    assert all("body_part" in e for e in detail["related_exams"]),         "과거검사에 body_part 가 없으면 SameBodyPart 분류가 성립하지 않는다"
+    assert all("modality" in e for e in detail["related_exams"]), "SameModality 용"
 
     # 5) 리포트 수정(in_review) → 확정
     reports = client.get(f"/api/studies/{study_id}/reports", headers=auth_headers).json()["items"]

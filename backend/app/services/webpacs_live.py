@@ -442,6 +442,8 @@ def live_related(db: Session, vid: int, user: dict | None = None,
                 "modality": str(o.get("study_modality") or ""),
                 "study_desc": str(o.get("study_description") or ""),
                 "status": st,
+                # History 'SameBodyPart' 분류용(2026-08-20 사용자 확정). A 원천은 study_body_part.
+                "body_part": str(o.get("study_body_part") or ""),
             })
     except Exception:  # noqa: BLE001 — 과거검사 실패는 화면을 막지 않는다
         return []

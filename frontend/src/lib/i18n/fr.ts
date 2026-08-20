@@ -2923,5 +2923,10 @@ const d: Record<string, string> = {
   "개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)": " zones combinées séparément (comparez par défilement ou ciné)",
   "상태로 필터 · 클릭할 때마다 이 항목 기준 정렬 ↔ 역순 ↔ 해제": "filtrer par statut · chaque clic trie selon cet élément ↔ inverse ↔ désactivé",
   "Search Favorite — 조건을 # 로 나열 (예: 센터#MR#병원명#미판독). 조건이 하나면 그냥 CT": "Search Favorite — listez les conditions avec # (ex. centre#MR#hôpital#non lu). Une seule ? Tapez CT",
+  "모든 과거검사를 보여 준다": "Afficher tous les examens antérieurs",
+  "같은 장비로 촬영한 과거검사만": "Uniquement les examens antérieurs de la même modalité",
+  "같은 부위(Chest·Abdomen·Brain 등)를 촬영한 과거검사만": "Uniquement les examens antérieurs de la même région (Chest, Abdomen, Brain …)",
+  "보이는 과거검사 / 전체": "Affichés / total",
+  "이 분류에 해당하는 과거검사가 없습니다 — All 로 전부 보기": "Aucun examen antérieur ne correspond à ce filtre — choisissez All pour tout voir",
 };
 export default d;
