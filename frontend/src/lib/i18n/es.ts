@@ -2941,5 +2941,15 @@ const d: Record<string, string> = {
   "저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.": "Solo avanza si el guardado tiene éxito. Se queda igual al final de la lista. Sigue el mismo orden que los botones ◀▶ de la ventana de informe.",
   "설정 — 판독 단축키": "Ajustes — atajos de informe",
   "확정(Approve) 후 다음 레포트 열기": "Abrir el siguiente informe tras Approve",
+  "Study Layout": "Diseño de estudios",
+  "상단 Exam 탭을 구획에 끌어다 놓으세요": "Arrastre una pestaña Exam superior a un bloque",
+  "드래그=Study 구획에 배치": "Arrastrar = colocar en un bloque de estudio",
+  "이 구획의 검사 — Exam 탭을 끌어다 놓으면 바뀝니다": "El estudio de este bloque: suelte una pestaña Exam para cambiarlo",
+  "구획": "bloque",
+  "검사 배치": "Estudio colocado",
+  "배치 취소 — 이 검사에 영상 시리즈가 없습니다": "Colocación cancelada: este estudio no tiene series de imagen",
+  "배치 실패 — 검사를 불러오지 못했습니다": "Error al colocar: no se pudo cargar el estudio",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Esta combinación supera el límite de paneles (10×10): reduzca la división de series",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Esta combinación supera el límite de paneles (10×10): reduzca la división de estudios",
 };
 export default d;

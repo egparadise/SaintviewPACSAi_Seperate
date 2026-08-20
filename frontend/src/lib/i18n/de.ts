@@ -2941,5 +2941,15 @@ const d: Record<string, string> = {
   "저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.": "Wechselt nur bei erfolgreichem Speichern. Am Listenende bleibt die Ansicht stehen. Reihenfolge wie die ◀▶-Tasten im Befundfenster.",
   "설정 — 판독 단축키": "Einstellungen — Befund-Kurztasten",
   "확정(Approve) 후 다음 레포트 열기": "Nach Approve den nächsten Befund öffnen",
+  "Study Layout": "Untersuchungs-Layout",
+  "상단 Exam 탭을 구획에 끌어다 놓으세요": "Ziehen Sie einen Exam-Tab von oben auf einen Bereich",
+  "드래그=Study 구획에 배치": "Ziehen = in einen Untersuchungsbereich legen",
+  "이 구획의 검사 — Exam 탭을 끌어다 놓으면 바뀝니다": "Untersuchung in diesem Bereich — Exam-Tab ablegen, um sie zu wechseln",
+  "구획": "Bereich",
+  "검사 배치": "Untersuchung platziert",
+  "배치 취소 — 이 검사에 영상 시리즈가 없습니다": "Platzierung abgebrochen — diese Untersuchung hat keine Bildserien",
+  "배치 실패 — 검사를 불러오지 못했습니다": "Platzierung fehlgeschlagen — Untersuchung konnte nicht geladen werden",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Diese Kombination überschreitet das Fenster-Limit (10×10) — Serienteilung verringern",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Diese Kombination überschreitet das Fenster-Limit (10×10) — Untersuchungsteilung verringern",
 };
 export default d;

@@ -24,6 +24,28 @@
 - 탭 전환·검사 전환은 **예외 없이** 이 순서를 다시 계산한다(이전 화면의 격자 상속 금지).
 - 회귀 방어 테스트: `frontend/tests/hang2d_rule.test.mjs` · `hang_switch_rule.test.mjs`.
 
+## Study Layout — 2026-08-20 사용자 확정
+
+**Study Layout > Series Layout > Image Layout** 세 계층이다. 뷰어 셋 모두 `STU` 피커가 `Srs` 옆에 있다.
+
+- 구현은 **합성 격자**다 — 진짜 2단 트리를 넣지 않는다:
+
+      전체 격자 = (Study 행 × Series 행) × (Study 열 × Series 열)
+
+  자리→페인 매핑은 `frontend/src/lib/studyLayout.ts` 의 `paneMatrix`/`blockOfPane` **한 곳뿐**이다.
+  뷰어(Viewer2D·ViewerInfi)에서 계산을 복사하지 마라 — 복사하면 반드시 갈린다.
+- **Study 1×1 이면 매핑이 예전과 완전히 같다.** 이 불변식이 깨지면 이 기능을 쓰지 않는 사용자에게
+  회귀가 난다(`study_layout_rule.test.mjs` 첫 테스트가 이걸 못 박는다).
+- **Series Layout 의 의미는 바뀌지 않는다.** 위 '뷰어 2D 분할(Layout) 우선순위' 캐스케이드
+  (HP→Mammo→Common→뷰어별)는 여전히 **Series Layout 에 대한 규정**이고, Study Layout 은 그 위를
+  한 겹 더 나눌 뿐이다.
+- 구획(block)에는 상단 **Exam 탭을 끌어다 놓아** 검사를 배치한다(MIME `application/x-sv-exam` —
+  파일·텍스트 드래그가 뷰포트에 떨어져 검사가 바뀌는 사고를 막는다).
+- 구획 좌상단의 **검사 배지는 지우지 마라**. 여러 환자를 한 화면에 놓는 기능이라, 어느 구획이
+  어느 환자인지 보이지 않으면 환자를 혼동한다.
+- 구획 수가 줄면 넘치는 배치는 버린다(`pruneBlocks`) — 남겨 두면 다시 늘렸을 때 유령 배치가 되살아난다.
+- 회귀 방어 테스트: `frontend/tests/study_layout_rule.test.mjs`.
+
 ## Compare(과거검사 비교) 화면 분할 — 2026-08-19 사용자 확정
 
 설정>판독 **'과거검사 비교 표시 = Layout 띄우기(한 화면 1:2 분할)'** 이면:

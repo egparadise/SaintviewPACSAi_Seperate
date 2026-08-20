@@ -2941,5 +2941,15 @@ const d: Record<string, string> = {
   "저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.": "Chỉ chuyển khi lưu thành công. Ở cuối danh sách thì giữ nguyên. Di chuyển theo cùng thứ tự với nút ◀▶ của cửa sổ đọc.",
   "설정 — 판독 단축키": "Cài đặt — phím tắt đọc",
   "확정(Approve) 후 다음 레포트 열기": "Mở báo cáo kế tiếp sau khi Approve",
+  "Study Layout": "Bố cục ca chụp",
+  "상단 Exam 탭을 구획에 끌어다 놓으세요": "Kéo thẻ Exam ở trên vào một ô",
+  "드래그=Study 구획에 배치": "Kéo = đặt vào ô ca chụp",
+  "이 구획의 검사 — Exam 탭을 끌어다 놓으면 바뀝니다": "Ca chụp trong ô này — thả thẻ Exam để đổi",
+  "구획": "ô",
+  "검사 배치": "Đã đặt ca chụp",
+  "배치 취소 — 이 검사에 영상 시리즈가 없습니다": "Đã hủy đặt — ca chụp này không có chuỗi ảnh",
+  "배치 실패 — 검사를 불러오지 못했습니다": "Đặt thất bại — không tải được ca chụp",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Tổ hợp này vượt giới hạn khung (10×10) — hãy giảm chia chuỗi",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Tổ hợp này vượt giới hạn khung (10×10) — hãy giảm chia ca chụp",
 };
 export default d;

@@ -2941,5 +2941,15 @@ const d: Record<string, string> = {
   "저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.": "Moves only when the save succeeds. Stays put at the end of the list. Follows the same order as the ◀▶ buttons in the reading window.",
   "설정 — 판독 단축키": "Settings — reading shortcuts",
   "확정(Approve) 후 다음 레포트 열기": "Open the next report after Approve",
+  "Study Layout": "Study layout",
+  "상단 Exam 탭을 구획에 끌어다 놓으세요": "Drag an Exam tab from the top onto a block",
+  "드래그=Study 구획에 배치": "Drag = place into a study block",
+  "이 구획의 검사 — Exam 탭을 끌어다 놓으면 바뀝니다": "The study shown in this block — drop an Exam tab to change it",
+  "구획": "block",
+  "검사 배치": "Study placed",
+  "배치 취소 — 이 검사에 영상 시리즈가 없습니다": "Placement cancelled — this study has no image series",
+  "배치 실패 — 검사를 불러오지 못했습니다": "Placement failed — could not load the study",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "This combination exceeds the pane limit (10×10) — reduce the series split",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "This combination exceeds the pane limit (10×10) — reduce the study split",
 };
 export default d;

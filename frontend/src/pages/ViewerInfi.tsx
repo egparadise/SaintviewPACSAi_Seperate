@@ -28,6 +28,10 @@ import { ComparePicker, useCompareDefault } from "../components/ComparePicker";
 import { cancelWarm, prefetchAround, warmSeries } from "../lib/framePrefetch";
 import { IN_PALETTE, IN_PALETTE_GROUPS, IN_CROSSLINK_MODES, IN_MOUSE_OPS, IN_WL_PRESETS_CT, IN_WL_PRESETS_MR } from "../lib/infiConfig";
 import { GridPicker } from "../lib/GridPicker";
+import {
+  STUDY_LAYOUT_DEFAULT, blockEdge, blockOfPane, fitsPaneLimit, paneIndexesOfBlock,
+  paneMatrix, pruneBlocks, type Grid as SGrid, type StudyBlocks,
+} from "../lib/studyLayout";
 import { ReportDock } from "../components/ReportDock";
 import { useDictation } from "../lib/useDictation";
 import { ViewerContextMenu, type CtxItem } from "../components/ViewerContextMenu";
@@ -342,6 +346,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [keyMarks, setKeyMarks] = useState<Set<string>>(new Set());
   const [activeExam, setActiveExam] = useState(0);
   const [sLayout, setSLayout] = useState<{ r: number; c: number }>({ r: 1, c: 1 });
+  /** Study Layout(2026-08-20 사용자 확정) — 화면을 **검사 단위**로 먼저 나눈다(Study > Series > Image).
+   *  1×1 이면 예전과 완전히 같다. 매핑 규칙은 lib/studyLayout 한 곳(뷰어 복제 금지). */
+  const [studyLay, setStudyLay] = useState<SGrid>(STUDY_LAYOUT_DEFAULT);
+  const [studyBlocks, setStudyBlocks] = useState<StudyBlocks>({});
+  const [dropBlock, setDropBlock] = useState<number | null>(null);
   // Series 페이지 — 시리즈가 Series 분할보다 많을 때 Shift+휠로 넘긴다(슬라이스 스크롤과 분리)
   const [srsPage, setSrsPage] = useState(0);
   // 모서리 오버레이 구성(모달리티별) — 설정 > 뷰어 공통 > 영상 정보 표시
@@ -909,13 +918,44 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     return () => { alive = false; };
   }, [exams]);
 
+  /** 검사 구획에 검사를 배치한다(2026-08-20 사용자 확정).
+   *  I-View 는 연 검사의 시리즈를 이미 exams 에 들고 있어 서버를 다시 부르지 않는다.
+   *  구획의 페인들을 그 검사 시리즈로 앞에서부터 채우고, 모자라면 **비운다** —
+   *  다른 환자 영상이 남아 있으면 어느 검사인지 헷갈린다(환자 혼동은 가장 경계할 사고다). */
+  const placeExamInBlock = (block: number, raw: string) => {
+    let id = 0;
+    try { id = Number(JSON.parse(raw).id) || 0; } catch { id = Number(raw) || 0; }
+    const ex = exams.find((e) => e.d.id === id);
+    if (!ex) return;
+    const imgs = ex.series.filter((x) => !["SR", "KO", "PR", "SEG"].includes(x.modality)
+                                         && x.instances.length > 0);
+    if (!imgs.length) return;
+    const idxs = paneIndexesOfBlock(sLayout, block);
+    setPanes((ps) => {
+      const next = [...ps];
+      idxs.forEach((pi, i) => {
+        if (pi >= next.length) return;
+        const sr = imgs[i] ?? null;
+        next[pi] = { ...next[pi], series: sr, index: sr ? Math.floor(sr.instances.length / 2) : 0,
+                     studyUid: ex.d.study_uid };
+      });
+      return next;
+    });
+    setStudyBlocks((b) => ({ ...b, [block]: {
+      examId: id, studyUid: ex.d.study_uid,
+      label: `${ex.d.patient_name} ${ex.d.modality}`,
+    } }));
+    setActive(idxs[0]);
+  };
+
   const applySLayout = (l: { r: number; c: number }) => {
     setSLayout(l);
     setMaximized(null);
     setPanes((ps) => {
       // 시리즈가 레이아웃보다 적으면 순환 반복하지 않고 빈 페인으로 둔다.
       // 유지되는 기존 페인이 이미 보여주는 시리즈는 건너뛰고 다음 미표시 시리즈를 순서대로 배치.
-      const n = l.r * l.c;
+      // 구획(Study Layout) 수만큼 페인이 늘어난다 — 구획 하나가 Series Layout 한 벌을 품는다.
+      const n = l.r * l.c * studyLay.r * studyLay.c;
       const used = new Set(
         ps.slice(0, n).map((p) => p?.series?.series_uid).filter(Boolean) as string[]);
       let cursor = 0;
@@ -3373,7 +3413,14 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         </span>
         {/* Exam 탭 — 연 검사들이 오른쪽으로 누적. 클릭=활성 전환, ✕=그 검사만 닫기 */}
         {exams.map((e, i) => (
-          <span key={e.d.id} title={`${e.d.patient_name} · ${e.d.study_desc}`}
+          <span key={e.d.id}
+                title={`${e.d.patient_name} · ${e.d.study_desc} — ${tr("드래그=Study 구획에 배치")}`}
+                draggable
+                onDragStart={(ev) => {
+                  ev.dataTransfer.setData("application/x-sv-exam",
+                                          JSON.stringify({ id: e.d.id, uid: e.d.study_uid }));
+                  ev.dataTransfer.effectAllowed = "copy";
+                }}
                 onClick={() => switchExam(i)}
                 style={{ border: `1px solid ${i === activeExam ? "var(--accent)" : "var(--border)"}`,
                          borderRadius: 4, padding: "1px 8px", cursor: "pointer",
@@ -3395,8 +3442,21 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         </span>
         <span style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: 10 }}>
           {/* Series/Image 레이아웃 — 드래그 그리드 선택(TY 동일 GridPicker, 최대 10×10) */}
+          {/* Study Layout — 표시 순서도 계층 그대로 STU > Series > Image */}
+          <GridPicker label="STU" max={5} value={studyLay}
+                      onPick={(v) => {
+                        if (!fitsPaneLimit(v, sLayout)) return;
+                        setStudyLay(v);
+                        setStudyBlocks((b) => pruneBlocks(b, v));
+                        // 구획 수가 바뀌면 페인 배열 길이도 바뀐다 — 현재 Series Layout 으로 다시 깐다
+                        setTimeout(() => applySLayout({ ...sLayout }), 0);
+                      }} />
           <GridPicker label="Series" max={10} value={sLayout}
-                      onPick={(v) => applySLayout({ r: Math.min(v.r, 10), c: Math.min(v.c, 10) })} />
+                      onPick={(v) => {
+                        const g = { r: Math.min(v.r, 10), c: Math.min(v.c, 10) };
+                        if (!fitsPaneLimit(studyLay, g)) return;
+                        applySLayout(g);
+                      }} />
           <GridPicker label="Image" max={10} value={panes[active]?.il ?? { r: 1, c: 1 }}
                       onPick={(v) => setPaneIl(active, { r: Math.min(v.r, 10), c: Math.min(v.c, 10) })} />
           <button title={tr("3D — 현재 검사의 MPR/MIP 볼륨 뷰어 열기")}
@@ -3702,10 +3762,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
 
         {/* ── 뷰포트: Series 페인 — 경계 스플리터로 좌우/상하 크기 조절 ── */}
         <div ref={vpRef} style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
+          {/* ★ Study Layout 이 걸리면 격자는 (검사 행×시리즈 행) × (검사 열×시리즈 열) 로 펼쳐진다.
+                 자리→페인 매핑은 lib/studyLayout.paneMatrix 한 곳. Study 1×1 이면 예전과 같다. */}
           {(maximized !== null
             ? [[maximized]]
-            : Array.from({ length: sLayout.r }, (_, ri) =>
-                Array.from({ length: sLayout.c }, (_, ci) => ri * sLayout.c + ci))
+            : paneMatrix(studyLay, sLayout)
           ).map((rowPanes, ri) => (
             <Fragment key={ri}>
               {ri > 0 && (
@@ -3719,9 +3780,52 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
                       <Splitter dir="v" onEnd={() => {}}
                                 onDrag={(dx) => adjFr(setColFr, ci - 1, dx, vpRef.current?.clientWidth ?? 800)} />
                     )}
-                    <div style={{ flex: maximized !== null ? 1 : (colFr[ci] ?? 1),
-                                  minWidth: 0, minHeight: 0, display: "flex" }}>
+                    <div
+                      onDragOver={(e) => {
+                        if (!e.dataTransfer.types.includes("application/x-sv-exam")) return;
+                        e.preventDefault();
+                        setDropBlock(blockOfPane(sLayout, pi));
+                      }}
+                      onDragLeave={() => setDropBlock(null)}
+                      onDrop={(e) => {
+                        const raw = e.dataTransfer.getData("application/x-sv-exam");
+                        setDropBlock(null);
+                        if (!raw) return;
+                        e.preventDefault();
+                        placeExamInBlock(blockOfPane(sLayout, pi), raw);
+                      }}
+                      style={{ flex: maximized !== null ? 1 : (colFr[ci] ?? 1),
+                               minWidth: 0, minHeight: 0, display: "flex", position: "relative",
+                               ...(studyLay.r * studyLay.c > 1 && maximized === null
+                                 ? (() => {
+                                     const e2 = blockEdge(sLayout, ri, ci);
+                                     const on = dropBlock !== null && dropBlock === blockOfPane(sLayout, pi);
+                                     return {
+                                       borderTop: e2.top ? `2px solid ${on ? "var(--accent)" : "var(--border)"}` : undefined,
+                                       borderLeft: e2.left ? `2px solid ${on ? "var(--accent)" : "var(--border)"}` : undefined,
+                                       background: on ? "var(--accent-subtle)" : undefined,
+                                     };
+                                   })()
+                                 : {}) }}>
                       {renderPane(pi)}
+                      {/* 구획 배지 — 이 구획이 어느 검사인지. 여러 환자를 한 화면에 놓는 기능이라
+                          이게 없으면 환자를 혼동한다. */}
+                      {studyLay.r * studyLay.c > 1 && maximized === null
+                        && blockEdge(sLayout, ri, ci).top && blockEdge(sLayout, ri, ci).left && (() => {
+                          const b = blockOfPane(sLayout, pi);
+                          const lbl = studyBlocks[b]?.label
+                            ?? (studyBlocks[b] ? `#${studyBlocks[b].examId}` : tr("주 검사"));
+                          return (
+                            <span title={tr("이 구획의 검사 — Exam 탭을 끌어다 놓으면 바뀝니다")}
+                                  style={{ position: "absolute", top: 2, left: 4, zIndex: 3, pointerEvents: "none",
+                                           fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 3,
+                                           background: "rgba(0,0,0,0.55)", color: "var(--accent)",
+                                           maxWidth: "80%", overflow: "hidden", textOverflow: "ellipsis",
+                                           whiteSpace: "nowrap" }}>
+                              {b + 1}. {lbl}
+                            </span>
+                          );
+                        })()}
                     </div>
                   </Fragment>
                 ))}

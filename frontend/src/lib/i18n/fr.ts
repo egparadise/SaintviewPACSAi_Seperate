@@ -2941,5 +2941,15 @@ const d: Record<string, string> = {
   "저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.": "Ne passe à l'examen suivant que si l'enregistrement réussit. Reste en place en fin de liste. Suit le même ordre que les boutons ◀▶ de la fenêtre de compte rendu.",
   "설정 — 판독 단축키": "Paramètres — raccourcis de compte rendu",
   "확정(Approve) 후 다음 레포트 열기": "Ouvrir le compte rendu suivant après Approve",
+  "Study Layout": "Disposition des examens",
+  "상단 Exam 탭을 구획에 끌어다 놓으세요": "Faites glisser un onglet Exam du haut vers un bloc",
+  "드래그=Study 구획에 배치": "Glisser = placer dans un bloc d'examen",
+  "이 구획의 검사 — Exam 탭을 끌어다 놓으면 바뀝니다": "L'examen de ce bloc — déposez un onglet Exam pour le changer",
+  "구획": "bloc",
+  "검사 배치": "Examen placé",
+  "배치 취소 — 이 검사에 영상 시리즈가 없습니다": "Placement annulé — cet examen n'a aucune série d'images",
+  "배치 실패 — 검사를 불러오지 못했습니다": "Échec du placement — impossible de charger l'examen",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Cette combinaison dépasse la limite de volets (10×10) — réduisez la division des séries",
+  "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Cette combinaison dépasse la limite de volets (10×10) — réduisez la division des examens",
 };
 export default d;
