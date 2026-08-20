@@ -8,6 +8,7 @@ import { GridPicker } from "../lib/GridPicker";
 import { openReportWindow, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
 import { geomOfInstance, onCmpSync, postCmpCombine, postCmpHello, postCmpScroll, postCmpXlink,
          type CmpMsg } from "../lib/cmpSync";
+import { dropScoutSeries, readCombineRule, type CombineRule } from "../lib/combineRule";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab, postViewerOpened } from "../lib/sync";
 import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerClosing, markViewerMounted } from "../lib/viewerClose";
 import { type SyncReason, nearestSlice, projectPoint, syncReasonText } from "../lib/spatialSync";
@@ -339,6 +340,8 @@ interface ViewerPrefs {
   // 비교(Compare) 설정 — Setting>판독(Reading). enabled/multi_monitor/labels +
   // prior_mode: 과거검사(History) 비교 표시 — "layout"=1:2 분할 / "monitor"=인접 모니터 창
   compare?: { enabled?: boolean; multi_monitor?: boolean; labels?: boolean; prior_mode?: "layout" | "monitor" };
+  // Combine 규칙(2026-08-20 사용자 확정) — 설정>뷰어 공통. 판정은 lib/combineRule 한 곳.
+  combine?: CombineRule;
 }
 const DEFAULT_PREFS: ViewerPrefs = {
   paletteSide: "left", thumbSide: "left", thumbSize: 128,
@@ -2043,8 +2046,12 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // 현재 검사(series)를 쓰면 엉뚱한 영상이 들어간다 — 띄울 때 받아 둔 트리를 쓴다.
     const paneUid = panes[pid]?.studyUid || detail.study_uid;
     const pool = paneUid === detail.study_uid ? series : (cmpTreesRef.current[pid] ?? []);
-    const src = pool.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
-    if (!src.length) { if (!quiet) setStatus(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return false; }
+    const raw = pool.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
+    if (!raw.length) { if (!quiet) setStatus(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return false; }
+    // Combine 규칙(2026-08-20 사용자 확정) — 설정>뷰어 공통에서 켠 모달리티만 Scout(정위)을 뺀다.
+    // 판정은 lib/combineRule 한 곳(뷰어에 복제 금지). 규칙 때문에 결합이 불가능해지면 적용하지 않는다.
+    const { kept: src, dropped } = dropScoutSeries(
+      raw, detail.modality, readCombineRule(prefsRef.current.combine));
     if (src.length === 1) { if (!quiet) setStatus(tr("Combine 취소 — 시리즈가 1개뿐입니다(결합할 대상 없음)")); return false; }
     snapCombine(pid);
     const merged = buildCombined(
@@ -2052,7 +2059,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     patch(pid, { series: merged, index: 0, studyUid: paneUid });
     if (!quiet) {
       setActivePane(pid);
-      setStatus(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}`);
+      const skip = dropped.length
+        ? ` · ${tr("Scout 제외")} ${dropped.map((d) => `S${d.series_number}`).join(",")}`
+        : "";
+      setStatus(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}${skip}`);
     }
     return true;
   };

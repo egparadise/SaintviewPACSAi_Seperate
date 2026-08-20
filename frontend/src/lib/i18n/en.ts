@@ -2928,5 +2928,11 @@ const d: Record<string, string> = {
   "같은 부위(Chest·Abdomen·Brain 등)를 촬영한 과거검사만": "Only priors of the same body part (Chest, Abdomen, Brain …)",
   "보이는 과거검사 / 전체": "Shown priors / total",
   "이 분류에 해당하는 과거검사가 없습니다 — All 로 전부 보기": "No prior studies match this filter — choose All to see every one",
+  "Combine 규칙": "Combine rules",
+  "Scout Image 제외": "Exclude scout images",
+  "CT Scout Image 제외": "Exclude CT scout images",
+  "MRI Scout Image 제외": "Exclude MRI scout images",
+  "Scout 제외": "scout excluded",
+  "Combine(전체 시리즈 결합) 시 정위(Scout·Localizer·Topogram) 시리즈를 건너뛰고 그다음 시리즈부터 잇습니다. 시리즈 이름으로 못 가릴 때는 맨 앞의 아주 짧은 시리즈(3장 이하)를 정위로 봅니다 — 뺀 시리즈는 결합 직후 상태 표시줄에 알립니다. 규칙 때문에 결합할 시리즈가 부족해지면 적용하지 않습니다.": "When combining all series, scout/localizer/topogram series are skipped and the next series starts the stack. When the series name gives no clue, a very short leading series (3 images or fewer) is treated as a scout — whatever was dropped is reported in the status bar right after combining. The rule is not applied if it would leave too few series to combine.",
 };
 export default d;

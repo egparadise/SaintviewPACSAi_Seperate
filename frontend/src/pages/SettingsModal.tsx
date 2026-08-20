@@ -15,6 +15,7 @@ import { effectiveIce } from "../lib/useMediaGuard";
 import { MediaPermPanel } from "../components/MediaPermPanel";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
 import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
+import { COMBINE_RULE_DEFAULT, readCombineRule, type CombineRule } from "../lib/combineRule";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
 import { setSttEnabled } from "../lib/sttLang";
 import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
@@ -364,6 +365,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   });
   // 뷰어 닫기 동작 (닫기 다이얼로그 "기본으로" 체크와 동일 설정)
   const [closeMode, setCloseMode] = useState<"ask" | "save_current" | "save_all" | "discard">("ask");
+  // Combine 규칙(2026-08-20 사용자 확정 — 위치는 **뷰어 공통**) — Scout(정위) 시리즈를 결합에서 뺀다.
+  // 판정 규칙은 lib/combineRule 한 곳. 여기는 값만 보관·저장한다.
+  const [combRule, setCombRule] = useState<CombineRule>(COMBINE_RULE_DEFAULT);
   // 모니터 설정 — 하드웨어 모니터 감지 후 뷰어 표시 모니터 선택(다중=스팬)
   const [monitors, setMonitors] = useState<{ label: string; w: number; h: number; primary: boolean }[]>([]);
   const [monitorSel, setMonitorSel] = useState<number[]>([]);   // 뷰어 모니터(다중=라운드로빈)
@@ -608,6 +612,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (wp?.length) setWlPresets(wp);
       const cm = (v as { close_mode?: "ask" | "save_current" | "save_all" | "discard" }).close_mode;
       if (cm) setCloseMode(cm);
+      setCombRule(readCombineRule((v as { combine?: unknown }).combine));
       const mon = (v as { monitor?: { screens?: number[]; worklist?: number | null; report?: number | null; max_open?: number; close_scope?: "all" | "current"; close_report?: boolean; tab_binding?: Record<number, string>; tab_monitor_map?: { tab: string; monitor: number }[] } }).monitor;
       if (mon?.screens) setMonitorSel(mon.screens);
       if (mon?.worklist !== undefined) setWlMon(mon.worklist);
@@ -799,7 +804,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
         })
         .filter(([, cfg]) => (cfg as { s: unknown; i: unknown }).s || (cfg as { s: unknown; i: unknown }).i)),
       paletteSide, thumbSide, thumbSize, thumbMode, reportDock,
-      toolbar: tbConfig, wl_presets: wlPresets, close_mode: closeMode,
+      toolbar: tbConfig, wl_presets: wlPresets, close_mode: closeMode, combine: combRule,
       monitor: { screens: monitorSel, worklist: wlMon, report: rptMon, max_open: maxOpen, close_scope: closeScope,
                  close_report: closeReport, tab_binding: tabBinding, tab_monitor_map: tabMonMap },
       shortcuts: { rdrag: scRdrag, shift_rclick: scShiftR, keys: scKeys },
@@ -2609,6 +2614,30 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 "기본으로" 체크가 여기 저장되고, 체크를 해제하면 다시 다이얼로그가 나타난다(계정 로밍).
                 SaintView·T-View 는 close_mode 를 공유하고 I-View 는 infi_close_mode —
                 뷰어 닫기 규정의 설정 UI 는 이 그룹 **한 곳**뿐이다(하위 페이지에 복제 금지). */}
+            {/* Combine 규칙(2026-08-20 사용자 확정 — 위치는 **뷰어 공통**).
+                체크하면 Scout(정위) 시리즈를 결합에서 빼고 그다음 시리즈부터 잇는다.
+                판정 규칙은 lib/combineRule 한 곳 — 뷰어에 복제 금지(복제하면 반드시 갈린다). */}
+            {page === "viewer" && (
+              <Group title={tr("Combine 규칙")}>
+                <Row label={tr("Scout Image 제외")}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                      <input type="checkbox" checked={!!combRule.skip_scout_ct}
+                             onChange={(e) => setCombRule((r) => ({ ...r, skip_scout_ct: e.target.checked }))} />
+                      {tr("CT Scout Image 제외")}
+                    </label>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                      <input type="checkbox" checked={!!combRule.skip_scout_mr}
+                             onChange={(e) => setCombRule((r) => ({ ...r, skip_scout_mr: e.target.checked }))} />
+                      {tr("MRI Scout Image 제외")}
+                    </label>
+                  </span>
+                </Row>
+                <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                  {tr("Combine(전체 시리즈 결합) 시 정위(Scout·Localizer·Topogram) 시리즈를 건너뛰고 그다음 시리즈부터 잇습니다. 시리즈 이름으로 못 가릴 때는 맨 앞의 아주 짧은 시리즈(3장 이하)를 정위로 봅니다 — 뺀 시리즈는 결합 직후 상태 표시줄에 알립니다. 규칙 때문에 결합할 시리즈가 부족해지면 적용하지 않습니다.")}
+                </div>
+              </Group>
+            )}
             {page === "viewer" && (
               <Group title={tr("뷰어 닫기 설정")}>
                 <Row label="SaintView · T-View">

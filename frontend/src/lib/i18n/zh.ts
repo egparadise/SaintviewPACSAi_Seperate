@@ -2928,5 +2928,11 @@ const d: Record<string, string> = {
   "같은 부위(Chest·Abdomen·Brain 등)를 촬영한 과거검사만": "仅同一部位（Chest·Abdomen·Brain 等）的既往检查",
   "보이는 과거검사 / 전체": "显示数 / 总数",
   "이 분류에 해당하는 과거검사가 없습니다 — All 로 전부 보기": "没有符合此分类的既往检查 — 选择 All 查看全部",
+  "Combine 규칙": "Combine 规则",
+  "Scout Image 제외": "排除定位像",
+  "CT Scout Image 제외": "排除 CT 定位像",
+  "MRI Scout Image 제외": "排除 MRI 定位像",
+  "Scout 제외": "已排除定位像",
+  "Combine(전체 시리즈 결합) 시 정위(Scout·Localizer·Topogram) 시리즈를 건너뛰고 그다음 시리즈부터 잇습니다. 시리즈 이름으로 못 가릴 때는 맨 앞의 아주 짧은 시리즈(3장 이하)를 정위로 봅니다 — 뺀 시리즈는 결합 직후 상태 표시줄에 알립니다. 규칙 때문에 결합할 시리즈가 부족해지면 적용하지 않습니다.": "合并全部序列时跳过定位像（scout/localizer/topogram），从下一个序列开始串接。若序列名称无法判断，则把开头非常短的序列（3 张以内）视为定位像 — 被排除的序列会在合并后立即显示在状态栏。若规则会导致可合并序列不足，则不予应用。",
 };
 export default d;
