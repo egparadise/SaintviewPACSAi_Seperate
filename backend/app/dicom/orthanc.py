@@ -149,6 +149,9 @@ class OrthancClient:
                 # (0020,0052) 기준 좌표계 — Crosslink/3D Cursor 가 '정합이 성립하나'를 판정하는 근거.
                 # 없으면 빈 문자열이고, 그때는 판정이 통과한다(모름 ≠ 다름 — lib/spatialSync 계약).
                 "frame_of_reference_uid": str(itags.get("FrameOfReferenceUID", "") or "").strip(),
+                # (0008,0008) ImageType — Combine 규칙의 Scout(정위) 판정 근거(2026-08-21).
+                # 시리즈 레벨로 접어 넣은 뒤 인스턴스에서는 지운다(수천 장이면 응답이 부풀기 때문).
+                "image_type": str(itags.get("ImageType", "") or "").strip(),
                 # MG 4-view 표준 배치용 — Live 경로(webpacs_live)와 같은 필드명
                 "view_position": str(itags.get("ViewPosition", "") or "").strip().upper(),
                 "laterality": str(itags.get("ImageLaterality", "")
@@ -167,7 +170,7 @@ class OrthancClient:
                 f"/studies/{orthanc_study_id}/instances",
                 params={"requestedTags": "SOPInstanceUID;InstanceNumber;Rows;Columns;"
                                          "PixelSpacing;ImagePositionPatient;ImageOrientationPatient;"
-                                         "FrameOfReferenceUID;"
+                                         "FrameOfReferenceUID;ImageType;"
                                          "ViewPosition;ImageLaterality;Laterality"},
                 timeout=120,
             )
@@ -200,11 +203,17 @@ class OrthancClient:
                         continue
                     instances.append(_node(iid, fr.json()))
             instances.sort(key=lambda x: x["instance_number"])
+            # ImageType 은 **시리즈 성격**이므로 첫 장에서 뽑아 시리즈에 두고, 인스턴스에서는 지운다
+            # (인스턴스마다 들고 있으면 큰 검사에서 트리 응답이 그만큼 부푼다).
+            image_type = str(instances[0].get("image_type", "") if instances else "")
+            for inst in instances:
+                inst.pop("image_type", None)
             out.append({
                 "series_uid": tags.get("SeriesInstanceUID", ""),
                 "modality": tags.get("Modality", ""),
                 "series_desc": tags.get("SeriesDescription", ""),
                 "series_number": int(tags.get("SeriesNumber") or 0),
+                "image_type": image_type,
                 "instances": instances,
             })
         out.sort(key=lambda x: x["series_number"])

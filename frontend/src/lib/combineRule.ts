@@ -11,15 +11,18 @@
  * 아닌 것부터 보게 된다. 그래서 빼 달라는 요구다.
  *
  * ── 판정 순서(보수적) ───────────────────────────────────────────────────
- * ① 시리즈 설명에 scout/localizer/topogram/scanogram/surview/scanning 이 있으면 Scout.
+ * ① 시리즈 설명에 scout/localizer/topogram/scanogram/surview/planning 이 있으면 Scout.
  *    — 가장 확실하고 오탐이 거의 없다.
- * ② image_type 에 LOCALIZER 가 있으면 Scout(태그가 실려 있을 때만 — 지금은 대개 없다).
- * ③ 그래도 못 잡은 경우, **맨 앞 시리즈**에 한해 형태로 본다:
+ * ② **image_type(0008,0008) 에 LOCALIZER 가 있으면 Scout.** 2026-08-21 부터 서버가 시리즈마다
+ *    이 태그를 실어 준다(orthanc·Live 양쪽). DICOM 이 스스로 밝힌 값이라 가장 믿을 만하다.
+ * ③ ①②로 못 잡았고 **태그도 없을 때만**, 맨 앞 시리즈에 한해 형태로 본다:
  *    장수가 아주 적고(≤ SCOUT_MAX_IMAGES) 검사 안에 그보다 훨씬 큰 시리즈가 있으면 Scout.
  *    ⚠ 이건 추측이다. 그래서 (a) 사용자가 그 모달리티를 명시적으로 켰을 때만 돌고,
  *      (b) **맨 앞 시리즈에만** 적용하며(사용자 요구가 "첫 번째 Series"다),
  *      (c) 뺀 사실을 화면에 알린다(호출부 책임).
- *    설명도 태그도 없는 실제 데이터(사용자 그림의 S1: COR 2장)를 잡으려면 이 축이 필요하다.
+ *    ★ **태그를 아는 검사에서는 ③을 아예 쓰지 않는다.** DICOM 이 "이건 LOCALIZER 가 아니다" 라고
+ *      말했는데 우리가 형태로 뒤집으면, 짧은 진단 시리즈(2장짜리 촬영 등)를 빼 버린다.
+ *      태그가 실리기 전에는 ③ 없이는 사용자 그림의 S1(COR 2장)을 잡을 수 없어 어쩔 수 없었다.
  *
  * ── 안전장치 ────────────────────────────────────────────────────────────
  * 제외하고 나면 결합할 게 없거나 하나만 남는 상황이면 **제외하지 않는다**. 규칙 때문에
@@ -69,6 +72,12 @@ export function looksScoutByName(s: SeriesLike): boolean {
   return /localizer/i.test(String(s.image_type ?? ""));
 }
 
+/** 이 검사가 ImageType 을 알고 있는가 — 하나라도 실려 있으면 '아는 검사' 로 본다.
+ *  아는 검사에서는 형태 추측(③)을 쓰지 않는다(위 판정 순서 ★). */
+export function knowsImageType(list: SeriesLike[]): boolean {
+  return (list ?? []).some((s) => String(s.image_type ?? "").trim() !== "");
+}
+
 /**
  * 결합에서 뺄 시리즈들. **원본 순서를 유지한 새 배열**을 돌려준다.
  *
@@ -85,11 +94,15 @@ export function dropScoutSeries<T extends SeriesLike>(
   // 시리즈 번호 순으로 '맨 앞'을 정한다 — 화면 순서와 배열 순서가 다를 수 있다.
   const ordered = [...list].sort((a, b) => (a.series_number ?? 0) - (b.series_number ?? 0));
   const biggest = Math.max(...list.map(count));
+  // ★ DICOM 이 ImageType 을 밝힌 검사에서는 형태 추측을 쓰지 않는다 — 태그가 "LOCALIZER 아님"
+  //   이라고 말했는데 우리가 장수로 뒤집으면 짧은 진단 시리즈를 빼 버린다.
+  const tagged = knowsImageType(list);
 
   const drop = new Set<T>();
   for (let i = 0; i < ordered.length; i++) {
     const s = ordered[i];
     if (looksScoutByName(s)) { drop.add(s); continue; }
+    if (tagged) break;              // 태그를 아는 검사 — 앞쪽 형태 추측 구간 없음
     // ③ 형태 판정은 **앞에서 연속으로** 걸리는 동안만 — 사용자 요구가 "첫 번째 Series"다.
     //   이미 진단 시리즈를 하나 지났으면 그 뒤의 작은 시리즈는 건드리지 않는다.
     if (drop.size === i && count(s) > 0 && count(s) <= SCOUT_MAX_IMAGES

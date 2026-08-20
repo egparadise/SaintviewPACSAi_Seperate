@@ -144,6 +144,10 @@ def test_live_detail_and_tree(client, auth_headers, live_ready):
     assert insts[0]["rows"] == 64 and insts[0]["cols"] == 64   # v2 metadata 기하
     assert insts[0]["preview_url"].startswith("/api/webpacs/live/thumb/")
     assert [i["instance_number"] for i in insts] == [1, 2, 3]
+    # (0008,0008) ImageType — Combine 규칙의 Scout(정위) 판정 근거(2026-08-21).
+    # 값이 없는 목업이어도 **키는 있어야** 한다: 프론트가 '태그를 아는 검사인가'로 갈라
+    # 형태 추측을 쓸지 말지 정하기 때문이다(lib/combineRule).
+    assert "image_type" in tree["series"][0]
 
     # instances(키이미지 UI 계약)
     r = client.get(f"/api/webpacs/live/studies/{VID1}/instances", headers=auth_headers)

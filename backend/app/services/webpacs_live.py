@@ -633,6 +633,11 @@ def live_series_tree(db: Session, vid: int, user: dict | None = None) -> dict:
             "modality": str(_tag1(meta_by_sop.get(instances[0]["sop_uid"], {}), "00080060", "") or "") if instances else "",
             "series_desc": str(s.get("series_description") or ""),
             "series_number": int(s.get("series_sequence") or 0),
+            # (0008,0008) ImageType — Combine 규칙의 Scout(정위) 판정 근거(2026-08-21).
+            # 다중값이라 '\' 로 이어 붙인다(예: ORIGINAL\PRIMARY\LOCALIZER).
+            "image_type": "\\".join(
+                str(x) for x in (_tag(meta_by_sop.get(instances[0]["sop_uid"], {}), "00080008") or [])
+            ) if instances else "",
             "instances": instances,
         })
     series_out.sort(key=lambda s: s["series_number"])

@@ -14,7 +14,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  COMBINE_RULE_DEFAULT, dropScoutSeries, looksScoutByName, readCombineRule, ruleOnFor,
+  COMBINE_RULE_DEFAULT, dropScoutSeries, knowsImageType, looksScoutByName, readCombineRule, ruleOnFor,
 } from "../src/lib/combineRule.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -109,4 +109,53 @@ test("배선 — 설정은 뷰어 공통에, 판정은 lib 한 곳에서만", ()
   assert.ok(!/SCOUT_DESC_RE|looksScoutByName\s*=/.test(v2),
     "판정 규칙을 뷰어에 복제하면 반드시 갈린다(이 저장소의 반복 사고)");
   assert.match(v2, /tr\("Scout 제외"\)/, "뺀 시리즈를 화면에 알린다(추측 판정이 섞이므로 투명해야 한다)");
+});
+
+/* ── 2026-08-21: 서버가 ImageType(0008,0008)을 시리즈마다 실어 준다 ────────────
+ * 그전에는 태그가 없어 '맨 앞의 아주 짧은 시리즈' 라는 **추측**에 기댈 수밖에 없었다.
+ * 이제 DICOM 이 스스로 밝힌 값을 쓰고, 아는 검사에서는 추측을 아예 쓰지 않는다. */
+
+test("② ImageType 이 LOCALIZER 면 위치와 무관하게 Scout", () => {
+  const t = (n, imgs, it) => ({ series_number: n, instances: Array(imgs).fill(0), image_type: it });
+  const list = [
+    t(1, 2, "ORIGINAL\\PRIMARY\\LOCALIZER"),
+    t(2, 67, "ORIGINAL\\PRIMARY\\AXIAL"),
+    t(3, 67, "ORIGINAL\\PRIMARY\\AXIAL"),
+  ];
+  const { kept, dropped } = dropScoutSeries(list, "CT", { skip_scout_ct: true });
+  assert.deepEqual(dropped.map((x) => x.series_number), [1]);
+  assert.deepEqual(kept.map((x) => x.series_number), [2, 3]);
+});
+
+test("★ 태그를 아는 검사에서는 형태 추측을 쓰지 않는다 — 짧은 진단 시리즈를 지킨다", () => {
+  const t = (n, imgs, it) => ({ series_number: n, instances: Array(imgs).fill(0), image_type: it });
+  // 맨 앞이 2장이지만 DICOM 은 AXIAL 이라고 말한다 — 예전 규칙이라면 빼 버렸을 자리다
+  const list = [
+    t(1, 2, "ORIGINAL\\PRIMARY\\AXIAL"),
+    t(2, 67, "ORIGINAL\\PRIMARY\\AXIAL"),
+  ];
+  assert.deepEqual(dropScoutSeries(list, "CT", { skip_scout_ct: true }).dropped, [],
+    "태그가 'LOCALIZER 아님' 이라고 말하면 장수로 뒤집지 않는다");
+  assert.equal(knowsImageType(list), true);
+});
+
+test("태그가 없는 검사(구형 데이터)는 종전대로 형태로 추측한다", () => {
+  const t = (n, imgs) => ({ series_number: n, instances: Array(imgs).fill(0) });
+  const list = [t(1, 2), t(2, 67), t(3, 67)];
+  assert.deepEqual(dropScoutSeries(list, "CT", { skip_scout_ct: true }).dropped.map((x) => x.series_number),
+    [1], "태그가 실리기 전 데이터에서도 사용자 그림의 S1 은 잡혀야 한다");
+  assert.equal(knowsImageType(list), false);
+  assert.equal(knowsImageType([{ image_type: "  " }]), false, "공백만 있으면 모르는 것");
+});
+
+test("백엔드가 ImageType 을 시리즈에 싣는다 — 로컬·Live 양쪽", () => {
+  const REPO = join(ROOT, "..");
+  const orth = readFileSync(join(REPO, "backend/app/dicom/orthanc.py"), "utf8");
+  const live = readFileSync(join(REPO, "backend/app/services/webpacs_live.py"), "utf8");
+  assert.match(orth, /FrameOfReferenceUID;ImageType;/, "요청 태그에 포함");
+  assert.match(orth, /"image_type": image_type,/, "시리즈 레벨에 싣는다");
+  assert.match(orth, /inst\.pop\("image_type", None\)/,
+    "인스턴스마다 들고 있으면 큰 검사에서 트리 응답이 부푼다");
+  assert.match(live, /"00080008"/, "Live 는 v2 메타에서 뽑는다");
+  assert.match(live, /"image_type":/);
 });

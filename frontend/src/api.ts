@@ -1689,6 +1689,10 @@ export interface SeriesNode {
   modality: string;
   series_desc: string;
   series_number: number;
+  /** (0008,0008) ImageType — 첫 장에서 뽑은 **시리즈 성격**(2026-08-21).
+   *  Combine 규칙이 Scout(정위, LOCALIZER)을 가리는 근거. 구형 데이터·태그 미수집이면 빈 값이고,
+   *  그때는 lib/combineRule 이 형태(맨 앞의 아주 짧은 시리즈)로 추측한다. */
+  image_type?: string;
   instances: InstanceNode[];
 }
 
