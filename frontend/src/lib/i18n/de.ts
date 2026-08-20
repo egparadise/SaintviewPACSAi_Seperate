@@ -2951,5 +2951,6 @@ const d: Record<string, string> = {
   "배치 실패 — 검사를 불러오지 못했습니다": "Platzierung fehlgeschlagen — Untersuchung konnte nicht geladen werden",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Diese Kombination überschreitet das Fenster-Limit (10×10) — Serienteilung verringern",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Diese Kombination überschreitet das Fenster-Limit (10×10) — Untersuchungsteilung verringern",
+  "받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다": "Abrufgrenze erreicht — Bedingungen (Zeitraum, Modalität …) eingrenzen, damit nichts fehlt",
 };
 export default d;

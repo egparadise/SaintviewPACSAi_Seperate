@@ -80,7 +80,12 @@ def phrases(db: Session = Depends(get_db), user: dict = Depends(current_user)):
 def worklist(
     q: str = "", pid: str = "", pname: str = "", modality: str = "",
     date_from: str = "", date_to: str = "",
-    limit: int = Query(1000, le=1000), offset: int = 0,   # 2026-08-10 — 1000건(A 는 상한 없음)
+    # 2026-08-10 — 표시는 1000건(사용자 확정). 2026-08-21: **조건 나열 검색**에서는 받은 목록을
+    # 클라이언트가 다시 걸러야 해서(A 는 센터명 같은 축을 검색 파라미터로 안 받는다) 1000건 안에
+    # 답이 없으면 못 찾았다. A 자체는 상한이 없으므로(dependencies/Study._clamp_limit_offset 은
+    # max(1, limit) 만 한다) 조건이 걸린 조회에 한해 더 받을 수 있게 상한만 올린다.
+    # 무한정은 아니다 — 그 이상은 사용자가 조건을 더 좁히는 것이 맞다.
+    limit: int = Query(1000, le=5000), offset: int = 0,
     db: Session = Depends(get_db), user: dict = Depends(current_user),
 ):
     return _wrap(lambda: live.live_worklist(db, {

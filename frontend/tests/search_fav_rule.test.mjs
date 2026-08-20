@@ -21,7 +21,10 @@ import { fileURLToPath } from "node:url";
 import {
   applyFavFilter, clientCondsFor, matchesCond, parseFavQuery, readFavs, removeFav, upsertFav,
 } from "../src/lib/searchFav.ts";
-import { buildWorklistQuery, toLiveParams } from "../src/lib/worklistQuery.ts";
+import {
+  LIVE_LIMIT_DEFAULT, LIVE_LIMIT_FILTERED, buildWorklistQuery, liveFetchLimit, liveMaybeTruncated,
+  toLiveParams,
+} from "../src/lib/worklistQuery.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(ROOT, p), "utf8");
@@ -251,4 +254,42 @@ test("상태 코드는 정확히 일치해야 한다 — draft 가 draft_ready �
   assert.equal(applyFavFilter(rows, [{ field: "status", value: "draft", exact: true }]).length, 1);
   assert.equal(applyFavFilter(rows, [{ field: "status", value: "draft" }]).length, 2,
     "exact 가 아니면 종전처럼 부분 일치(자유어 조건의 기존 동작은 그대로)");
+});
+
+/* ── 2026-08-21: Live 조건 검색의 1000건 상한 ──────────────────────────────
+ * A 는 센터명·병원명을 검색 파라미터로 받지 않는다 — A 의 study_search 가 OR 로 훑는 컬럼은
+ * modality·description·body_part·level·patient_name·patient_id 뿐이다(handover 소스 확인).
+ * 그래서 나머지 축은 받은 목록에서 걸러야 하는데, 표시 상한과 같은 1000건만 받으면
+ * 그 안에 답이 없을 때 "없다" 가 됐다. A 자체는 건수 상한이 없어 더 받을 수 있다. */
+
+test("거를 조건이 있을 때만 넉넉히 받는다 — 평소 조회는 그대로", () => {
+  assert.equal(liveFetchLimit(0), LIVE_LIMIT_DEFAULT, "조건이 없으면 예전 그대로");
+  assert.equal(liveFetchLimit(1), LIVE_LIMIT_FILTERED);
+  assert.equal(liveFetchLimit(3), LIVE_LIMIT_FILTERED, "조건 수와 무관하게 같은 상한");
+  assert.ok(LIVE_LIMIT_FILTERED > LIVE_LIMIT_DEFAULT);
+});
+
+test("상한에 닿으면 조용히 자르지 않고 알린다", () => {
+  assert.equal(liveMaybeTruncated(5000, 5000), true, "그 너머는 보지 못했다");
+  assert.equal(liveMaybeTruncated(4999, 5000), false);
+  assert.equal(liveMaybeTruncated(0, 1000), false);
+});
+
+test("클라이언트가 걸러야 할 조건 수가 곧 판단 근거다", () => {
+  // 'CT' 는 장비로 승격되어 A 가 거른다 → 클라이언트 조건 0
+  assert.equal(clientCondsFor(parseFavQuery("CT"), { liveMode: true }).length, 0);
+  // 센터명은 A 가 못 거른다 → 클라이언트 조건 1 → 넉넉히 받아야 한다
+  assert.equal(clientCondsFor(parseFavQuery("써밋영상의원"), { liveMode: true }).length, 1);
+  assert.equal(liveFetchLimit(clientCondsFor(parseFavQuery("써밋영상의원"), { liveMode: true }).length),
+    LIVE_LIMIT_FILTERED);
+});
+
+test("배선 — 워크리스트가 Live 조회에 그 상한을 실어 보낸다", () => {
+  const w = src("src/pages/Worklist.tsx");
+  assert.match(w, /liveFetchLimit\(liveConds\)/);
+  assert.match(w, /limit: liveLimit/, "A 로 나가는 파라미터에 실린다");
+  assert.match(w, /liveMaybeTruncated\(r\.items\.length, liveLimit\)/, "잘림 안내");
+  // 백엔드가 그만큼 받아 주는가
+  const api = readFileSync(join(ROOT, "..", "backend/app/api/webpacs_live.py"), "utf8");
+  assert.match(api, /Query\(1000, le=5000\)/, "기본은 1000, 조건 검색만 더 받는다");
 });

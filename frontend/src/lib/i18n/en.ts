@@ -2951,5 +2951,6 @@ const d: Record<string, string> = {
   "배치 실패 — 검사를 불러오지 못했습니다": "Placement failed — could not load the study",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "This combination exceeds the pane limit (10×10) — reduce the series split",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "This combination exceeds the pane limit (10×10) — reduce the study split",
+  "받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다": "Reached the fetch limit — narrow the conditions (date range, modality…) so nothing is missed",
 };
 export default d;

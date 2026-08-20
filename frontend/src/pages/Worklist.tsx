@@ -80,6 +80,7 @@ import {
   type SearchFav,
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
+import { liveFetchLimit, liveMaybeTruncated } from "../lib/worklistQuery";
 import { showToast } from "../lib/toast";
 import { installApp } from "../lib/pwa";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
@@ -3450,11 +3451,21 @@ export function Worklist() {
       // LIVE 모드 — 원격 A(webpacs_api) 워크리스트 실시간 조회(vid, 복사 없음).
       // 지원 필터만 매핑(q/pid/pname/modality/기간) — 나머지 필터는 라이브에선 무시.
       // 기획: "Live 도 같은 규칙을 따른다" → 여기도 committed 로만 조회한다.
-      api.liveWorklist(toLiveParams(queryParams, { favMode: committed.favMode }))
+      // 조건 나열 검색은 받은 목록에서 다시 걸러야 한다(A 가 센터명 같은 축을 검색 파라미터로
+      // 받지 않는다). 그래서 **거를 조건이 있을 때만** 넉넉히 받는다 — 규칙은 lib/worklistQuery.
+      // 조건이 없으면 예전 그대로 1000건이라 평소 조회는 무거워지지 않는다.
+      const liveConds = committed.favMode && (committed.searchText ?? "").trim()
+        ? clientCondsFor(parseFavQuery(committed.searchText), { liveMode: true }).length
+        : 0;
+      const liveLimit = liveFetchLimit(liveConds);
+      api.liveWorklist({ ...toLiveParams(queryParams, { favMode: committed.favMode }), limit: liveLimit })
         .then((r) => {
           setItems(r.items);
           setTotal(r.total);
-          setLiveErr("");
+          // 상한에 닿았으면 그 너머는 보지 못했다 — 조용히 자르지 않고 알린다.
+          setLiveErr(liveConds > 0 && liveMaybeTruncated(r.items.length, liveLimit)
+            ? tr("받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다")
+            : "");
           // 사라진 행 id 정리 — 다중선택·anchor stale 방지(일반 경로와 동일)
           setSelectedIds((prev) => {
             if (!prev.size) return prev;

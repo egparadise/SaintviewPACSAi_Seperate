@@ -67,6 +67,28 @@ export function buildWorklistQuery(c: CommittedQuery): Record<string, string> {
   return p;
 }
 
+/* ── Live 조회 건수 ────────────────────────────────────────────────────────
+ * A 는 센터명·병원명 같은 축을 검색 파라미터로 받지 않는다(A 의 study_search 는
+ * modality·description·body_part·level·patient_name·patient_id 만 OR 로 훑는다).
+ * 그래서 조건 나열 검색의 나머지 축은 **받은 목록에서** 걸러야 하는데, 표시 상한과 같은
+ * 1000건만 받으면 그 안에 답이 없을 때 "없다"가 되어 버린다(실제 한계였다).
+ *
+ * A 자체는 건수 상한이 없으므로(webpacs_api dependencies/Study._clamp_limit_offset 은
+ * max(1, limit) 만 한다), **거를 조건이 있을 때만** 넉넉히 받는다.
+ * 조건이 없으면 예전 그대로 1000건 — 평소 조회를 무겁게 만들지 않는다. */
+export const LIVE_LIMIT_DEFAULT = 1000;
+export const LIVE_LIMIT_FILTERED = 5000;
+
+export function liveFetchLimit(clientCondCount: number): number {
+  return clientCondCount > 0 ? LIVE_LIMIT_FILTERED : LIVE_LIMIT_DEFAULT;
+}
+
+/** 더 있을지 모르는 상태인가 — 받은 수가 상한에 닿았다면 그 너머는 보지 못했다.
+ *  사용자에게 "조건을 더 좁히라"고 알려 주기 위한 판정(조용히 자르지 않는다). */
+export function liveMaybeTruncated(received: number, limit: number): boolean {
+  return received >= limit;
+}
+
 /** Live 워크리스트 파라미터 — 지원 키만 추린다(빈 값 제외).
  *  ⚠ FAV(조건 나열)에서는 **q 를 보내지 않는다**. A 의 study_search 가 어떤 컬럼을 훑는지
  *    우리가 정할 수 없어서, 보냈다가 A 가 못 찾으면 그 행은 아예 오지 않는다(되돌릴 수 없는 누락).

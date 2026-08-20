@@ -2951,5 +2951,6 @@ const d: Record<string, string> = {
   "배치 실패 — 검사를 불러오지 못했습니다": "Error al colocar: no se pudo cargar el estudio",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Esta combinación supera el límite de paneles (10×10): reduzca la división de series",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Esta combinación supera el límite de paneles (10×10): reduzca la división de estudios",
+  "받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다": "Se alcanzó el límite de descarga: restrinja las condiciones (periodo, modalidad…) para no omitir estudios",
 };
 export default d;
