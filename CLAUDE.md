@@ -24,6 +24,23 @@
 - 탭 전환·검사 전환은 **예외 없이** 이 순서를 다시 계산한다(이전 화면의 격자 상속 금지).
 - 회귀 방어 테스트: `frontend/tests/hang2d_rule.test.mjs` · `hang_switch_rule.test.mjs`.
 
+## Compare(과거검사 비교) 화면 분할 — 2026-08-19 사용자 확정
+
+설정>판독 **'과거검사 비교 표시 = Layout 띄우기(한 화면 1:2 분할)'** 이면:
+
+- **모달리티와 무관하게 1:2 분할**이다. CT·MR 에 별도 Series Layout 이 걸려 있어도 상관없다 —
+  이건 Series Layout 이 아니라 **화면 자체를 나누는 기능**이다.
+- 비교가 떠 있는 동안 분할의 주인은 Compare 다. `applyHangFor` 는 `compareOwnsLayout()` 이 참이면
+  **아무것도 하지 않고 현재 페인 수만 돌려준다**(위 캐스케이드를 바꾸는 게 아니라, 사용자가 방금
+  명시적으로 띄운 비교 화면이 있을 때만 적용을 보류하는 것이다).
+- 소유권은 **사용자가 직접 분할을 고르면**(툴바 select · Srs 그리드 피커 · HP 해제) 즉시 돌아간다
+  (`releaseCompareLayout`). 이 해제가 없으면 한 번 비교한 뒤로 모달리티 Layout 이 영영 안 걸린다.
+- 이 설정은 `compare.multi_monitor` 보다 **앞선다** — 화면 분할을 골라 놓고 옆 모니터 창이 뜨면
+  애초에 1:2 가 아니다.
+- **Combine 은 비교 화면의 두 영역 모두**에 걸린다(M=주 검사, S=과거). 각 페인은 **자기 검사**의
+  시리즈로 결합한다(`cmpTreesRef`) — 현재 검사 시리즈를 과거 페인에 넣으면 엉뚱한 영상이 결합된다.
+- 회귀 방어 테스트: `frontend/tests/compare_split_rule.test.mjs`.
+
 ## 그 외 세션 공통 규율 (요약)
 
 - 프론트 타입 게이트는 `tsc -b` (`--noEmit -p tsconfig.json` 은 앱을 검사하지 않는다).

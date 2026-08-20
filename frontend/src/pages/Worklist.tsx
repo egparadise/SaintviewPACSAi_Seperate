@@ -79,7 +79,7 @@ import {
   applyFavFilter, looksLikeFavQuery, parseFavQuery, readFavs, removeFav, upsertFav,
   type SearchFav,
 } from "../lib/searchFav";
-import { nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
+import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
 import { showToast } from "../lib/toast";
 import { installApp } from "../lib/pwa";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
@@ -2741,13 +2741,18 @@ function BatchReviewModal({ onClose, onDone }: { onClose: () => void; onDone: ()
 /* ════ 워크리스트 워크스페이스 루트 ════ */
 /* SAINT VIEW 워크리스트 상단 상태 카운트 바 (그림1) — 서버 counts 엔드포인트로 전 검사 정확 집계.
    서버 응답 전/실패 시 현재 페이지 집계로 폴백. 칩 클릭 시 상태 필터. */
-function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, pageOnly }: {
+function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, pageOnly,
+                      sort = null, onChipSort }: {
   queryParams: Record<string, string>;
   refreshKey: number;
   items: StudyRow[];
   onStatus: (patch: { status?: string; emergency?: string }) => void;
   onRefresh: () => void;
   pageOnly?: boolean;   // LIVE 모드 — 서버(로컬 DB) 집계는 무의미, 현재 페이지 집계만
+  /** 칩 클릭 정렬(2026-08-20 사용자 확정) — 상태는 그리드 헤더와 **같은 정렬 상태**를 공유한다
+   *  (칩으로 '미판독 위로'를 해 놓고 헤더로 이름 정렬을 하면 헤더가 이긴다 — 마지막 클릭이 이긴다). */
+  sort?: SortState | null;
+  onChipSort?: (key: string, pin?: string) => void;
 }) {
   const [c, setC] = useState<{ total: number; emergency: number; unread: number; reading: number; draft_ready: number; finalized: number } | null>(null);
   useEffect(() => {
@@ -2773,26 +2778,43 @@ function SvStatusBar({ queryParams, refreshKey, items, onStatus, onRefresh, page
     return () => { alive = false; };
   }, [queryParams, refreshKey, pageOnly]);
   const pageN = (pred: (r: StudyRow) => boolean) => items.filter(pred).length;
-  const chips: { label: string; n: number | undefined; fb: number; color: string; onClick: () => void }[] = [
-    { label: "전체", n: c?.total, fb: items.length, color: "var(--accent)", onClick: () => onStatus({ status: "", emergency: "" }) },
-    { label: "응급", n: c?.emergency, fb: pageN((r) => r.emergency), color: "var(--stat-emergency)", onClick: () => onStatus({ emergency: "true" }) },
-    { label: "미판독", n: c?.unread, fb: pageN((r) => r.read_state === "unread"), color: "#f59e0b", onClick: () => onStatus({ status: "unread" }) },
-    { label: "판독중", n: c?.reading, fb: pageN((r) => r.read_state === "reading" || r.status === "reading"), color: "#60a5fa", onClick: () => onStatus({ status: "reading" }) },
-    { label: "판독저장", n: c?.draft_ready, fb: pageN((r) => r.status === "draft_ready"), color: "#a78bfa", onClick: () => onStatus({ status: "draft_ready" }) },
-    { label: "승인", n: c?.finalized, fb: pageN((r) => r.status === "finalized"), color: "var(--stat-final)", onClick: () => onStatus({ status: "finalized" }) },
+  // 칩 클릭 = 상태 필터 + **그 항목 기준 정렬**(2026-08-20 사용자 확정).
+  // 필터만 걸면 서버가 그 상태만 주므로 "정렬됐다"는 느낌이 없고, 상태 필터를 풀어 둔
+  // 상태에서 칩을 눌러도 목록이 정리돼야 한다 — 그래서 둘 다 건다.
+  const chips: { label: string; n: number | undefined; fb: number; color: string;
+                 sk: string; pin?: string; onClick: () => void }[] = [
+    { label: "전체", n: c?.total, fb: items.length, color: "var(--accent)", sk: "",
+      onClick: () => onStatus({ status: "", emergency: "" }) },
+    { label: "응급", n: c?.emergency, fb: pageN((r) => r.emergency), color: "var(--stat-emergency)", sk: "priority",
+      onClick: () => onStatus({ emergency: "true" }) },
+    { label: "미판독", n: c?.unread, fb: pageN((r) => r.read_state === "unread"), color: "#f59e0b", sk: "read_state", pin: "unread",
+      onClick: () => onStatus({ status: "unread" }) },
+    { label: "판독중", n: c?.reading, fb: pageN((r) => r.read_state === "reading" || r.status === "reading"), color: "#60a5fa", sk: "read_state", pin: "reading",
+      onClick: () => onStatus({ status: "reading" }) },
+    { label: "판독저장", n: c?.draft_ready, fb: pageN((r) => r.status === "draft_ready"), color: "#a78bfa", sk: "status", pin: "draft_ready",
+      onClick: () => onStatus({ status: "draft_ready" }) },
+    { label: "승인", n: c?.finalized, fb: pageN((r) => r.status === "finalized"), color: "var(--stat-final)", sk: "status", pin: "finalized",
+      onClick: () => onStatus({ status: "finalized" }) },
   ];
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px",
                   background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
       <b style={{ fontSize: 14, marginRight: 6 }}>{tr("워크리스트")}</b>
-      {chips.map((ch) => (
-        <button key={ch.label} onClick={ch.onClick} title={`${tr(ch.label)} ${tr("상태로 필터")}`}
+      {chips.map((ch) => {
+        const on = !!ch.sk && sort?.key === ch.sk && (sort?.pin ?? null) === (ch.pin ?? null);
+        return (
+        <button key={ch.label}
+                onClick={() => { ch.onClick(); if (ch.sk) onChipSort?.(ch.sk, ch.pin); else onChipSort?.("", undefined); }}
+                title={ch.sk ? `${tr(ch.label)} ${tr("상태로 필터 · 클릭할 때마다 이 항목 기준 정렬 ↔ 역순 ↔ 해제")}`
+                             : `${tr(ch.label)} ${tr("상태로 필터")}`}
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px", borderRadius: 16,
-                         background: "var(--bg-elevated)", border: "1px solid var(--border)", cursor: "pointer", fontSize: 12 }}>
+                         background: on ? "var(--bg-panel)" : "var(--bg-elevated)",
+                         border: `1px solid ${on ? ch.color : "var(--border)"}`, cursor: "pointer", fontSize: 12 }}>
           <span style={{ color: ch.color, fontWeight: 700 }}>{tr(ch.label)}</span>
           <span style={{ fontWeight: 700 }}>{(ch.n ?? ch.fb).toLocaleString()}</span>
-        </button>
-      ))}
+          {on && <span style={{ color: ch.color, fontWeight: 700 }}>{sort?.dir === "asc" ? "▲" : "▼"}</span>}
+        </button>);
+      })}
       {!c && (
         <span style={{ marginLeft: "auto", fontSize: 10.5, color: "var(--text-secondary)" }}>{tr("현재 페이지 집계 (서버 집계 대기…)")}</span>
       )}
@@ -2943,6 +2965,10 @@ export function Worklist() {
   // 규칙(첫 방향·비교·빈 값)은 lib/gridSort 한 곳. null = 서버가 준 기본 순서.
   const [sort, setSort] = useState<SortState | null>(null);
   const onSortCol = useCallback((key: string) => setSort((cur) => nextSort(cur, key)), []);
+  /** 상단 카운트 칩 클릭 — 그 항목 기준 정렬(다시 누르면 역순, 한 번 더 누르면 해제).
+   *  key 가 빈 문자열이면('전체' 칩) 정렬을 걷어낸다 = 서버가 준 기본 순서로. */
+  const onChipSort = useCallback((key: string, pin?: string) =>
+    setSort((cur) => (key ? nextChipSort(cur, key, pin) : null)), []);
   // ── 통합 검색창(2026-08-10) — 방식·범위·결합은 설정>워크리스트>검색창 설정(계정 저장) ──
   const [searchMode, setSearchModeState] = useState<SearchMode>(DEFAULT_SEARCH_BOX.mode);
   // Search Favorite 저장 목록(2026-08-19) — 계정 로밍(worklist.prefs.search_favs).
@@ -4633,6 +4659,7 @@ export function Worklist() {
             /* 카운트 칩도 **커밋된** queryParams 로 집계한다 — 입력 상태로 물리면 타건마다
                /api/worklist/counts 가 나가고 칩 숫자가 목록보다 먼저 움직인다. */
             : <SvStatusBar queryParams={queryParams} refreshKey={refreshKey} items={items} pageOnly={liveMode}
+                           sort={sort} onChipSort={onChipSort}
                            onStatus={(p) => applyAndSearch({ filters: (f) => ({ ...f, ...p }) })}
                            onRefresh={reloadList} />}
         </>

@@ -2919,5 +2919,8 @@ const d: Record<string, string> = {
   "검색식 수정": "Edit expression",
   "이름(그대로 두면 덮어씁니다)": "Name (keep it to overwrite)",
   "클릭 = 정렬(다시 클릭하면 역순) · 드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 = 폭 조절": "Click = sort (click again to reverse) · Drag = move column · Right edge = resize",
+  "비교 화면의": "In the compare view,",
+  "개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)": " panes combined separately (compare by scrolling or cine)",
+  "상태로 필터 · 클릭할 때마다 이 항목 기준 정렬 ↔ 역순 ↔ 해제": "filter by status · each click sorts by this item ↔ reverse ↔ off",
 };
 export default d;

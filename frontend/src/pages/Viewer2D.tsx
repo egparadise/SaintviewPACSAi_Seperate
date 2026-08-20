@@ -838,6 +838,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // 비교 활성 여부 — ⇄ Compare 로 명시 진입한 경우에만 M/S 라벨 표시(Add View·Stack·과거검사 드래그와 구분).
   //  slave 창(URL cmprole)은 처음부터 활성.
   const [cmpActive, setCmpActive] = useState<boolean>(() => !!new URLSearchParams(window.location.search).get("cmprole"));
+  const cmpActiveRef = useRef(cmpActive);
+  useEffect(() => { cmpActiveRef.current = cmpActive; }, [cmpActive]);
+  /** 비교로 띄운 페인의 **그 검사 전체 시리즈** — Combine 이 페인마다 자기 검사를 결합하는 근거.
+   *  (페인에는 시리즈 하나만 실려 있고 examId 도 없어서, 띄울 때 받아 둔 트리를 여기 보관한다.) */
+  const cmpTreesRef = useRef<Record<string, SeriesNode[]>>({});
   // 다중 모니터 감지 슬롯 사전 캐시 — Compare 모달 열 때 미리 감지해 두고, "비교 열기" 클릭 시 동기 사용
   //  (클릭 핸들러 내 await 없이 window.open → 사용자 활성화 유지 → 팝업 차단 회피).
   const cmpSlotsRef = useRef<{ index: number; features: string }[]>([]);
@@ -1607,8 +1612,26 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /** 이 modality 를 열 때 걸 분할을 **다시 계산**해 적용하고, 새 페인 수를 돌려준다.
    *  ⚠ setLayout 은 비동기라 직후에 state 를 읽으면 옛값이다 — 그래서 페인 수를 반환값으로 준다.
    *    (그 혼동이 "DR 을 열었는데 CT 의 2×2 격자에 빈 칸이 남는" 사고의 절반이었다.) */
+  /** Compare 가 화면 분할을 소유하는 상태인가(2026-08-19 사용자 확정).
+   *  설정>판독 '과거검사 비교 표시 = Layout 띄우기(한 화면 1:2 분할)' + ⇄ Compare 진입 중이면
+   *  **모달리티별 Series Layout(2D-Common/뷰어별)과 무관하게** 분할을 유지한다.
+   *  사용자 표현 그대로: "이 기능은 Series Layout 과 관계없이 화면 자체 분할 기능이다."
+   *  ※ CLAUDE.md 캐스케이드(HP→Mammo→Common→뷰어별)를 바꾸는 것이 아니라, 그 위에
+   *    '사용자가 지금 명시적으로 띄운 비교 화면'이 있을 때만 분할 적용을 보류하는 것이다. */
+  const compareOwnsLayout = (): boolean =>
+    cmpActiveRef.current && (prefsRef.current.compare?.prior_mode ?? "layout") !== "monitor";
+
+  /** 비교 분할 소유권을 놓는다 — **사용자가 직접 분할을 고른 순간**.
+   *  이걸 두지 않으면 한 번 비교한 뒤로는 모달리티 Layout 이 영영 안 걸린다(규정 위반).
+   *  M/S 라벨(cmpActive)은 살려 두고 '분할을 누가 쥐는가'만 사용자에게 돌려준다. */
+  const releaseCompareLayout = () => { cmpActiveRef.current = false; };
+
   const applyHangFor = (modality: string, hpActive?: boolean,
                         fallback: "keep" | "1x1" = "keep"): number => {
+    // ★ 비교 화면이 떠 있으면 분할은 Compare 것이다 — 여기서 덮으면 1:2 가 풀려
+    //   "CT/MR 은 Series Layout 때문에 비교가 안 된다"가 된다(실제 증상). Image layout 도
+    //   함께 보류한다(페인 안 타일 분할이 비교 화면을 다시 잘게 쪼개는 것을 막는다).
+    if (compareOwnsLayout()) return LAYOUTS[layout].count;
     // ⚠ 행잉 프로토콜이 걸려 있으면 분할은 **HP 가 정한다** — 여기서 덮으면 규정 위반이다.
     //   (우선순위: HP > 뷰어 공통 > 뷰어별. HP 기본은 해제.)
     //   hpActive 를 인자로도 받는 이유: 검사 전환에서 재매칭 직후에는 setHpName 이 아직
@@ -1788,8 +1811,13 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!s) return;
     addOpenTab(examId, tree.uid);
     // ④ 변화강조 비교 동선: 1x1이면 자동 1x2 전환, 현재=좌(p0)·과거=우(p1), Link 동기 on
-    if (LAYOUTS[layout].count === 1) {
+    if (LAYOUTS[layout].count === 1 || (prefsRef.current.compare?.prior_mode ?? "layout") !== "monitor") {
+      // '한 화면 1:2 분할' 설정이면 지금 격자가 무엇이든 1×2 로 세운다(사용자 확정).
+      setCmpActive(true);
+      cmpActiveRef.current = true;
       setLayout("1x2");
+      setImgLay({ r: 1, c: 1 });
+      cmpTreesRef.current.p1 = tree.series;
       patch("p1", { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
       setActivePane("p1");
     } else {
@@ -1982,17 +2010,34 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     setStatus(tr("Combine 해제 — 원래 시리즈로 복원"));
   };
   // 툴바 Combine — 토글: 활성 페인이 결합 상태면 해제(원복), 아니면 검사 전체 결합
-  const combineSeries = () => { if (isCombined(panes[activePane])) uncombine(activePane); else combineAllInto(activePane); };
-  const combineAllInto = (pid: string) => {
-    const src = series.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
-    if (!src.length) { setStatus(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return; }
-    if (src.length === 1) { setStatus(tr("Combine 취소 — 시리즈가 1개뿐입니다(결합할 대상 없음)")); return; }
+  /** Combine 버튼 — 비교 화면(1:2)에서는 **보이는 두 영역 모두**에 적용한다(2026-08-19 사용자 확정).
+   *  각 페인은 자기 검사(M=현재, S=과거)의 시리즈를 결합하므로, 결합 후 마우스 스크롤·시네로
+   *  좌우를 같은 방식으로 훑을 수 있다. 예전에는 활성 페인 하나만 결합돼 한쪽만 연속 스크롤이 됐다. */
+  const combineSeries = () => {
+    const vis = PANE_IDS.slice(0, LAYOUTS[layout].count).filter((id) => panes[id]?.series);
+    const targets = cmpActive && vis.length > 1 ? vis : [activePane];
+    if (targets.some((id) => isCombined(panes[id]))) { targets.forEach(uncombine); return; }
+    let done = 0;
+    for (const id of targets) if (combineAllInto(id, true)) done++;
+    if (done > 1) setStatus(`Combine all — ${tr("비교 화면의")} ${done}${tr("개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)")}`);
+  };
+  const combineAllInto = (pid: string, quiet = false): boolean => {
+    // 이 페인이 물고 있는 **그 검사**의 시리즈로 결합한다. 비교로 띄운 페인은 다른 검사라
+    // 현재 검사(series)를 쓰면 엉뚱한 영상이 들어간다 — 띄울 때 받아 둔 트리를 쓴다.
+    const paneUid = panes[pid]?.studyUid || detail.study_uid;
+    const pool = paneUid === detail.study_uid ? series : (cmpTreesRef.current[pid] ?? []);
+    const src = pool.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
+    if (!src.length) { if (!quiet) setStatus(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return false; }
+    if (src.length === 1) { if (!quiet) setStatus(tr("Combine 취소 — 시리즈가 1개뿐입니다(결합할 대상 없음)")); return false; }
     snapCombine(pid);
     const merged = buildCombined(
-      [...src].sort((a, b) => a.series_number - b.series_number).map((s) => ({ s, studyUid: detail.study_uid })));
-    patch(pid, { series: merged, index: 0, studyUid: detail.study_uid });
-    setActivePane(pid);
-    setStatus(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}`);
+      [...src].sort((a, b) => a.series_number - b.series_number).map((s) => ({ s, studyUid: paneUid })));
+    patch(pid, { series: merged, index: 0, studyUid: paneUid });
+    if (!quiet) {
+      setActivePane(pid);
+      setStatus(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}`);
+    }
+    return true;
   };
   // Combine(추가) — 드롭/선택한 한 시리즈를 대상 페인의 현재 시리즈에 이어붙임(이미 결합본이면 계속 누적).
   const combineInto = (pid: string, seriesUid: string) => {
@@ -3170,16 +3215,22 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   // 한 뷰어 안에서 분할 비교(단일 모니터 폴백) — 선택 과거검사를 페인 p1.. 에 로드 + SyncOther
   const compareInPlace = async (ids: number[]) => {
     setCmpActive(true);
+    cmpActiveRef.current = true;                    // 아래 patch 들이 지나기 전에 분할 소유권을 세운다
     const n = ids.length + 1;                       // 주 검사(p0) + 선택 검사들
+    // '한 화면 1:2 분할' 설정이면 **한 건 비교는 언제나 1×2**다(2026-08-19 사용자 확정).
+    // 모달리티·Series Layout 과 무관 — 좌=현재, 우=과거.
     const c = n <= 2 ? 2 : n <= 4 ? 2 : 3;
-    const key = `${Math.ceil(n / c)}x${c}`;
+    const key = n === 2 && (prefs.compare?.prior_mode ?? "layout") !== "monitor"
+      ? "1x2" : `${Math.ceil(n / c)}x${c}`;
     if (LAYOUTS[key]) setLayout(key as keyof typeof LAYOUTS);
+    setImgLay({ r: 1, c: 1 });                      // 페인 안 타일 분할은 비교에서 걷어낸다
     for (let i = 0; i < ids.length; i++) {
       try {
         const tree = await getTree(ids[i]);
         const s = tree.series[0];
         if (!s) continue;
         addOpenTab(ids[i], tree.uid);
+        cmpTreesRef.current[PANE_IDS[i + 1]] = tree.series;   // Combine 이 쓸 그 검사 전체 시리즈
         patch(PANE_IDS[i + 1], { ...initPane(tree.uid), series: s, index: Math.floor(s.instances.length / 2) });
       } catch { /* 개별 실패 무시 */ }
     }
@@ -3193,7 +3244,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     if (!ids.length) return;
     // 다중 모니터 배치 — Viewer 모니터 2개+ 감지되면 비교검사를 "다음 모니터"에 개별 창으로(기준 모니터 제외,
     //  끝번→첫 모니터 순환). placeCompareSlaves 는 사전 감지(cmpSlotsRef) 를 동기 사용 → 클릭 활성화 유지(팝업 허용).
-    if (prefs.compare?.multi_monitor !== false
+    // ★ 설정 '과거검사 비교 표시 = Layout 띄우기(한 화면 1:2 분할)' 가 다중 모니터보다 앞선다
+    //   (2026-08-19 사용자 확정). 그 설정을 골라 놓고 비교가 옆 모니터 창으로 뜨면 애초에 1:2 가
+    //   아니다 — 사용자가 화면 분할을 고른 것이므로 이 창 안에서 나눈다.
+    if ((prefs.compare?.prior_mode ?? "layout") === "monitor"
+        && prefs.compare?.multi_monitor !== false
         && placeCompareSlaves(cmpSlotsRef.current, window.name, ids)) {
       setCmpActive(true);
       setCmpRole("M");                              // 이 창은 기준(중앙 상단 녹색 "Compare M")
@@ -4230,7 +4285,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 onClick={() => navPatient(1)} disabled={navTarget(1) === undefined}
                 style={{ flex: 1, padding: "5px 0", fontSize: 13, fontWeight: 700 }}>▶</button>
       </div>
-      <select value={layout} onChange={(e) => setLayout(e.target.value as keyof typeof LAYOUTS)}
+      <select value={layout}
+              onChange={(e) => { releaseCompareLayout(); setLayout(e.target.value as keyof typeof LAYOUTS); }}
               style={{ fontSize: 12, width: paletteHoriz ? 76 : "100%", padding: "4px 2px" }}>
         <option value="1x1">1 X 1</option><option value="1x2">1 X 2</option><option value="2x2">2 X 2</option>
       </select>
@@ -5068,7 +5124,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         {/* 좌상단: Series Layout(뷰포트 분할) · Image Layout(페인 내 이미지 타일) — UBPACS p.14 */}
         <GridPicker label="Srs" max={10}
                     value={{ r: LAYOUTS[layout].rows, c: LAYOUTS[layout].cols }}
-                    onPick={(v) => setLayout(`${v.r}x${v.c}`)} />
+                    onPick={(v) => { releaseCompareLayout(); setLayout(`${v.r}x${v.c}`); }} />
         <GridPicker label="Img" max={10} value={imgLay}
                     onPick={(v) => { setImgLay(v); setPaneIl(activePane, v); }} />
         {/* 오픈 검사 탭 — 좌→우로 쌓임. 클릭=활성 페인에 표시, ✕=닫기(주 검사로 복귀) */}
@@ -5228,6 +5284,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 onSelect={applyHp}
                 onClear={() => {
                   setHpName("기본");
+                  releaseCompareLayout();
                   setImgLay({ r: 1, c: 1 });
                   setLayout("1x1");
                   // ⚠ 표시값(imgLay)만 바꾸면 안 된다 — 렌더는 **페인별 p.il** 을 본다(3305 근처).

@@ -12,7 +12,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  compareValues, firstDir, nextSort, sortMark, sortRows, sortValue,
+  compareValues, firstDir, nextChipSort, nextSort, sortMark, sortRows, sortValue,
 } from "../src/lib/gridSort.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -90,4 +90,48 @@ test("배선 — 그리드 헤더가 클릭 정렬을 태우고, 컬럼 이동 �
   assert.match(w, /sortRows\(/, "표시 목록에 적용");
   assert.match(w, /sortMark\(/, "▲▼ 표식");
   assert.match(w, /dragCol/, "컬럼 이동 DnD 와 같은 헤더 — 드래그 중 클릭 정렬이 끼어들면 안 된다");
+});
+
+/* ── 상단 카운트 칩 클릭 정렬(2026-08-20 사용자 확정) ──
+ * "그림의 각 항목(전체·응급·미판독·판독중·판독저장·승인)을 클릭해서도 Sorting 이 될 수 있도록 해줘." */
+
+test("칩 정렬 — 그 상태를 맨 위로, 다시 누르면 맨 아래로, 한 번 더 누르면 해제", () => {
+  let s = nextChipSort(null, "read_state", "unread");
+  assert.deepEqual(s, { key: "read_state", dir: "asc", pin: "unread" }, "1클릭 = 미판독을 위로");
+  s = nextChipSort(s, "read_state", "unread");
+  assert.deepEqual(s, { key: "read_state", dir: "desc", pin: "unread" }, "2클릭 = 역순(아래로)");
+  assert.equal(nextChipSort(s, "read_state", "unread"), null, "3클릭 = 해제(원래 순서)");
+  // 다른 칩을 누르면 그 칩의 첫 상태부터
+  const t = nextChipSort(s, "status", "finalized");
+  assert.deepEqual(t, { key: "status", dir: "asc", pin: "finalized" });
+});
+
+test("칩 정렬 — pin 은 일치하는 줄만 위로 모으고 그 안 순서는 서버 순서 그대로", () => {
+  const rows = [
+    { id: 1, read_state: "finalized" }, { id: 2, read_state: "unread" },
+    { id: 3, read_state: "reading" },   { id: 4, read_state: "unread" },
+  ];
+  const up = sortRows(rows, { key: "read_state", dir: "asc", pin: "unread" });
+  assert.deepEqual(up.map((r) => r.id), [2, 4, 1, 3],
+                   "미판독 2·4 가 위로, 서로의 순서(의뢰 최신순)는 유지");
+  const down = sortRows(rows, { key: "read_state", dir: "desc", pin: "unread" });
+  assert.deepEqual(down.map((r) => r.id), [1, 3, 2, 4], "역순이면 미판독이 아래로");
+});
+
+test("칩 정렬 — pin 없는 칩(응급)은 값 크기로 순/역만 오간다", () => {
+  const s1 = nextChipSort(null, "priority");
+  assert.deepEqual(s1, { key: "priority", dir: "desc" }, "응급이 먼저");
+  const rows = [{ emergency: false, id: 1 }, { emergency: true, id: 2 }];
+  assert.deepEqual(sortRows(rows, s1).map((r) => r.id), [2, 1]);
+  const s2 = nextChipSort(s1, "priority");
+  assert.deepEqual(s2, { key: "priority", dir: "asc" });
+  assert.equal(nextChipSort(s2, "priority"), null, "세 번째 = 해제");
+});
+
+test("칩 정렬 배선 — 칩이 필터와 정렬을 함께 걸고, 헤더와 같은 정렬 상태를 쓴다", () => {
+  const w = src("src/pages/Worklist.tsx");
+  assert.match(w, /nextChipSort\(/, "칩 클릭이 다음 정렬 상태로");
+  assert.match(w, /onChipSort\?\.\(ch\.sk, ch\.pin\)/, "칩마다 정렬 키·pin 을 넘긴다");
+  assert.match(w, /ch\.onClick\(\);/, "기존 상태 필터도 그대로 걸린다(기능 손실 금지)");
+  assert.match(w, /sort=\{sort\} onChipSort=\{onChipSort\}/, "그리드 헤더와 같은 sort 상태를 공유");
 });

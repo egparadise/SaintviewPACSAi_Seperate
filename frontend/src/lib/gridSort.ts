@@ -17,7 +17,14 @@
  */
 
 export type SortDir = "asc" | "desc";
-export interface SortState { key: string; dir: SortDir }
+export interface SortState {
+  key: string;
+  dir: SortDir;
+  /** 특정 값을 **맨 위로 모은다**(상단 카운트 칩 클릭용, 2026-08-20 사용자 확정).
+   *  '미판독'을 누르면 미판독이 위로 — 상태는 크기 순서가 없는 값이라 일반 비교로는
+   *  "미판독을 위로"를 표현할 수 없다. 역순(desc)이면 그 값이 맨 아래로 간다. */
+  pin?: string;
+}
 
 /** 큰 값이 먼저 보여야 자연스러운 컬럼 — 첫 클릭이 내림차순이 된다. */
 export const DESC_FIRST_KEYS = new Set([
@@ -55,8 +62,21 @@ export function firstDir(key: string): SortDir {
 
 /** 헤더 클릭 → 다음 정렬 상태. 같은 컬럼이면 방향만 뒤집는다(순 ↔ 역, 무한 반복). */
 export function nextSort(cur: SortState | null, key: string): SortState {
-  if (cur?.key === key) return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
+  if (cur?.key === key && cur.pin == null) return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
   return { key, dir: firstDir(key) };
+}
+
+/** 상단 카운트 칩 클릭 → 다음 정렬 상태(2026-08-20 사용자 확정).
+ *  같은 칩을 다시 누르면 역순(그 상태를 맨 아래로), 한 번 더 누르면 정렬 해제 —
+ *  헤더와 같은 '누를 때마다 바뀐다' 감각을 유지하되, 세 번째에 원래 목록으로 돌아온다.
+ *  pin 이 없는 칩(응급 등)은 값 크기로 정렬되므로 순/역만 오간다. */
+export function nextChipSort(cur: SortState | null, key: string, pin?: string): SortState | null {
+  const same = cur?.key === key && (cur?.pin ?? null) === (pin ?? null);
+  if (!same) return { key, dir: pin ? "asc" : firstDir(key), ...(pin ? { pin } : {}) };
+  if (cur!.dir === (pin ? "asc" : firstDir(key))) {
+    return { key, dir: cur!.dir === "asc" ? "desc" : "asc", ...(pin ? { pin } : {}) };
+  }
+  return null;   // 세 번째 클릭 = 해제
 }
 
 const collator = typeof Intl !== "undefined"
@@ -79,6 +99,12 @@ export function compareValues(a: string | number, b: string | number): number {
 export function sortRows<T>(rows: T[], sort: SortState | null): T[] {
   if (!sort?.key) return rows;
   const sign = sort.dir === "asc" ? 1 : -1;
+  if (sort.pin != null) {
+    // pin 정렬 — 일치/불일치 두 덩어리로만 가른다. 덩어리 안 순서는 건드리지 않는다
+    // (서버가 준 기본 순서 = 의뢰 최신순을 그대로 살려야 "미판독 중 최신"이 위에 온다).
+    const hit = (r: T) => String(sortValue(r as Record<string, unknown>, sort.key)) === sort.pin;
+    return [...rows].sort((x, y) => (hit(x) === hit(y) ? 0 : (hit(x) ? -1 : 1) * sign));
+  }
   return [...rows].sort((x, y) => {
     const a = sortValue(x as Record<string, unknown>, sort.key);
     const b = sortValue(y as Record<string, unknown>, sort.key);

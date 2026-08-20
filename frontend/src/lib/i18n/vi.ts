@@ -2919,5 +2919,8 @@ const d: Record<string, string> = {
   "검색식 수정": "Sửa biểu thức",
   "이름(그대로 두면 덮어씁니다)": "Tên (giữ nguyên sẽ ghi đè)",
   "클릭 = 정렬(다시 클릭하면 역순) · 드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 = 폭 조절": "Nhấp = sắp xếp (nhấp lại để đảo) · Kéo = di chuyển cột · Mép phải = chỉnh rộng",
+  "비교 화면의": "Trong màn hình so sánh,",
+  "개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)": " vùng đã được kết hợp riêng (so sánh bằng cuộn hoặc cine)",
+  "상태로 필터 · 클릭할 때마다 이 항목 기준 정렬 ↔ 역순 ↔ 해제": "lọc theo trạng thái · mỗi lần nhấp: sắp xếp theo mục này ↔ đảo ngược ↔ tắt",
 };
 export default d;
