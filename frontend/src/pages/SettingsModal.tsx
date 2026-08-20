@@ -16,6 +16,8 @@ import { MediaPermPanel } from "../components/MediaPermPanel";
 // UI 언어 — 지역 변수 t(트리 map 파라미터)와 충돌하므로 tr 로 들여온다
 import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
 import { COMBINE_RULE_DEFAULT, readCombineRule, type CombineRule } from "../lib/combineRule";
+import { AUTO_AFTER_SAVE_DEFAULT, AUTO_AFTER_SAVE_ITEMS, readAutoAfterSave,
+         type AutoAfterSave } from "../lib/readingAuto";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
 import { setSttEnabled } from "../lib/sttLang";
 import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
@@ -205,14 +207,21 @@ function Hanging2dEditor({ map, onChange }: {
   );
 }
 
-export function SettingsModal({ role, onClose, scope = "viewer" }: {
+export function SettingsModal({ role, onClose, scope = "viewer", initialPage, initialRdTab }: {
   role: string; onClose: () => void; scope?: SettingsScope;
+  /** 특정 항목을 **바로** 열고 싶을 때(2026-08-20 사용자 확정 — 판독창 톱니 → 판독>단축키 설정).
+   *  값이 없으면 종전대로 첫 탭에서 시작한다. */
+  initialPage?: string;
+  initialRdTab?: "basic" | "shortcut" | "template";
 }) {
   const isAdmin = role === "admin";
   const uiLang = useLang();   // 언어 변경 시 이 컴포넌트 전체가 다시 그려진다 (tr 반영)
   // 현재 스코프에서 보이는 탭만 (단계별 분리)
   const visibleTabs = TREE.filter((t) => t.scope === scope && (!t.admin || isAdmin));
-  const [page, setPage] = useState<string>(visibleTabs[0]?.key ?? "");
+  const [page, setPage] = useState<string>(
+    // 지정된 항목이 이 스코프에서 보이는 것일 때만 받아들인다(안 보이는 페이지로 열면 빈 화면이 된다)
+    () => (initialPage && visibleTabs.some((t) => t.key === initialPage))
+      ? initialPage : (visibleTabs[0]?.key ?? ""));
   // 설정 창 크기 — 기본(860×580) ↔ 전체 화면 토글, 우하단 드래그로 자유 조절(resize:both)
   const [maxed, setMaxed] = useState(false);
   // 설정 창 드래그 이동(2026-08-10 사용자 확정) — 제목줄을 좌클릭한 채 끌면 이동.
@@ -350,7 +359,9 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [rptAiPanel, setRptAiPanel] = useState(true);
   const [rptAutoApply, setRptAutoApply] = useState(true);
   // 판독(Reading) 페이지 — 기본/단축키/템플릿 3탭 + 레포트 옵션(report.prefs)
-  const [rdTab, setRdTab] = useState<"basic" | "shortcut" | "template">("basic");
+  const [rdTab, setRdTab] = useState<"basic" | "shortcut" | "template">(initialRdTab ?? "basic");
+  // 판독 자동화 규칙(2026-08-20 사용자 확정) — Save 뒤 동작. 규칙은 lib/readingAuto 한 곳.
+  const [autoSave, setAutoSave] = useState<AutoAfterSave>(AUTO_AFTER_SAVE_DEFAULT);
   // 저장이 끝났는가 — 하단 버튼 라벨(Cancel ↔ 닫기)이 이 값을 따른다.
   const [dirtySaved, setDirtySaved] = useState(false);
   const [saving, setSaving] = useState(false);      // 저장 중 이중 클릭 방지
@@ -644,6 +655,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       if (v.ai_panel !== undefined) setRptAiPanel(v.ai_panel);
       if (v.auto_apply !== undefined) setRptAutoApply(v.auto_apply);
       setCmpBasis(readCompareCfg(v.compare));
+      setAutoSave(readAutoAfterSave((v as { auto_after_save?: unknown }).auto_after_save));
       setRdOpts((prev) => ({ ...prev, ...v }));
       {   // STT 언어 집합 로밍 수신 — 칩·훅이 쓰는 미러(sv_stt_langs)를 맞춘다
         const sl = (v as { stt_langs?: unknown }).stt_langs;
@@ -811,7 +823,8 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
       drop_menu: dropMenu,
     }, "user");
     await api.putSetting("report.prefs",
-      { ...rdOpts, ai_panel: rptAiPanel, auto_apply: rptAutoApply, compare: cmpBasis }, "user");
+      { ...rdOpts, ai_panel: rptAiPanel, auto_apply: rptAutoApply, compare: cmpBasis,
+        auto_after_save: autoSave }, "user");
     if (isAdmin) {
       // 서버 네트워크(공유 루트 등)도 OK(저장)로 함께 저장 — '서버 설정 저장' 버튼을 몰라도 반영
       if (snDir.trim() || snWeb.ip || snWeb.port || snWeb.name || snWeb.ae_title) {
@@ -1988,10 +2001,27 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                         <br />{tr("이 값은")} <b>{tr("뷰어가 시작할 때의 기본값")}</b>{tr("입니다. 뷰어 Compare 창에서 그 자리에서 바꿀 수 있고, 그 변경은 저장되지 않습니다.")}
                       </div>
                     </Group>
+                    {/* 자동화 규칙(2026-08-20 사용자 확정) — Save 버튼을 누른 **뒤**의 동작.
+                        셋 중 하나만 고른다(라디오) — 체크박스 둘이면 '다음도 이전도'라는 모순된
+                        상태가 만들어진다. 아래 '레포트 옵션'의 open_next_after_save 는
+                        **확정(Approve)** 뒤 동작이라 서로 다른 버튼이다. */}
+                    <Group title={tr("자동화 규칙")}>
+                      {AUTO_AFTER_SAVE_ITEMS.map((it) => (
+                        <label key={it.value} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5 }}>
+                          <input type="radio" name="sv-auto-after-save"
+                                 checked={autoSave === it.value}
+                                 onChange={() => setAutoSave(it.value)} />
+                          {tr(it.label)}
+                        </label>
+                      ))}
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                        {tr("저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.")}
+                      </div>
+                    </Group>
                     <Group title={tr("레포트 옵션")}>
                       {([
                         ["always_report_window", "판독 창 항상 별도로 열기 — 워크리스트 옆 웹창(검사 선택 연동)"],
-                        ["open_next_after_save", "저장(확정) 후 다음 레포트 열기"],
+                        ["open_next_after_save", "확정(Approve) 후 다음 레포트 열기"],
                         ["save_alert", "레포트 저장 알림 사용"],
                         ["auto_insert_prior", "이전 검사 비교 정보 자동 삽입"],
                         ["cvr_notice", "CVR Notice — critical 소견 경고 기본 표시"],

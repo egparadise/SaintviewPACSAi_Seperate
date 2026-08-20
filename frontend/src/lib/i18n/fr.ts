@@ -2934,5 +2934,12 @@ const d: Record<string, string> = {
   "MRI Scout Image 제외": "Exclure les images scout IRM",
   "Scout 제외": "scout exclu",
   "Combine(전체 시리즈 결합) 시 정위(Scout·Localizer·Topogram) 시리즈를 건너뛰고 그다음 시리즈부터 잇습니다. 시리즈 이름으로 못 가릴 때는 맨 앞의 아주 짧은 시리즈(3장 이하)를 정위로 봅니다 — 뺀 시리즈는 결합 직후 상태 표시줄에 알립니다. 규칙 때문에 결합할 시리즈가 부족해지면 적용하지 않습니다.": "Lors de la combinaison de toutes les séries, les séries scout/localizer/topogram sont ignorées et la pile commence à la suivante. Si le nom de série ne renseigne pas, une première série très courte (3 images ou moins) est considérée comme scout — ce qui a été retiré est indiqué dans la barre d'état juste après la combinaison. La règle ne s'applique pas si elle laissait trop peu de séries.",
+  "자동화 규칙": "Règles d'automatisation",
+  "Save 버튼을 누르면 바로 다음 Study 열기": "Ouvrir l'examen suivant juste après avoir cliqué sur Save",
+  "Save 버튼을 누르면 바로 이전 Study 열기": "Ouvrir l'examen précédent juste après avoir cliqué sur Save",
+  "Save : 이후 동작 없음": "Save : ne rien faire ensuite",
+  "저장에 성공했을 때만 넘어갑니다. 목록의 끝이면 그대로 머무릅니다. 판독창 ◀▶ 와 같은 순서로 이동합니다.": "Ne passe à l'examen suivant que si l'enregistrement réussit. Reste en place en fin de liste. Suit le même ordre que les boutons ◀▶ de la fenêtre de compte rendu.",
+  "설정 — 판독 단축키": "Paramètres — raccourcis de compte rendu",
+  "확정(Approve) 후 다음 레포트 열기": "Ouvrir le compte rendu suivant après Approve",
 };
 export default d;

@@ -1,6 +1,6 @@
 // 전용 판독 창 — 뷰어 [Reading] 버튼으로 열리는 별도 페이지 (?report=1&study=ID)
 // 레이아웃: [판독|판독 기록|단축키|템플릿] 탭 · Font · CVR · ◀▶ · 초기화/저장/승인 · Reading/Conclusion
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ensureToken, type PhraseRow, type RelatedExam, type Report, type StudyDetail, type StudyRow } from "../api";
 import { StudyGrid, VIEWER_COL_DEFAULT, sbOpParam, sbScopeParam } from "./Worklist";
 import { onStudySync, onViewerCloseAll, postStudySync } from "../lib/sync";
@@ -13,6 +13,10 @@ import { SttLangChip } from "../components/SttLangChip";
 import { setSttEnabled } from "../lib/sttLang";
 import { buildVocab, currentPrefix, mergeVocab, suggestWords } from "../lib/wordComplete";
 import { t as tr, useLang } from "../lib/i18n";
+import { navAfterSave, readAutoAfterSave } from "../lib/readingAuto";
+
+// 설정 모달은 무겁다 — 톱니를 누를 때만 불러온다(판독창 첫 로딩을 늦추지 않는다).
+const SettingsModalLazy = lazy(() => import("./SettingsModal").then((m) => ({ default: m.SettingsModal })));
 
 type Tab = "read" | "hist" | "std" | "tpl";
 
@@ -119,6 +123,9 @@ export function ReportWindow() {
     return () => { alive = false; window.clearInterval(t); };
   }, []);
   const [rdOpts, setRdOpts] = useState<Record<string, unknown>>({});
+  // 판독창에서 바로 여는 설정(2026-08-20 사용자 확정) — 톱니 → 판독>단축키 설정.
+  // 무거운 모듈이라 필요할 때만 불러온다(판독창 첫 로딩을 늦추지 않는다).
+  const [setOpen, setSetOpen] = useState(false);
   // Worklist 뷰어 도크(2026-08-10 사용자 확정) — 판독창 하단에 워크리스트를 붙여
   // '다음 판독 대상'을 보면서 판독한다. 체크·높이 모두 report.prefs 계정 로밍
   // (Setting>판독>판독창 설정과 양방향 — 같은 키 worklist_viewer 를 읽고 쓴다).
@@ -488,6 +495,11 @@ export function ReportWindow() {
           return api.putSetting("report.corpus", { words }, "user");
         }).catch(() => {});
       }
+      // 자동화 규칙(Setting>판독>기본 설정) — 저장에 **성공했을 때만** 다음/이전 검사로 넘어간다.
+      // 여기 도달했다는 것이 곧 성공이다(실패는 아래 catch 로 빠진다). 목록의 끝이면 nav 가
+      // 조용히 아무 일도 하지 않는다.
+      const dir = navAfterSave(readAutoAfterSave(rdOpts.auto_after_save), true);
+      if (dir) void nav(dir);
     } catch (e) {
       alert(e instanceof Error ? e.message : tr("저장 실패"));
       void syncLock();   // 다른 창에서 잠금 변경(409) 등 — 서버 기준 잠금 상태 재동기화
@@ -719,7 +731,26 @@ export function ReportWindow() {
         <input type="range" min={10} max={24} value={fontPx} onChange={(e) => setFontPx(Number(e.target.value))} />
         <b>{fontPx}px</b>
         <button style={{ padding: "0 8px" }} onClick={() => setFontPx((f) => Math.min(24, f + 1))}>＋</button>
+        {/* 설정(2026-08-20 사용자 확정) — 누르면 **판독 > 단축키 설정**이 곧바로 열린다.
+            판독 중 단축키를 손보려고 워크리스트로 돌아갈 필요가 없게. */}
+        <button onClick={() => setSetOpen(true)} title={tr("설정 — 판독 단축키")}
+                style={{ padding: "1px 7px", fontSize: 14, lineHeight: 1.2, background: "transparent",
+                         border: "1px solid var(--border)", borderRadius: 6, cursor: "pointer" }}>⚙</button>
       </div>
+      {setOpen && (
+        <Suspense fallback={null}>
+          <SettingsModalLazy
+            role={localStorage.getItem("sv_role") ?? sessionStorage.getItem("sv_role") ?? "radiologist"}
+            scope="viewer" initialPage="reading" initialRdTab="shortcut"
+                             onClose={() => {
+                               setSetOpen(false);
+                               // 설정에서 바꾼 값(단축키·자동화 규칙)을 이 창에도 곧바로 반영
+                               void api.getSetting("report.prefs")
+                                 .then((r) => setRdOpts((p) => ({ ...p, ...(r.value as Record<string, unknown>) })))
+                                 .catch(() => {});
+                             }} />
+        </Suspense>
+      )}
       {dictation.err && (
         <div style={{ padding: "3px 14px", fontSize: 11.5, color: "var(--stat-emergency)", background: "var(--bg-panel)" }}>
           ⚠ {dictation.err}
