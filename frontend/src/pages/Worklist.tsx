@@ -75,6 +75,11 @@ import { MergeIcon, ReadStateIcon } from "../components/readState";
 import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { openReportWindow, screenFeatures, screenFeaturesList } from "../lib/screens";
+import {
+  applyFavFilter, looksLikeFavQuery, parseFavQuery, readFavs, removeFav, upsertFav,
+  type SearchFav,
+} from "../lib/searchFav";
+import { nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
 import { showToast } from "../lib/toast";
 import { installApp } from "../lib/pwa";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
@@ -254,6 +259,16 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
     label: "검사시각",
     render: (r) => (r.study_time ? `${r.study_time.slice(0, 2)}:${r.study_time.slice(2, 4)}` : ""),
   },
+  // 검사일시(2026-08-19 사용자 확정) — 검사일·검사시각을 한 칸에 'yyyymmdd hh:mm' 으로.
+  // ⚠ 기존 study_date/study_time 정의는 **지우지 않는다**: 이미 그 두 컬럼으로 구성을 저장해 둔
+  //   계정에서 컬럼이 통째로 사라지기 때문이다(기본 구성만 병합본을 쓴다).
+  study_datetime: {
+    label: "검사일시",
+    render: (r) => (r.study_date
+      ? `${r.study_date}${r.study_time ? ` ${r.study_time.slice(0, 2)}:${r.study_time.slice(2, 4)}` : ""}`
+      : ""),
+    width: 150,
+  },
   institution: { label: "기관 (Institution)", render: (r) => r.institution },
   // 원격판독 운영 4항목(2026-08-10) — Live 는 A 원천(study_insert_datetime·hospital/center·배정의)
   request_datetime: { label: "의뢰 일시", render: (r) => fmtReqDt(r.request_datetime) },
@@ -290,7 +305,7 @@ export const COLUMN_DEFS: Record<string, { label: string; render: (r: StudyRow) 
  * 넘치는 폭은 그리드 가로 스크롤이 받는다(3166356). */
 export const DEFAULT_COLUMNS = [
   "read_state", "status", "request_datetime", "center_name", "patient_name", "patient_key",
-  "modality", "study_date", "study_time", "assigned_doctor", "body_part", "hospital_name",
+  "modality", "study_datetime", "assigned_doctor", "body_part", "hospital_name",
   "instance_count", "study_desc", "priority", "exam_comment", "hospital_comment",
   "memo", "accession_no", "age", "sex",
   "birth_date", "finalized_at", "impression",
@@ -325,10 +340,35 @@ export const SVINFI_PANELS = ["preview", "related", "report"] as const;
 export const SVINFI_PANEL_LABEL: Record<string, string> = {
   preview: "미리보기 (Preview)", related: "과거검사 (Related)", report: "리포트 (Report)",
 };
-const DEFAULT_SVINFI_PANELS: Record<string, boolean> = { preview: true, related: true, report: true };
+const DEFAULT_SVINFI_PANELS: Record<string, boolean> = {
+  preview: true, related: true, report: true, ...defaultSearchUi(),
+};
+
+/** 검색 UI 구성요소 표시 토글(2026-08-19 사용자 확정) — 뷰어별(SaintView·T-View·I-View)로
+ *  Setting>워크리스트>{뷰어}에서 켜고 끈다. 저장은 기존 패널 토글과 **같은 그릇**
+ *  (ty=panels / sv·infi=panels_by_viewer[vk])을 쓴다 — 저장 경로를 새로 만들지 않는다. */
+export const SEARCH_UI_KEYS = [
+  "favsearch", "rail_filter", "rail_favs", "rail_folder",
+  "tb_shortcut", "tb_savefav", "tb_search",
+] as const;
+export const SEARCH_UI_LABEL: Record<string, string> = {
+  favsearch: "Search Favorite (검색 즐겨찾기)",
+  rail_filter: "Search Filter (모달리티 트리)",
+  rail_favs: "Favorites (★저장 목록)",
+  rail_folder: "검색 폴더",
+  tb_shortcut: "툴바 — 바로가기 목록",
+  tb_savefav: "툴바 — ★저장",
+  tb_search: "툴바 — 검색창·SEARCH",
+};
+function defaultSearchUi(): Record<string, boolean> {
+  return Object.fromEntries(SEARCH_UI_KEYS.map((k) => [k, true]));
+}
+/** 표시 여부 — 저장된 값이 없으면 표시(기본 on). 정확히 false 일 때만 숨긴다. */
+export const uiShown = (panels: Record<string, boolean>, k: string): boolean => panels[k] !== false;
 // T-View(현행) 하단 패널 기본 표시 상태 (UBPACS p.8 7구성)
 const DEFAULT_TY_PANELS: Record<string, boolean> = {
   orders: true, prior: true, compare: true, thumb: true, std: true, comment: true, report: true,
+  ...defaultSearchUi(),
 };
 
 // 숨긴 구역 자리의 얇은 재열기 바 — 클릭하면 마지막 크기로 다시 표시(화면에서 복구, Setting 체크박스와 동기)
@@ -374,7 +414,7 @@ function usePermMe(): PermMe | null {
 /* ── [A] 액션 툴바 ─────────────────────────────── */
 function ActionToolbar({
   selected, onAction, searchText, setSearchText, onSearch, onNlSearch, dirty, searchMode, setSearchMode,
-  withOpen, setWithOpen, withOpenMode, setWithOpenMode, ohifOn = false, allowed,
+  withOpen, setWithOpen, withOpenMode, setWithOpenMode, ohifOn = false, allowed, ui = {}, onSaveFav,
 }: {
   selected: StudyDetail | null;
   onAction: (a: string) => void;
@@ -382,8 +422,12 @@ function ActionToolbar({
   setSearchText: (s: string) => void;
   onSearch: () => void;
   onNlSearch: (text: string) => void;
-  searchMode: "text" | "ai";                    // 통합 검색창 방식(설정>워크리스트>검색창 설정이 기본값)
-  setSearchMode: (m: "text" | "ai") => void;
+  searchMode: SearchMode;                       // 통합 검색창 방식(설정>워크리스트>검색창 설정이 기본값)
+  setSearchMode: (m: SearchMode) => void;
+  /** 구성요소 표시 토글(뷰어별) — 바로가기·★저장·검색창 */
+  ui?: Record<string, boolean>;
+  /** 💾 — 현재 입력식을 Search Favorite 로 저장 */
+  onSaveFav?: () => void;
   // 입력한 검색조건이 아직 조회에 반영되지 않았음(=커밋 전). SEARCH 를 눌러야 목록이 바뀐다는
   // 계약을 지키되, 사용자가 '왜 안 바뀌지?' 로 헤매지 않도록 버튼에 표시만 해 준다.
   dirty?: boolean;
@@ -395,6 +439,7 @@ function ActionToolbar({
   allowed?: (a: string) => boolean;   // 유효 권한 게이트(레인 W) — 서버 403 이 최종 방어선
 }) {
   const need = !selected;
+  const shown = (k: string) => ui[k] !== false;   // 저장값 없으면 표시(기본 on)
   const Btn = ({ a, label, primary, title }: { a: string; label: string; primary?: boolean; title?: string }) => {
     const ok = allowed ? allowed(a) : true;   // 권한 없음 → 비활성 + 안내 툴팁 (UX 목적)
     return (
@@ -434,7 +479,8 @@ function ActionToolbar({
       </select>
       {/* Reading/Import/Export/Print/PDF/Emergency/AI/일괄검토/새로고침은 상단 탭 바(Local Server 왼쪽)로 이동(요청) */}
       <div style={{ flex: 1 }} />
-      {/* 07 A.2 SearchShortcut: 검색 바로가기 저장/적용 */}
+      {/* 07 A.2 SearchShortcut: 검색 바로가기 저장/적용 — 표시 여부는 뷰어별 설정 */}
+      {shown("tb_shortcut") && (
       <select title={tr("검색 바로가기")} defaultValue="" onChange={(e) => {
         const sc = JSON.parse(localStorage.getItem("sv_shortcuts") ?? "[]")
           .find((s: { label: string }) => s.label === e.target.value);
@@ -446,9 +492,12 @@ function ActionToolbar({
           <option key={s.label} value={s.label}>{s.label}</option>
         ))}
       </select>
+      )}
+      {shown("tb_savefav") && (
       <button title={tr("현재 검색조건을 바로가기로 저장")} onClick={() => {
         window.dispatchEvent(new CustomEvent("sv-save-shortcut"));
       }}>{tr("★저장")}</button>
+      )}
       {/* S1 자연어 검색 (nl_to_query) — AI 기능이므로 보라 포인트 */}
       {/* ⚠ name/autoComplete 를 반드시 준다 — 이름 없는 텍스트 필드는 크롬이 문서 전체를
           'unowned 합성 로그인 폼' 으로 묶을 때 username 후보로 잡아 저장된 자격증명(예: 병원ID)을
@@ -456,15 +505,24 @@ function ActionToolbar({
       {/* ★ 통합 검색창(2026-08-10 사용자 확정) — AI 검색과 SEARCH 를 한 입력으로 합쳤다.
           방식(SEARCH/AI)은 셀렉트로 전환, 기본값·검색 범위·다중어 결합은
           설정>워크리스트>검색창 설정(계정별 저장)이 정한다. */}
-      <select value={searchMode} onChange={(e) => setSearchMode(e.target.value === "ai" ? "ai" : "text")}
-              title={tr("검색 방식 — SEARCH: 선택한 범위에서 문법 검색(=정확/접두%/!제외/공백=다중어) · AI: 자연어를 필터로 변환")}
+      {shown("tb_search") && (
+      <>
+      <select value={searchMode} onChange={(e) => setSearchMode(e.target.value as SearchMode)}
+              title={tr("검색 방식 — FAV: '#' 로 조건 나열(상태·장비·모든 항목) · SEARCH: 선택한 범위에서 문법 검색(=정확/접두%/!제외/공백=다중어) · AI: 자연어를 필터로 변환")}
               style={searchMode === "ai" ? { borderColor: "var(--ai)", color: "var(--ai)", fontWeight: 700 } : { fontWeight: 700 }}>
+        <option value="fav">FAV</option>
         <option value="text">SEARCH</option>
         <option value="ai">AI</option>
       </select>
+      {/* 💾 — 지금 입력한 식을 이름 붙여 Search Favorite(좌측 레일)에 저장. 같은 이름이면 수정된다. */}
+      <button title={tr("현재 검색식을 Search Favorite 로 저장 (예: 센터#MR#병원명#미판독)")}
+              onClick={() => onSaveFav?.()}
+              style={{ padding: "2px 8px", fontSize: 13 }}>💾</button>
       <input
         placeholder={searchMode === "ai"
           ? tr("AI 검색 — 예: 지난주 흉부 CT 미판독")
+          : searchMode === "fav"
+          ? tr("Search Favorite — 조건을 # 로 나열 (예: 센터#MR#병원명#미판독 · 항목=값 도 가능)")
           : tr("SEARCH — 선택한 범위에서 검색 (=정확 / 접두% / !제외 · 공백=다중어)")}
         value={searchText}
         name="wl-q" autoComplete="off" autoCorrect="off" spellCheck={false}
@@ -474,7 +532,7 @@ function ActionToolbar({
           if (searchMode === "ai") { if (searchText.trim()) onNlSearch(searchText); }
           else onSearch();
         }}
-        style={{ width: 420, background: "var(--bg-canvas)",
+        style={{ flex: "1 1 560px", minWidth: 300, maxWidth: 760, background: "var(--bg-canvas)",
                  ...(searchMode === "ai" ? { borderColor: "var(--ai)" } : {}) }}
       />
       <button className="primary"
@@ -486,6 +544,8 @@ function ActionToolbar({
               style={dirty && searchMode !== "ai" ? { boxShadow: "0 0 0 2px var(--stat-emergency,#f87171)" } : undefined}>
         {searchMode === "ai" ? "AI" : "SEARCH"}{dirty && searchMode !== "ai" ? " •" : ""}
       </button>
+      </>
+      )}
     </div>
   );
 }
@@ -545,7 +605,21 @@ export const SEARCH_SCOPE_FIELDS: Record<string, string> = {
   pid: "환자 ID", pname: "환자 이름", accession: "Accession 번호", desc: "검사명",
   institution: "기관(센터명)", body_part: "부위", ref_phys: "의뢰의", memo: "메모",
 };
-export const DEFAULT_SEARCH_BOX = { mode: "text" as "text" | "ai", fields: ["pid", "pname"], op: "and" as "and" | "or" };
+// Search Favorite 가 기본 방식(2026-08-19 사용자 확정) — '#' 로 조건을 나열한다.
+export const DEFAULT_SEARCH_BOX = { mode: "fav" as SearchMode, fields: ["pid", "pname"], op: "and" as "and" | "or" };
+export type SearchMode = "fav" | "text" | "ai";
+/** 컬럼 한글 라벨 → 키 — Search Favorite 명시형(`병원명 (의뢰병원)=대자인`) 인식에 쓴다. */
+export function columnLabelToKey(): Record<string, string> {
+  const m: Record<string, string> = {};
+  for (const [k, d] of Object.entries(COLUMN_DEFS)) {
+    m[k] = k;
+    m[d.label] = k;
+    m[d.label.toLowerCase()] = k;
+    const short = d.label.split("(")[0].trim();      // "병원명 (의뢰병원)" → "병원명"
+    if (short) { m[short] = k; m[short.toLowerCase()] = k; }
+  }
+  return m;
+}
 
 function FilterBar({ filters, setFilters, fields, onSearch, dirty }: {
   filters: Record<string, string>;
@@ -657,12 +731,19 @@ const DATE_PRESETS = [
   { key: "1m", label: "최근 1개월", days: 30 },
   { key: "all", label: "전체", days: -1 },
 ];
-function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifiedScroll }: {
+function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifiedScroll,
+                     ui = {}, sfavs = [], onFav }: {
   active: string; onPick: (key: string, from: string) => void; tree: React.ReactNode; width: number;
   mods: Record<string, number>; activeMod: string; onMod: (m: string) => void;
   // true 면 섹션별 개별 스크롤(30vh/22vh) 대신 레일 전체가 한 번에 스크롤(In/SAINT VIEW 좌열).
   unifiedScroll?: boolean;
+  /** 구성요소 표시 토글(뷰어별 — Setting>워크리스트>{뷰어}) */
+  ui?: Record<string, boolean>;
+  /** Search Favorite 저장 목록(계정 로밍) */
+  sfavs?: SearchFav[];
+  onFav?: (act: { type: "apply" | "edit" | "del" }, item: SearchFav) => void;
 }) {
+  const shown = (k: string) => ui[k] !== false;   // 저장값 없으면 표시(기본 on)
   const total = Object.values(mods).reduce((a, b) => a + b, 0);
   const [favTick, setFavTick] = useState(0);   // Favorites 편집(이름변경/삭제) 후 재렌더
   const favs = (JSON.parse(localStorage.getItem("sv_shortcuts") ?? "[]") as
@@ -771,7 +852,46 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
           )}
         </div>
       ))}
+      {/* ★ Search Favorite(2026-08-19 사용자 확정) — '센터#MR#병원명#미판독' 처럼 조건을 나열한
+          식을 이름 붙여 저장해 두고 한 번에 적용한다. 저장은 툴바 검색창 앞 💾 버튼.
+          Favorites(★저장)는 '그때의 필터 스냅샷', 이쪽은 **읽을 수 있는 식**이라 성격이 다르다. */}
+      {shown("favsearch") && (
+      <>
+      <div style={{
+        fontSize: 10.5, color: "var(--text-secondary)", fontWeight: 700,
+        padding: "6px 4px 2px", borderTop: "1px solid var(--border)", marginTop: 4,
+        display: "flex", alignItems: "center",
+      }}>
+        Search Favorite
+        <span style={{ marginLeft: "auto", fontSize: 9.5, fontWeight: 400 }}>#{tr("조건 나열")}</span>
+      </div>
+      <div style={unifiedScroll ? { flexShrink: 0 } : { maxHeight: "22vh", overflowY: "auto", flexShrink: 0 }}>
+        {sfavs.length === 0 && (
+          <div style={{ padding: "2px 8px", fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            {tr("검색창 앞 💾 로 저장 — 예) 센터#MR#병원명#미판독")}
+          </div>
+        )}
+        {sfavs.map((f) => (
+          <div key={f.name} className="sv-fav-row"
+               onClick={() => onFav?.({ type: "apply" }, f)}
+               title={`${f.query}\n${tr("클릭=적용 · ✏️=수정 · 🗑️=삭제")}`}
+               style={{ padding: "3px 8px", borderRadius: 3, cursor: "pointer", fontSize: 12.5,
+                        color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              🔎 {f.name}
+            </span>
+            <span title={tr("수정")} style={{ flexShrink: 0 }}
+                  onClick={(e) => { e.stopPropagation(); onFav?.({ type: "edit" }, f); }}>✏️</span>
+            <span title={tr("삭제")} style={{ flexShrink: 0 }}
+                  onClick={(e) => { e.stopPropagation(); onFav?.({ type: "del" }, f); }}>🗑️</span>
+          </div>
+        ))}
+      </div>
+      </>
+      )}
       {/* INFINITT User Guide p.5 ⑦ Search Filter — 모달리티 트리 */}
+      {shown("rail_filter") && (
+      <>
       <div style={{
         fontSize: 10.5, color: "var(--text-secondary)", fontWeight: 700,
         padding: "6px 4px 2px", borderTop: "1px solid var(--border)", marginTop: 4,
@@ -838,7 +958,11 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
           </div>
         ))}
       </div>
+      </>
+      )}
       {/* INFINITT Guide ⑦ Favorites — 저장된 검색 바로가기(★저장) 원클릭 적용 */}
+      {shown("rail_favs") && (
+      <>
       <div style={{
         fontSize: 10.5, color: "var(--text-secondary)", fontWeight: 700,
         padding: "6px 4px 2px", borderTop: "1px solid var(--border)", marginTop: 4,
@@ -892,6 +1016,10 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
           </div>
         ))}
       </div>
+      </>
+      )}
+      {shown("rail_folder") && (
+      <>
       <div style={{
         fontSize: 10.5, color: "var(--text-secondary)", fontWeight: 700,
         padding: "6px 4px 2px", borderTop: "1px solid var(--border)", marginTop: 4,
@@ -901,6 +1029,8 @@ function SearchRail({ active, onPick, tree, width, mods, activeMod, onMod, unifi
       <div style={unifiedScroll
         ? { flexShrink: 0, display: "flex", flexDirection: "column" }
         : { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{tree}</div>
+      </>
+      )}
     </div>
   );
 }
@@ -1232,7 +1362,7 @@ const GRID_COL_DEF_W: Record<string, number> = {
 };
 export function StudyGrid({
   items, columns, selectedId, selectedIds, onSelect, onOpen, onContext, variant, treeDisabled,
-  colWidths, onReorder, onResize,
+  colWidths, onReorder, onResize, sort = null, onSort,
 }: {
   items: StudyRow[];
   columns: string[];
@@ -1249,6 +1379,9 @@ export function StudyGrid({
   colWidths?: Record<string, number>;
   onReorder?: (next: string[]) => void;
   onResize?: (col: string, px: number) => void;
+  /** 헤더 클릭 정렬(2026-08-19) — 상태는 부모(Worklist)가 소유한다(목록 가공과 같은 곳에서). */
+  sort?: SortState | null;
+  onSort?: (key: string) => void;
 }) {
   const infi = variant === "infi";
   // Exam → Series → Image 계층 확장: '＋' 클릭=아래로 전개('−'로 전환), 다시 클릭=접기
@@ -1303,7 +1436,6 @@ export function StudyGrid({
             {columns.map((c) => (
               <th key={c}
                   draggable={!!onReorder}
-                  title={onReorder ? tr("드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 드래그 = 폭 조절") : undefined}
                   onDragStart={(e) => {
                     if (resizingRef.current) { e.preventDefault(); return; }
                     setDragCol(c); e.dataTransfer.effectAllowed = "move";
@@ -1311,13 +1443,17 @@ export function StudyGrid({
                   onDragOver={(e) => { if (dragCol) { e.preventDefault(); setOverCol(c); } }}
                   onDrop={(e) => { e.preventDefault(); dropOn(c); }}
                   onDragEnd={() => { setDragCol(null); setOverCol(null); }}
+                  // 클릭 = 정렬(순 ↔ 역). 폭 조절 중이거나 컬럼을 끌고 있는 중이면 끼어들지 않는다
+                  // — 같은 헤더가 '이동(DnD)·폭 조절·정렬' 셋을 겸하므로 서로를 막아야 한다.
+                  onClick={() => { if (!resizingRef.current && !dragCol) onSort?.(c); }}
+                  title={onSort ? tr("클릭 = 정렬(다시 클릭하면 역순) · 드래그 = 컬럼 위치 이동 · 오른쪽 가장자리 = 폭 조절") : undefined}
                   style={{ position: "relative", overflow: "hidden", textOverflow: "ellipsis",
                            whiteSpace: "nowrap",
-                           cursor: onReorder ? "grab" : undefined,
+                           cursor: onSort ? "pointer" : onReorder ? "grab" : undefined,
                            opacity: dragCol === c ? 0.4 : undefined,
                            boxShadow: overCol === c && dragCol && dragCol !== c
                              ? "inset 3px 0 0 var(--accent)" : undefined }}>
-                {tr(COLUMN_DEFS[c]?.label ?? c)}
+                {tr(COLUMN_DEFS[c]?.label ?? c)}{sortMark(sort, c)}
                 {onResize && (
                   <span onPointerDown={startResize(c)} draggable={false}
                         onClick={(e) => e.stopPropagation()}
@@ -2803,10 +2939,22 @@ export function Worklist() {
   // 폭: worklist.prefs.col_widths_by_viewer[vk] · 순서: by_viewer[vk](설정 ▲▼ 와 같은 키 —
   // 두 UI 가 다른 키에 쓰면 반드시 갈린다). 저장은 병합형(read-modify-write)으로 다른 키 보존.
   const [colW, setColW] = useState<Record<string, number>>({});
+  // 헤더 클릭 정렬(2026-08-19 사용자 확정) — 컬럼마다 순 ↔ 역이 번갈아 바뀐다.
+  // 규칙(첫 방향·비교·빈 값)은 lib/gridSort 한 곳. null = 서버가 준 기본 순서.
+  const [sort, setSort] = useState<SortState | null>(null);
+  const onSortCol = useCallback((key: string) => setSort((cur) => nextSort(cur, key)), []);
   // ── 통합 검색창(2026-08-10) — 방식·범위·결합은 설정>워크리스트>검색창 설정(계정 저장) ──
-  const [searchMode, setSearchModeState] = useState<"text" | "ai">(DEFAULT_SEARCH_BOX.mode);
+  const [searchMode, setSearchModeState] = useState<SearchMode>(DEFAULT_SEARCH_BOX.mode);
+  // Search Favorite 저장 목록(2026-08-19) — 계정 로밍(worklist.prefs.search_favs).
+  // 좌측 레일에 뜨고, 툴바 💾 로 지금 입력식을 이름 붙여 담는다.
+  const [sfavs, setSfavs] = useState<SearchFav[]>([]);
+  const saveSfavs = useCallback((next: SearchFav[]) => {
+    setSfavs(next);
+    api.getSetting("worklist.prefs").then((r) =>
+      api.putSetting("worklist.prefs", { ...r.value, search_favs: next }, "user")).catch(() => {});
+  }, []);
   const sbRef = useRef<{ fields: string[]; op: "and" | "or" }>({ fields: DEFAULT_SEARCH_BOX.fields, op: DEFAULT_SEARCH_BOX.op });
-  const setSearchMode = useCallback((m: "text" | "ai") => {
+  const setSearchMode = useCallback((m: SearchMode) => {
     setSearchModeState(m);
     // 모드 전환은 계정에 기억(다음 접속 기본값) — 병합 저장으로 다른 키 보존
     api.getSetting("worklist.prefs").then((r) => {
@@ -3107,7 +3255,8 @@ export function Worklist() {
       if (v.find_fields?.length) setFindFields(v.find_fields.filter((c) => FIND_FIELDS[c]));
       {  // 통합 검색창 설정 + 의뢰일시 표시 형식(계정 저장)
         const sb = (v as { search_box?: { mode?: string; fields?: string[]; op?: string } }).search_box;
-        if (sb?.mode === "ai" || sb?.mode === "text") setSearchModeState(sb.mode);
+        if (sb?.mode === "ai" || sb?.mode === "text" || sb?.mode === "fav") setSearchModeState(sb.mode);
+        setSfavs(readFavs(r.value));   // Search Favorite 저장 목록(계정 로밍)
         sbRef.current = {
           fields: (sb?.fields ?? DEFAULT_SEARCH_BOX.fields).filter((f) => SEARCH_SCOPE_FIELDS[f]),
           op: sb?.op === "or" ? "or" : "and",
@@ -3147,8 +3296,15 @@ export function Worklist() {
     searchText?: string;
   }) => {
     const pf = patch?.filters;
-    const nextF = typeof pf === "function" ? pf(filtersRef.current) : (pf ?? filtersRef.current);
+    let nextF = typeof pf === "function" ? pf(filtersRef.current) : (pf ?? filtersRef.current);
     const nextQ = patch?.searchText ?? searchRef.current;
+    // Search Favorite 문법('#' 로 조건 나열) — 서버가 아는 상태·장비만 필터로 승격한다.
+    // 지정하지 않은 축은 **빈 값으로 지운다**: 앞선 검색의 상태/장비가 남아 있으면 사용자가 쓴
+    // 식과 실제 조회 조건이 달라진다(=화면에 안 보이는 조건이 결과를 바꾸는 사고).
+    if (looksLikeFavQuery(nextQ)) {
+      const fav = parseFavQuery(nextQ, columnLabelToKey());
+      nextF = { ...nextF, status: fav.server.status ?? "", modality: fav.server.modality ?? "" };
+    }
     filtersRef.current = nextF;
     searchRef.current = nextQ;
     setFilters(nextF);
@@ -3552,6 +3708,41 @@ export function Worklist() {
   // SEARCH — 수동 모드에서 **조회 조건이 바뀌는** 유일한 경로. 대기 중 알림도 여기서 내린다.
   // 지금 입력돼 있는 filters/searchText 를 그대로 커밋해 조회한다(= 눌러야 적용).
   const runSearch = useCallback(() => { applyAndSearch(); }, [applyAndSearch]);
+
+  /* Search Favorite 의 나머지 조건(자유어·`항목=값`)은 서버 파라미터가 없으므로 **받은 목록에서**
+     거른다. 워크리스트 상한이 1000건이라 실용적이고, 백엔드를 건드리지 않아 회귀면이 없다.
+     식에 '#' 가 없으면 원본 그대로 — 기존 검색 동작은 조금도 바뀌지 않는다. */
+  const gridItems = useMemo(() => {
+    const q = committed.searchText ?? "";
+    const filtered = looksLikeFavQuery(q)
+      ? applyFavFilter(items, parseFavQuery(q, columnLabelToKey()).client)
+      : items;
+    return sortRows(filtered, sort);   // 헤더 클릭 정렬 — 정렬이 없으면 서버가 준 순서 그대로
+  }, [items, committed.searchText, sort]);
+
+  /** 💾 — 지금 입력한 식을 이름 붙여 Search Favorite 에 저장(같은 이름이면 수정). */
+  const saveSearchFav = useCallback(() => {
+    const q = searchRef.current.trim();
+    if (!q) { alert(tr("저장할 검색식이 없습니다 — 예: 센터#MR#병원명#미판독")); return; }
+    const name = window.prompt(tr("Search Favorite 이름"), q.slice(0, 30));
+    if (!name?.trim()) return;
+    saveSfavs(upsertFav(sfavs, { name: name.trim(), query: q }));
+  }, [sfavs, saveSfavs]);
+
+  /** 좌측 레일의 Search Favorite 행 동작 — 적용·수정·삭제 */
+  const onSearchFav = useCallback((act: { type: "apply" | "edit" | "del" }, f: SearchFav) => {
+    if (act.type === "apply") { setSearchMode("fav"); applyAndSearch({ searchText: f.query }); return; }
+    if (act.type === "del") {
+      if (window.confirm(`'${f.name}' ${tr("검색 즐겨찾기를 삭제할까요?")}`)) saveSfavs(removeFav(sfavs, f.name));
+      return;
+    }
+    const q = window.prompt(`${f.name} — ${tr("검색식 수정")}`, f.query);
+    if (q === null) return;
+    const name = window.prompt(tr("이름(그대로 두면 덮어씁니다)"), f.name);
+    if (!name?.trim()) return;
+    const base = name.trim() === f.name ? sfavs : removeFav(sfavs, f.name);
+    saveSfavs(upsertFav(base, { name: name.trim(), query: q.trim() }));
+  }, [sfavs, saveSfavs, applyAndSearch, setSearchMode]);
 
   /* ── 새로고침 — '같은 조건을 다시 본다'. SEARCH 와 뜻이 다르다 ────────────────────
      ⚠ 세 스킨(SaintView ⟳ · Live 수동모드 배너 [지금 갱신] · I-View/T-View 🔄)이 모두 이걸 쓴다.
@@ -4453,7 +4644,8 @@ export function Worklist() {
                      searchMode={searchMode} setSearchMode={setSearchMode}
                      withOpen={withOpen} setWithOpen={setWithOpen}
                      withOpenMode={withOpenMode} setWithOpenMode={setWithOpenMode}
-                     ohifOn={ohifOn} allowed={allowedAction} />
+                     ohifOn={ohifOn} allowed={allowedAction}
+                     ui={panelsOn} onSaveFav={saveSearchFav} />
       <FilterBar filters={filters} setFilters={setFilters} fields={findFields}
                  onSearch={runSearch} dirty={queryDirty} />
 
@@ -4526,6 +4718,7 @@ export function Worklist() {
                  style={{ flex: 1, minHeight: 0, overflow: "auto", display: "block", background: "var(--bg-panel)" }}>
               {/* 모달리티 칩·기간 프리셋은 '눌렀다' = 명시적 액션 → 조건 반영 + 즉시 커밋(조회) */}
               <SearchRail width={sizes.railW} active={datePreset} unifiedScroll
+                          ui={panelsOn} sfavs={sfavs} onFav={onSearchFav}
                           mods={modCounts} activeMod={filters.modality ?? ""}
                           onMod={(m) => applyAndSearch({ filters: (f) => ({ ...f, modality: m }) })}
                           onPick={(key, from) => {
@@ -4557,7 +4750,7 @@ export function Worklist() {
           <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
             <div style={{ flex: 1, minHeight: 60, display: "flex",
                           ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
-              <StudyGrid items={items} columns={columns} variant="infi" selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
+              <StudyGrid items={gridItems} columns={columns} variant="infi" sort={sort} onSort={onSortCol} selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                          treeDisabled={localMode}
                          colWidths={colW} onReorder={reorderColumns} onResize={resizeColumn}
                          onSelect={onSelect}
@@ -4597,6 +4790,7 @@ export function Worklist() {
       <div style={{ display: "flex", flex: 2.2, minHeight: 0 }}>
         {/* 모달리티 칩·기간 프리셋은 '눌렀다' = 명시적 액션 → 조건 반영 + 즉시 커밋(조회) */}
         <SearchRail width={sizes.railW} active={datePreset}
+                    ui={panelsOn} sfavs={sfavs} onFav={onSearchFav}
                     mods={modCounts} activeMod={filters.modality ?? ""}
                     onMod={(m) => applyAndSearch({ filters: (f) => ({ ...f, modality: m }) })}
                     onPick={(key, from) => {
@@ -4610,7 +4804,7 @@ export function Worklist() {
                   onDrag={(dx) => setSizes((s) => ({ ...s, railW: clampSz(s.railW + dx, 100, 420) }))} />
         <div style={{ flex: 1, minWidth: 0, display: "flex",
                       ...(searchFlash ? { animation: `${searchFlash % 2 ? "wlSearchFlashA" : "wlSearchFlashB"} 0.5s ease` } : {}) }}>
-          <StudyGrid items={items} columns={columns} selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
+          <StudyGrid items={gridItems} columns={columns} sort={sort} onSort={onSortCol} selectedId={focusId ?? selected?.id ?? null} selectedIds={selectedIds}
                      treeDisabled={localMode}
                      colWidths={colW} onReorder={reorderColumns} onResize={resizeColumn}
                      onSelect={onSelect}

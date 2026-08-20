@@ -4,7 +4,8 @@ import { VIEWER_BASE, api, sttStatus, type AiQuality, type OrthancStatus, type P
 import {
   COLUMN_DEFS, COL_FIND_MAP, DEFAULT_COLUMNS, DEFAULT_FIND_FIELDS, DEFAULT_SEARCH_BOX,
   FIND_FIELDS, FIND_ONLY_FIELDS, PhraseEditModal, REQ_DT_FMTS, SEARCH_SCOPE_FIELDS,
-  SVINFI_PANELS, SVINFI_PANEL_LABEL, type ViewerKey,
+  SEARCH_UI_KEYS, SEARCH_UI_LABEL, SVINFI_PANELS, SVINFI_PANEL_LABEL,
+  type SearchMode, type ViewerKey,
 } from "./Worklist";
 import { GridPicker } from "../lib/GridPicker";
 import { CollabDiagPanel } from "../components/CollabDiagPanel";
@@ -244,7 +245,7 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
   const [wlPanelsBy, setWlPanelsBy] = useState<{ sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null }>({});
   const [findFields, setFindFields] = useState<string[]>(DEFAULT_FIND_FIELDS);
   // 통합 검색창 설정(2026-08-10) — 방식·범위·다중어 결합 + 의뢰일시 표시 형식
-  const [sbMode, setSbMode] = useState<"text" | "ai">(DEFAULT_SEARCH_BOX.mode);
+  const [sbMode, setSbMode] = useState<SearchMode>(DEFAULT_SEARCH_BOX.mode);
   const [sbFields, setSbFields] = useState<string[]>(DEFAULT_SEARCH_BOX.fields);
   const [sbOp, setSbOp] = useState<"and" | "or">(DEFAULT_SEARCH_BOX.op);
   const [reqDtFmt, setReqDtFmtState] = useState<string>(REQ_DT_FMTS[1]);
@@ -2149,6 +2150,34 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                       {tr("해제 = 워크리스트에서 숨김. 화면에서 스플리터를 최소까지 드래그하거나 ✕(패널 그립)로 숨긴 상태가 여기와 양방향으로 동기됩니다.")}
                     </div>
                   </Group>
+                  {/* 검색 UI 구성요소(2026-08-19 사용자 확정) — 좌측 레일 3종과 툴바 3종을
+                      **뷰어별로** 켜고 끈다. 저장 그릇은 위 패널 토글과 같다(ty=panels,
+                      sv·infi=panels_by_viewer[vk]) — 새 저장 경로를 만들지 않는다. */}
+                  <Group title={vLabel + " " + tr("검색 UI 구성요소 표시/숨김")}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5 }}>
+                      {SEARCH_UI_KEYS.map((pk) => {
+                        const on = vk === "ty"
+                          ? wlPanels[pk] !== false
+                          : (wlPanelsBy[vk as "sv" | "infi"] ?? {})[pk] !== false;
+                        return (
+                          <label key={pk} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12.5 }}>
+                            <input type="checkbox" checked={on}
+                                   onChange={(e) => {
+                                     const v = e.target.checked;
+                                     if (vk === "ty") setWlPanels((p) => ({ ...p, [pk]: v }));
+                                     else setWlPanelsBy((p) => ({
+                                       ...p, [vk]: { ...(p[vk as "sv" | "infi"] ?? {}), [pk]: v },
+                                     }));
+                                   }} />
+                            {tr(SEARCH_UI_LABEL[pk])}
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.7 }}>
+                      {tr("Search Favorite 은 '센터#MR#병원명#미판독' 처럼 조건을 나열해 저장·재사용하는 검색입니다. 툴바 검색창 앞 💾 로 저장하면 좌측 목록에 쌓이고, ✏️ 로 수정 · 🗑️ 로 삭제합니다.")}
+                    </div>
+                  </Group>
                 </>
               );
             })()}
@@ -2180,9 +2209,13 @@ export function SettingsModal({ role, onClose, scope = "viewer" }: {
                 </Group>
                   );
                 })()}
-                <Group title={tr("검색창 설정 — 통합 검색(SEARCH/AI)의 방식·범위")}>
+                <Group title={tr("검색창 설정 — 통합 검색(FAV/SEARCH/AI)의 방식·범위")}>
                   <Row label={tr("기본 방식")}>
                     <label style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <input type="radio" name="sbmode" checked={sbMode === "fav"} onChange={() => setSbMode("fav")} />
+                      {tr("FAV — # 로 조건 나열 (기본)")}
+                    </label>
+                    <label style={{ display: "flex", gap: 4, alignItems: "center", marginLeft: 12 }}>
                       <input type="radio" name="sbmode" checked={sbMode === "text"} onChange={() => setSbMode("text")} />
                       {tr("SEARCH — 아래 범위에서 문법 검색")}
                     </label>
