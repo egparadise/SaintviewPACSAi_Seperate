@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import {
   applyFavFilter, looksLikeFavQuery, matchesCond, parseFavQuery, readFavs, removeFav, upsertFav,
 } from "../src/lib/searchFav.ts";
+import { buildWorklistQuery } from "../src/lib/worklistQuery.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(ROOT, p), "utf8");
@@ -104,4 +105,45 @@ test("배선 — 워크리스트가 파서를 쓰고, 검색 UI 토글 7종이 �
   }
   const s = src("src/pages/SettingsModal.tsx");
   assert.match(s, /SEARCH_UI_KEYS/, "설정이 같은 키 목록을 쓴다(갈리지 않게)");
+});
+
+/* ── 실제 사고(2026-08-20): "CT#Brain 이 언제나 0건" ────────────────────────
+ * 원문 식이 서버 검색어 q 로 그대로 나갔다. 서버 q 의 기본 범위는 pid·pname 뿐이라
+ * (study_service 기본값) 환자 ID/이름에서 "CT#Brain" 을 찾다가 무조건 0건이 됐다.
+ * 'CT' 단독은 modality 승격 덕에 되는 것처럼 보여 원인이 더 가려졌다. */
+
+test("Fav 문법이면 원문을 서버 검색어로 보내지 않는다 — 0건 사고 방어", () => {
+  const q = buildWorklistQuery({ filters: { modality: "CT" }, searchText: "CT#Brain" });
+  assert.equal(q.q, "", "원문이 q 로 새면 pid·pname 에서 찾다가 언제나 0건이다");
+  assert.equal(q.modality, "CT", "서버가 아는 축(장비)은 필터로 좁힌다");
+});
+
+test("일반 검색어는 종전대로 서버 q 로 나간다", () => {
+  const q = buildWorklistQuery({ filters: {}, searchText: "김지숙" });
+  assert.equal(q.q, "김지숙", "# 이 없으면 Fav 문법이 아니다 — 기존 통합 검색 그대로");
+});
+
+test("CT#Brain — 장비는 서버, 부위는 받은 목록에서 거른다", () => {
+  const q = parseFavQuery("CT#Brain");
+  assert.equal(q.server.modality, "CT");
+  assert.deepEqual(q.client, [{ field: "", value: "Brain" }], "부위는 자유어 조건");
+  const rows = [
+    { modality: "CT", body_part: "Brain", patient_name: "김지숙" },
+    { modality: "CT", body_part: "Chest", patient_name: "박용성" },
+  ];
+  const hit = applyFavFilter(rows, q.client);
+  assert.equal(hit.length, 1, "행의 body_part 값으로 걸러진다");
+  assert.equal(hit[0].body_part, "Brain");
+});
+
+test("부위를 명시형으로도 쓸 수 있다 — 그 컬럼만 대조", () => {
+  const LBL = { "부위": "body_part", "Body Part": "body_part" };
+  const q = parseFavQuery("CT#부위=Brain", LBL);
+  assert.deepEqual(q.client, [{ field: "body_part", value: "Brain" }]);
+  const rows = [
+    { body_part: "Brain", study_desc: "Chest CT" },
+    { body_part: "Chest", study_desc: "Brain protocol" },
+  ];
+  assert.equal(applyFavFilter(rows, q.client).length, 1,
+    "자유어와 달리 다른 컬럼의 같은 낱말에는 걸리지 않는다");
 });

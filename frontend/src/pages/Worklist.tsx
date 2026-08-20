@@ -334,19 +334,14 @@ export type ViewerKey = "sv" | "infi" | "ty";
 export const VIEWER_COL_DEFAULT: Record<ViewerKey, string[]> = {
   sv: DEFAULT_COLUMNS, infi: DEFAULT_COLUMNS, ty: DEFAULT_COLUMNS,
 };
-// SaintView/I-View 고정 배치의 숨김 가능한 구역(검색레일·검사그리드는 항상 표시).
-//  preview=좌하단 미리보기 · related=과거검사 · report=리포트
-export const SVINFI_PANELS = ["preview", "related", "report"] as const;
-export const SVINFI_PANEL_LABEL: Record<string, string> = {
-  preview: "미리보기 (Preview)", related: "과거검사 (Related)", report: "리포트 (Report)",
-};
-const DEFAULT_SVINFI_PANELS: Record<string, boolean> = {
-  preview: true, related: true, report: true, ...defaultSearchUi(),
-};
-
 /** 검색 UI 구성요소 표시 토글(2026-08-19 사용자 확정) — 뷰어별(SaintView·T-View·I-View)로
  *  Setting>워크리스트>{뷰어}에서 켜고 끈다. 저장은 기존 패널 토글과 **같은 그릇**
- *  (ty=panels / sv·infi=panels_by_viewer[vk])을 쓴다 — 저장 경로를 새로 만들지 않는다. */
+ *  (ty=panels / sv·infi=panels_by_viewer[vk])을 쓴다 — 저장 경로를 새로 만들지 않는다.
+ *
+ *  ⚠ 이 블록은 **DEFAULT_SVINFI_PANELS 보다 위**에 있어야 한다. 아래에 두면 그 상수가
+ *    초기화될 때 defaultSearchUi() 가 아직 초기화 전인 SEARCH_UI_KEYS 를 읽는다.
+ *    번들에서는 TDZ 가 undefined 로 접혀 "Cannot read properties of undefined (reading 'map')"
+ *    가 되고 **앱 전체가 검은 화면**이 된다(실제 사고 — tsc·빌드·유닛 테스트 모두 통과했다). */
 export const SEARCH_UI_KEYS = [
   "favsearch", "rail_filter", "rail_favs", "rail_folder",
   "tb_shortcut", "tb_savefav", "tb_search",
@@ -365,6 +360,17 @@ function defaultSearchUi(): Record<string, boolean> {
 }
 /** 표시 여부 — 저장된 값이 없으면 표시(기본 on). 정확히 false 일 때만 숨긴다. */
 export const uiShown = (panels: Record<string, boolean>, k: string): boolean => panels[k] !== false;
+
+// SaintView/I-View 고정 배치의 숨김 가능한 구역(검색레일·검사그리드는 항상 표시).
+//  preview=좌하단 미리보기 · related=과거검사 · report=리포트
+export const SVINFI_PANELS = ["preview", "related", "report"] as const;
+export const SVINFI_PANEL_LABEL: Record<string, string> = {
+  preview: "미리보기 (Preview)", related: "과거검사 (Related)", report: "리포트 (Report)",
+};
+const DEFAULT_SVINFI_PANELS: Record<string, boolean> = {
+  preview: true, related: true, report: true, ...defaultSearchUi(),
+};
+
 // T-View(현행) 하단 패널 기본 표시 상태 (UBPACS p.8 7구성)
 const DEFAULT_TY_PANELS: Record<string, boolean> = {
   orders: true, prior: true, compare: true, thumb: true, std: true, comment: true, report: true,

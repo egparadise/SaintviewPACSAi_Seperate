@@ -13,6 +13,8 @@
  * frontend/tests/worklist_query.test.mjs 가 원본 그대로 import 해 진리표를 검증한다.
  */
 
+import { looksLikeFavQuery } from "./searchFav.ts";
+
 export type WlFilters = Record<string, string>;
 
 /** 확정된(=SEARCH 로 커밋된) 검색 조건. 조회는 오직 이 값으로만 나간다. */
@@ -38,7 +40,13 @@ export const LIVE_QUERY_KEYS = [
  */
 export function buildWorklistQuery(c: CommittedQuery): Record<string, string> {
   const f = c.filters ?? {};
-  const p: Record<string, string> = { q: c.searchText ?? "" };
+  // Search Favorite 문법('#' 로 조건 나열)이면 **원문을 서버 검색어로 보내지 않는다**.
+  // 서버 q 의 기본 범위는 pid·pname 뿐이라(study_service `_QUERY_FIELD_COLS` 기본값)
+  // "CT#Brain" 을 그대로 넘기면 환자 ID/이름에서 그 문자열을 찾다가 **언제나 0건**이 된다
+  // (실제 사고 — 'CT' 단독은 modality 승격 덕에 되는 것처럼 보여 더 헷갈렸다).
+  // 서버는 승격된 status·modality 로만 좁히고, 나머지 조건은 받은 목록에서 AND 로 거른다
+  // (applyFavFilter). 이 분업이 lib/searchFav 의 설계 ②다.
+  const p: Record<string, string> = { q: looksLikeFavQuery(c.searchText ?? "") ? "" : (c.searchText ?? "") };
   for (const k of WL_PASSTHROUGH_KEYS) {
     if (f[k]) p[k] = f[k];
   }
