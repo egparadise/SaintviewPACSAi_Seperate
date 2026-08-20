@@ -136,15 +136,21 @@ export function matchesCond(row: Record<string, unknown>, c: FavCond): boolean {
  * 여기서 그 축을 클라이언트 조건으로 돌려놓는다. Live 행의 status 값은
  * received / reading / finalized 로 이 파일의 상태 낱말 매핑과 같은 코드다(webpacs_live._map_status).
  */
-export function clientCondsFor(q: FavQuery, opts: { liveMode?: boolean } = {}): FavCond[] {
+export function clientCondsFor(
+  q: FavQuery, opts: { liveMode?: boolean; statusOnServer?: (s: string) => boolean } = {},
+): FavCond[] {
   // 일반(로컬 DB) 모드 — 토큰을 q·qf·qop 로 넘겨 **서버가 전부 걸렀다**. 여기서 또 거르면
   // 서버가 어떤 컬럼에서 맞혔는지에 따라 멀쩡한 행이 사라진다(이중 필터로 0건이 되는 사고).
   if (!opts.liveMode) return [];
-  // Live(원격 A 직결) — A 의 검색 범위를 우리가 정할 수 없어 q 를 보내지 않는다.
-  // 그래서 조건 전부를 여기서 건다. 상태도 A 파라미터가 없어(LIVE_QUERY_KEYS) 여기서 걸어야
-  // '센터#MR#병원명#미판독' 의 마지막 조건이 증발하지 않는다.
+  // Live(원격 A 직결) — A 의 study_search 는 센터명·병원명을 훑지 않아 q 를 보내지 않는다.
+  // 그래서 값 조건은 여기서 건다.
   const out = [...q.client];
-  if (q.server.status) out.push({ field: "status", value: q.server.status, exact: true });
+  // 상태는 A 가 **일부만** 걸러 줄 수 있다(판독중·확정). 걸러 주는 상태는 여기서 또 거르지 않고,
+  // 못 거르는 상태(미판독 — AI 가 섞일 수 있다)만 클라이언트가 맡는다.
+  // 판정은 호출부가 넘긴다(이 모듈은 Live 파라미터 목록을 모른다 — 그건 worklistQuery 의 몫).
+  if (q.server.status && !(opts.statusOnServer?.(q.server.status) ?? false)) {
+    out.push({ field: "status", value: q.server.status, exact: true });
+  }
   return out;
 }
 

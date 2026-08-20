@@ -22,8 +22,8 @@ import {
   applyFavFilter, clientCondsFor, matchesCond, parseFavQuery, readFavs, removeFav, upsertFav,
 } from "../src/lib/searchFav.ts";
 import {
-  LIVE_LIMIT_DEFAULT, LIVE_LIMIT_FILTERED, buildWorklistQuery, liveFetchLimit, liveMaybeTruncated,
-  toLiveParams,
+  LIVE_LIMIT_DEFAULT, LIVE_LIMIT_FILTERED, LIVE_QUERY_KEYS, buildWorklistQuery, liveFetchLimit,
+  liveMaybeTruncated, liveStatusOnServer, toLiveParams,
 } from "../src/lib/worklistQuery.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -235,9 +235,9 @@ test("Live 에서는 상태 조건을 받은 목록에서 거른다 — 증발 �
   assert.equal(q.server.status, "received");
   assert.deepEqual(q.client, [], "일반 모드에서는 서버가 걸러 준다");
 
-  const live = clientCondsFor(q, { liveMode: true });
+  const live = clientCondsFor(q, { liveMode: true, statusOnServer: liveStatusOnServer });
   assert.deepEqual(live, [{ field: "status", value: "received", exact: true }],
-    "Live 는 status 를 못 보내므로 클라이언트 조건으로 되돌린다");
+    "미판독(received)에는 AI 가 섞일 수 있어 A 가 못 고른다 — 클라이언트가 맡는다");
 
   const rows = [
     { status: "received", modality: "MR" },
@@ -276,17 +276,46 @@ test("상한에 닿으면 조용히 자르지 않고 알린다", () => {
 });
 
 test("클라이언트가 걸러야 할 조건 수가 곧 판단 근거다", () => {
-  // 'CT' 는 장비로 승격되어 A 가 거른다 → 클라이언트 조건 0
-  assert.equal(clientCondsFor(parseFavQuery("CT"), { liveMode: true }).length, 0);
-  // 센터명은 A 가 못 거른다 → 클라이언트 조건 1 → 넉넉히 받아야 한다
-  assert.equal(clientCondsFor(parseFavQuery("써밋영상의원"), { liveMode: true }).length, 1);
-  assert.equal(liveFetchLimit(clientCondsFor(parseFavQuery("써밋영상의원"), { liveMode: true }).length),
-    LIVE_LIMIT_FILTERED);
+  const live = (t) => clientCondsFor(parseFavQuery(t), { liveMode: true, statusOnServer: liveStatusOnServer });
+  assert.equal(live("CT").length, 0, "장비는 A 가 거른다");
+  assert.equal(live("써밋영상의원").length, 1, "센터명은 A 가 못 거른다 → 넉넉히 받아야 한다");
+  assert.equal(liveFetchLimit(live("써밋영상의원").length), LIVE_LIMIT_FILTERED);
+});
+
+/* ── 2026-08-21: 상태 책임 분담 ────────────────────────────────────────────
+ * A 의 검색 가능 상태는 E/RE/RI/R/A/RR/RA/REF 여덟 개다. 우리 'received'(미판독)에는 그 밖에
+ * **AI** 가 섞일 수 있는데(A 클라이언트에 status_ai 표시가 실재) 검색으로는 못 고른다.
+ * 승격하면 AI 검사가 미판독 목록에서 사라진다 — 판독 대상이 안 보이는 누락이다. */
+
+test("판독중·확정은 A 가 거른다 — 클라이언트에서 또 거르지 않는다", () => {
+  assert.equal(liveStatusOnServer("reading"), true);
+  assert.equal(liveStatusOnServer("finalized"), true);
+  assert.equal(liveStatusOnServer("received"), false, "AI 가 섞일 수 있어 A 가 못 고른다");
+
+  const opts = { liveMode: true, statusOnServer: liveStatusOnServer };
+  assert.deepEqual(clientCondsFor(parseFavQuery("판독중"), opts), [],
+    "A 가 study_status=[RI,R,RR,REF] 로 걸러 준다");
+  assert.deepEqual(clientCondsFor(parseFavQuery("확정"), opts), []);
+  assert.equal(clientCondsFor(parseFavQuery("미판독"), opts).length, 1, "미판독만 클라이언트");
+});
+
+test("A 가 필드별로 받아 주는 축이 Live 파라미터에 들어 있다", () => {
+  for (const k of ["body_part", "desc", "emergency", "status"]) {
+    assert.ok(LIVE_QUERY_KEYS.includes(k),
+      `${k} — 여태 안 보내서 필터바에 넣어도 Live 에서 조용히 무시됐다`);
+  }
+  const p = buildWorklistQuery({ filters: { body_part: "CHEST", desc: "Chest CT", status: "reading" }, searchText: "" });
+  const live = toLiveParams(p);
+  assert.equal(live.body_part, "CHEST");
+  assert.equal(live.desc, "Chest CT");
+  assert.equal(live.status, "reading");
 });
 
 test("배선 — 워크리스트가 Live 조회에 그 상한을 실어 보낸다", () => {
   const w = src("src/pages/Worklist.tsx");
   assert.match(w, /liveFetchLimit\(liveConds\)/);
+  assert.match(w, /statusOnServer: liveStatusOnServer/,
+    "조회와 표시 필터가 **같은 판정**을 써야 한다 — 갈리면 서버가 거른 것을 또 걸러 0건이 된다");
   assert.match(w, /limit: liveLimit/, "A 로 나가는 파라미터에 실린다");
   assert.match(w, /liveMaybeTruncated\(r\.items\.length, liveLimit\)/, "잘림 안내");
   // 백엔드가 그만큼 받아 주는가

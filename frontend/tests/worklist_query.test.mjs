@@ -66,9 +66,15 @@ test("③ Live 는 지원 키만 넘긴다 (나머지 필터는 원격에서 무
     searchText: "abc",
   });
   const lp = toLiveParams(q);
-  assert.deepEqual(lp, { q: "abc", pid: "P1", pname: "홍", modality: "MR", date_from: "20260101" });
-  assert.equal("status" in lp, false, "Live 가 모르는 필터를 보내면 원격이 400 을 준다");
-  assert.equal("finding" in lp, false);
+  // 2026-08-21 — A 는 부위·검사명·응급·상태도 필드별로 받는다(handover 소스 확인). 여태 안 보내서
+  // 필터바에 넣어도 Live 에서 조용히 무시됐다. 지금은 넘기고, **매핑은 백엔드가** 한다.
+  assert.deepEqual(lp, {
+    q: "abc", pid: "P1", pname: "홍", modality: "MR", status: "unread", date_from: "20260101",
+  });
+  assert.equal("finding" in lp, false, "A 가 받지 않는 축은 여전히 보내지 않는다");
+  // ⚠ 넘긴다고 다 걸러지는 것은 아니다 — '미판독'은 A 의 검색 가능 상태 집합에 AI 가 없어
+  //   백엔드가 study_status 로 승격하지 않는다(누락 방지). 그 판정은 backend 테스트가 잠근다:
+  //   backend/tests/test_live_query_params.py
 });
 
 test("④ isQueryDirty — 입력했지만 아직 커밋(SEARCH) 안 한 상태를 잡는다", () => {

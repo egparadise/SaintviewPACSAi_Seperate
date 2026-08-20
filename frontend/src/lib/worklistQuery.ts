@@ -32,10 +32,26 @@ export const WL_PASSTHROUGH_KEYS = [
   "pid", "pname", "sex", "desc", "modality", "status", "body_part", "finding", "emergency", "key",
 ] as const;
 
-/** Live(원격 A 직결)에서 지원하는 파라미터 — 나머지 필터는 라이브에선 무시된다 */
+/** Live(원격 A 직결)에서 지원하는 파라미터 — 나머지 필터는 라이브에선 무시된다.
+ *  2026-08-21: A 는 부위·검사명·응급·상태도 **필드별로** 받아 AND 로 묶는다(handover 소스 확인).
+ *  여태 안 보내서, 필터바에 부위를 넣어도 Live 에서는 조용히 무시됐다. */
 export const LIVE_QUERY_KEYS = [
-  "q", "pid", "pname", "modality", "date_from", "date_to", "limit", "offset",
+  "q", "pid", "pname", "modality", "body_part", "desc", "emergency", "status",
+  "date_from", "date_to", "limit", "offset",
 ] as const;
+
+/** A 가 **상태 검색으로 고를 수 있는** 우리 상태값.
+ *
+ *  A 의 검색 가능 상태는 E/RE/RI/R/A/RR/RA/REF 여덟 개다(client 의 StudyStatus 타입).
+ *  우리 'received'(미판독)에는 그 밖에 **AI** 가 섞일 수 있는데(A 클라이언트에 status_ai 표시가
+ *  실재한다) AI 는 검색으로 고를 수 없다. received 를 서버로 승격하면 AI 검사가 미판독 목록에서
+ *  **사라진다** — 판독 대상이 안 보이는 누락이라, received 만 클라이언트에서 거른다. */
+export const LIVE_SERVER_STATUS = new Set(["reading", "finalized"]);
+
+/** 이 상태를 A 가 직접 걸러 줄 수 있는가 — 참이면 클라이언트에서 또 거르지 않는다. */
+export function liveStatusOnServer(status: string): boolean {
+  return LIVE_SERVER_STATUS.has(String(status ?? "").trim());
+}
 
 /**
  * 확정 조건 → /api/worklist 파라미터.

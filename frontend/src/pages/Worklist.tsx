@@ -80,7 +80,7 @@ import {
   type SearchFav,
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
-import { liveFetchLimit, liveMaybeTruncated } from "../lib/worklistQuery";
+import { liveFetchLimit, liveMaybeTruncated, liveStatusOnServer } from "../lib/worklistQuery";
 import { showToast } from "../lib/toast";
 import { installApp } from "../lib/pwa";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
@@ -3455,7 +3455,8 @@ export function Worklist() {
       // 받지 않는다). 그래서 **거를 조건이 있을 때만** 넉넉히 받는다 — 규칙은 lib/worklistQuery.
       // 조건이 없으면 예전 그대로 1000건이라 평소 조회는 무거워지지 않는다.
       const liveConds = committed.favMode && (committed.searchText ?? "").trim()
-        ? clientCondsFor(parseFavQuery(committed.searchText), { liveMode: true }).length
+        ? clientCondsFor(parseFavQuery(committed.searchText),
+                         { liveMode: true, statusOnServer: liveStatusOnServer }).length
         : 0;
       const liveLimit = liveFetchLimit(liveConds);
       api.liveWorklist({ ...toLiveParams(queryParams, { favMode: committed.favMode }), limit: liveLimit })
@@ -3775,7 +3776,8 @@ export function Worklist() {
   const gridItems = useMemo(() => {
     const q = committed.searchText ?? "";
     const filtered = committed.favMode && q.trim()
-      ? applyFavFilter(items, clientCondsFor(parseFavQuery(q), { liveMode }))
+      ? applyFavFilter(items, clientCondsFor(parseFavQuery(q),
+                                             { liveMode, statusOnServer: liveStatusOnServer }))
       : items;
     return sortRows(filtered, sort);   // 헤더 클릭 정렬 — 정렬이 없으면 서버가 준 순서 그대로
   }, [items, committed.searchText, committed.favMode, liveMode, sort]);

@@ -344,8 +344,15 @@ def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None)
     """A 워크리스트 실시간 조회 → StudyRow 배열(vid). 최신순.
     per-user 세션이 있으면 그 사용자 A 계정으로 조회(A 권한 스코프 그대로 적용)."""
     client = live_client(db, user)
-    q: dict[str, str] = {
-        "limit": str(min(int(params.get("limit") or 1000), 1000)),   # 2026-08-10 — 1000건
+    # 표시는 1000건(2026-08-10 사용자 확정)이지만, **조건 나열 검색**은 받은 목록을 클라이언트가
+    # 다시 걸러야 해서(A 는 센터명 같은 축을 검색 파라미터로 안 받는다) 더 받아야 할 때가 있다.
+    # ⚠ 2026-08-21: 여기가 무조건 1000 으로 자르고 있어서, API 의 상한만 올린 것은 **아무 효과가
+    #   없었다**(le=5000 을 통과해도 이 줄에서 1000 이 됐다). 상한은 API(Query le)가 정하고
+    #   여기서는 **그대로 전달**한다. A 자체는 건수 상한이 없다(_clamp_limit_offset = max(1, limit)).
+    # 값이 리스트인 항목(study_status·study_emergency)이 있다 — httpx 가 key=v1&key=v2 로 펴 주고,
+    # A 는 그걸 Query(None) 멀티셀렉트로 받는다.
+    q: dict[str, Any] = {
+        "limit": str(max(1, int(params.get("limit") or 1000))),
         "offset": str(int(params.get("offset") or 0)),
         "order_json": json.dumps([{"key": "study_idx", "order": "desc"}]),
     }
@@ -361,6 +368,26 @@ def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None)
         q["study_datetime_end"] = str(params["date_to"])
     if params.get("q"):
         q["study_search"] = str(params["q"])
+    # ── A 가 필드별로 받아 주는 축(전부 AND 로 묶인다) ─────────────────────────
+    #    2026-08-21: 여태 q·pid·pname·modality·기간만 보내서, 필터바에 부위·검사명을 넣어도
+    #    Live 에서는 조용히 무시됐다(일반 모드에서는 서버가 걸렀으므로 더 눈에 안 띄었다).
+    if params.get("body_part"):
+        q["study_body_part"] = str(params["body_part"])
+    if params.get("desc"):
+        q["study_description"] = str(params["desc"])
+    if str(params.get("emergency") or "").lower() in ("1", "true", "y"):
+        q["study_emergency"] = ["ER"]           # A 는 멀티셀렉트(_row_of 의 판정과 같은 코드)
+    # 상태 — **판독중·확정만** 보낸다.
+    #   A 의 검색 가능 상태는 E/RE/RI/R/A/RR/RA/REF 여덟 개다(client StudyStatus 타입).
+    #   우리 'received'(미판독)에는 그 밖에 **AI** 가 섞일 수 있는데(A 클라이언트에 status_ai 표시가
+    #   실재한다) AI 는 검색으로 고를 수 없다. 그래서 received 를 [E, RE] 로 좁혀 보내면 AI 검사가
+    #   미판독 목록에서 **사라진다** — 판독 대상이 안 보이는 누락이라, 그건 클라이언트에서 거른다.
+    #   (C 는 우리가 아래에서 이미 목록에서 제외하므로 고려 대상이 아니다.)
+    st = str(params.get("status") or "").strip()
+    if st == "reading":
+        q["study_status"] = ["RI", "R", "RR", "REF"]
+    elif st == "finalized":
+        q["study_status"] = ["A", "RA"]
     rows = client.list_studies(q)
     total = client.study_count({k: v for k, v in q.items()
                                 if k not in ("limit", "offset", "order_json")})
