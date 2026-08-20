@@ -6,6 +6,8 @@ import { annoLabel, contentRect, measureAnno, screenToImage } from "../lib/annot
 import { SC_DEFAULTS } from "../lib/shortcutDefs";
 import { GridPicker } from "../lib/GridPicker";
 import { openReportWindow, screenFeaturesList, placeCompareSlaves, placePriorAdjacent, mmManaged } from "../lib/screens";
+import { geomOfInstance, onCmpSync, postCmpCombine, postCmpHello, postCmpScroll, postCmpXlink,
+         type CmpMsg } from "../lib/cmpSync";
 import { onStudySync, onViewerAddTab, onViewerCloseAll, onViewerDelTab, postStudySync, postViewerAddTab, postViewerCloseAll, postViewerDelTab, postViewerOpened } from "../lib/sync";
 import { type CloseExit, type CloseScopeDecision, decideCloseScope, markViewerClosing, markViewerMounted } from "../lib/viewerClose";
 import { type SyncReason, nearestSlice, projectPoint, syncReasonText } from "../lib/spatialSync";
@@ -551,6 +553,8 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   useEffect(() => { prefsRef.current = prefs; }, [prefs]);
   const [series, setSeries] = useState<SeriesNode[]>([]);
   const [layout, setLayout] = useState<keyof typeof LAYOUTS>("1x1");
+  // 창 간 동기 핸들러(의존성 없는 useCallback)에서 최신 분할을 읽기 위한 거울
+  const layoutRef = useRef<keyof typeof LAYOUTS>("1x1");
   // Image Layout — 페인 내부 이미지 분할(연속 이미지 N×M 타일, UBPACS)
   const [imgLay, setImgLay] = useState({ r: 1, c: 1 });
   /** Image 분할을 바꿀 때는 **index 도 페이지 경계에 맞춰야** 한다.
@@ -840,6 +844,10 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   const [cmpActive, setCmpActive] = useState<boolean>(() => !!new URLSearchParams(window.location.search).get("cmprole"));
   const cmpActiveRef = useRef(cmpActive);
   useEffect(() => { cmpActiveRef.current = cmpActive; }, [cmpActive]);
+  useEffect(() => { layoutRef.current = layout; }, [layout]);
+  /** 지금 처리 중인 이동이 **다른 창에서 온 것**인가 — 참이면 되쏘지 않는다.
+   *  이게 없으면 두 창이 서로의 스크롤에 반응하며 끝없이 밀어 댄다(에코 폭주). */
+  const cmpRemoteRef = useRef(false);
   /** 비교로 띄운 페인의 **그 검사 전체 시리즈** — Combine 이 페인마다 자기 검사를 결합하는 근거.
    *  (페인에는 시리즈 하나만 실려 있고 examId 도 없어서, 띄울 때 받아 둔 트리를 여기 보관한다.) */
   const cmpTreesRef = useRef<Record<string, SeriesNode[]>>({});
@@ -2013,14 +2021,23 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
   /** Combine 버튼 — 비교 화면(1:2)에서는 **보이는 두 영역 모두**에 적용한다(2026-08-19 사용자 확정).
    *  각 페인은 자기 검사(M=현재, S=과거)의 시리즈를 결합하므로, 결합 후 마우스 스크롤·시네로
    *  좌우를 같은 방식으로 훑을 수 있다. 예전에는 활성 페인 하나만 결합돼 한쪽만 연속 스크롤이 됐다. */
-  const combineSeries = () => {
+  // 창 간 수신 effect(의존성 없는 useCallback)에서 최신 combineSeries 를 부르기 위한 거울.
+  // ⚠ 선언은 **사용보다 위**에 — 아래에 두면 초기화 전 참조가 된다(이번 세션의 검은 화면과 같은 함정).
+  const combineSeriesRef = useRef<((remote?: boolean) => void) | null>(null);
+  useEffect(() => { combineSeriesRef.current = combineSeries; });
+  const combineSeries = (remote = false) => {
     const vis = PANE_IDS.slice(0, LAYOUTS[layout].count).filter((id) => panes[id]?.series);
     const targets = cmpActive && vis.length > 1 ? vis : [activePane];
-    if (targets.some((id) => isCombined(panes[id]))) { targets.forEach(uncombine); return; }
+    const off = targets.some((id) => isCombined(panes[id]));
+    // ★ 다중 모니터 — 옆 모니터의 비교 창(M·S)도 같은 상태로 만든다. 한쪽만 결합돼 있으면
+    //   연속 스크롤 길이가 달라져 두 창이 같은 위치를 못 가리킨다.
+    if (!remote && cmpActiveRef.current) postCmpCombine(!off);
+    if (off) { targets.forEach(uncombine); return; }
     let done = 0;
     for (const id of targets) if (combineAllInto(id, true)) done++;
     if (done > 1) setStatus(`Combine all — ${tr("비교 화면의")} ${done}${tr("개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)")}`);
   };
+
   const combineAllInto = (pid: string, quiet = false): boolean => {
     // 이 페인이 물고 있는 **그 검사**의 시리즈로 결합한다. 비교로 띄운 페인은 다른 검사라
     // 현재 검사(series)를 쓰면 엉뚱한 영상이 들어간다 — 띄울 때 받아 둔 트리를 쓴다.
@@ -2130,9 +2147,45 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         next[id] = { ...tp, index: ti != null ? ti : clampI(tp.series.instances.length, tp.index + dir * stride) };
       });
       syncWarnRef.current = warn;
+      // ★ 다중 모니터 Compare — **다른 창**에도 같은 이동을 알린다(2026-08-20 사용자 확정).
+      //   시네(자동 플레이)도 결국 이 step 을 주기적으로 부르므로, 스크롤 한 종류만 방송하면
+      //   마우스 휠·화살표·플레이 버튼이 모두 함께 넘어간다. 창마다 타이머를 따로 돌리면
+      //   서로 어긋나 몇 장 지나 위치가 벌어진다 — 마스터 tick 을 따르는 쪽이 정확하다.
+      //   방송 조건: 비교 중 + Crosslink 켜짐 + 이 이동이 원격에서 온 것이 아닐 것(에코 금지).
+      if (!cmpRemoteRef.current && cmpActiveRef.current && xlinkRef.current.crosslink) {
+        postCmpScroll(dir * stride, geomOfInstance(mInst ?? null), prev[pid]?.studyUid);
+      }
       return next;
     });
   }, [xlink, layout]);
+
+  /** 다른 모니터 창에서 온 스크롤 — 이 창의 **보이는 페인 전부**를 옮긴다.
+   *  좌표 정합이 서면 좌표로(창 안에서 쓰는 nearestSlice 와 같은 규칙), 아니면 델타로.
+   *  슬레이브 창은 대개 1페인이라 사실상 그 한 장이 대상이다. */
+  const applyRemoteScroll = useCallback((delta: number, geom: unknown) => {
+    cmpRemoteRef.current = true;
+    setPanes((prev) => {
+      const vis = PANE_IDS.slice(0, LAYOUTS[layoutRef.current].count);
+      const next = { ...prev };
+      let moved = false;
+      for (const v of vis) {
+        const tp = prev[v];
+        if (!tp?.series || tp.series.instances.length <= 1) continue;
+        const len = tp.series.instances.length;
+        let ti: number | null = null;
+        if (geom && spatialSyncRef.current) {
+          const r = nearestSlice(geom as InstanceNode, tp.series.instances);
+          ti = r.index;
+          if (r.reason !== "ok") syncWarnRef.current = r.reason;
+        }
+        // 정합이 성립하지 않으면 '같은 만큼' 넘긴다 — 슬라이스 수가 달라도 자연스럽다.
+        const idx = ti != null ? ti : (((tp.index + delta) % len) + len) % len;
+        if (idx !== tp.index) { next[v] = { ...tp, index: idx }; moved = true; }
+      }
+      return moved ? next : prev;
+    });
+    cmpRemoteRef.current = false;
+  }, []);
 
   /** 점프 계열(처음/끝·썸네일 클릭·타일 더블클릭)의 크로스링크 동기 — step 과 같은 정책.
    *  step 은 '한 칸 이동'이라 정합 실패 시 델타 폴백이 자연스럽지만, 점프는 기준 델타가 없으므로
@@ -3251,7 +3304,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
         && prefs.compare?.multi_monitor !== false
         && placeCompareSlaves(cmpSlotsRef.current, window.name, ids)) {
       setCmpActive(true);
+      cmpActiveRef.current = true;
       setCmpRole("M");                              // 이 창은 기준(중앙 상단 녹색 "Compare M")
+      // 옆 모니터에 띄운 비교도 **같이 스크롤·시네**되어야 한다(2026-08-20 사용자 확정).
+      // 인플레이스 비교(compareInPlace)와 같은 동기 상태를 걸고, 슬레이브 창에도 전파한다.
+      // (슬레이브는 아직 로드 중일 수 있어 놓칠 수 있다 — 그래서 뜨자마자 hello 로 다시 받아 간다.)
+      const cmpXl = { ...xlinkRef.current, crosslink: true, auto_sync: true, sync_other: true };
+      setXlink(cmpXl);
+      postCmpXlink(cmpXl);
       // 다른 열린 창 + 이 창(발신자 — BroadcastChannel 미수신)에도 비교검사 Exam 탭 동기
       for (const id of ids) {
         const rx = detail.related_exams.find((q) => q.id === id);
@@ -3265,6 +3325,39 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
     // 단일 모니터(또는 미감지) — 한 뷰어 안에서 분할 비교
     await compareInPlace(ids);
   };
+
+  /* ── 다중 모니터 Compare — 창 사이 동기 수신(2026-08-20 사용자 확정) ──────────────
+     스크롤: 이 창의 보이는 페인을 좌표(또는 델타)로 옮긴다 — 마우스 휠도 시네도 같은 경로다.
+     Combine: 옆 창이 결합/해제하면 이 창도 같은 상태로.
+     xlink: 마스터가 Crosslink·AutoSync·SyncOther 를 켜면 이 창도 켠다.
+     hello: 늦게 뜬 슬레이브가 인사하면, 지금 상태를 되돌려 준다(방송을 놓친 창 구제). */
+  useEffect(() => {
+    const off = onCmpSync((m: CmpMsg) => {
+      switch (m.kind) {
+        case "scroll":
+          // 비교 창이 아니거나 Crosslink 가 꺼져 있으면 따라가지 않는다(일반 창을 끌고 다니지 않기)
+          if (!cmpActiveRef.current || !xlinkRef.current.crosslink) return;
+          applyRemoteScroll(m.delta, m.geom);
+          break;
+        case "combine":
+          if (!cmpActiveRef.current) return;
+          combineSeriesRef.current?.(true);
+          break;
+        case "xlink":
+          if (!cmpActiveRef.current) return;
+          setXlink((x) => ({ ...x, ...m.xlink }));
+          break;
+        case "hello":
+          // 이 창이 비교 중이면 현재 동기 상태를 알려 준다(슬레이브가 늦게 떠 방송을 놓친 경우)
+          if (cmpActiveRef.current) postCmpXlink(xlinkRef.current);
+          break;
+      }
+    });
+    // 슬레이브(URL cmprole)로 열린 창은 준비되자마자 인사한다
+    if (new URLSearchParams(window.location.search).get("cmprole")) postCmpHello();
+    return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* 주석/Reference line SVG 오버레이 — 이미지 콘텐츠 사각형에 정합(viewBox=픽셀 격자) */
   const annoSvg = (pid: string, p: PaneState, inst: InstanceNode) => {
@@ -4305,7 +4398,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                               opacity: m.key === "crosslink" || xlink.crosslink
                                        || m.key === "scout" || m.key === "all_lines" ? 1 : 0.45 }}>
                 <input type="checkbox" checked={xlink[m.key]}
-                       onChange={(e) => setXlink((x) => ({ ...x, [m.key]: e.target.checked }))} />
+                       onChange={(e) => setXlink((x) => {
+                         const nx = { ...x, [m.key]: e.target.checked };
+                         if (cmpActiveRef.current) postCmpXlink(nx);
+                         return nx;
+                       })} />
                 {m.label}
               </label>
             ))}
@@ -4777,7 +4874,14 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
       case "invert": act("invert"); break;
       case "rotate_r": act("rotR"); break;
       case "fit": act("fit"); break;
-      case "crosslink": setXlink((x) => ({ ...x, crosslink: !x.crosslink })); break;
+      case "crosslink":
+        setXlink((x) => {
+          const nx = { ...x, crosslink: !x.crosslink };
+          // 비교 중이면 옆 모니터 창도 같이 켜고 끈다 — 한쪽만 켜져 있으면 Link 가 성립하지 않는다
+          if (cmpActiveRef.current) postCmpXlink(nx);
+          return nx;
+        });
+        break;
       case "spatial":
         setSpatialSync((s0) => { setStatus(!s0 ? tr("Stack 동기: Spatial(DICOM 좌표 정합)") : tr("Stack 동기: Index(1:1)")); return !s0; });
         break;
@@ -5356,7 +5460,11 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
                 <label key={m.key} title={m.title}
                        style={{ ...XB, opacity: m.sub && !xlink.crosslink ? 0.45 : 1 }}>
                   <input type="checkbox" checked={xlink[m.key]}
-                         onChange={(e) => setXlink((x) => ({ ...x, [m.key]: e.target.checked }))} />
+                         onChange={(e) => setXlink((x) => {
+                         const nx = { ...x, [m.key]: e.target.checked };
+                         if (cmpActiveRef.current) postCmpXlink(nx);
+                         return nx;
+                       })} />
                   {m.label}
                 </label>
               ))}

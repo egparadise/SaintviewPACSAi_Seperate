@@ -75,3 +75,17 @@ test("스크롤 주체가 그리드 상자여야 한다 — 바깥이 스크롤�
   }
   assert.ok(n >= 2, `그리드 호출부 두 곳(SaintView·I-View)을 모두 확인해야 한다(찾은 수 ${n})`);
 });
+
+test("판독창 Worklist 도크도 안쪽 그리드가 스크롤 주체여야 한다", () => {
+  const r = src("src/pages/ReportWindow.tsx");
+  const i = r.indexOf("<StudyGrid ");
+  assert.ok(i > 0, "도크가 StudyGrid 를 쓴다");
+  const box = r.slice(Math.max(0, i - 500), i);
+  const open = box.lastIndexOf("<div ref={boxRef}");
+  assert.ok(open >= 0, "도크의 스크롤 상자를 찾지 못했다");
+  const decl = box.slice(open, box.indexOf(">", open) + 1);
+  assert.ok(!/overflow:\s*"auto"/.test(decl),
+    "바깥이 스크롤을 맡으면 중첩 스크롤이 되어 안쪽 thead 의 sticky 가 무력해진다");
+  assert.match(decl, /display:\s*"flex"/, "안쪽 StudyGrid 가 flex:1 로 높이를 받아야 스크롤 주체가 된다");
+  assert.match(decl, /minHeight:\s*0/);
+});

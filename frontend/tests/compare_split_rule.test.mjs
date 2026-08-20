@@ -37,7 +37,7 @@ test("① 비교 중에는 모달리티 Series Layout 이 분할을 덮지 못�
 test("② prior_mode = layout 이면 모니터 창이 아니라 이 화면을 1:2 로 나눈다", () => {
   const i = v2.indexOf("const openCompare = async ()");
   assert.ok(i > 0);
-  const body = v2.slice(i, i + 1600);
+  const body = v2.slice(i, i + 3000);
   assert.match(body, /\(prefs\.compare\?\.prior_mode \?\? "layout"\) === "monitor"[\s\S]{0,120}placeCompareSlaves/,
                "'모니터 띄우기'로 설정했을 때만 옆 모니터 창 — 기본(layout)은 화면 분할");
   assert.match(body, /await compareInPlace\(ids\)/, "그 외에는 화면 안 분할로 떨어진다");
@@ -65,12 +65,12 @@ test("④ 과거검사 열기(1:2 분할 설정)는 지금 격자가 무엇이�
 });
 
 test("⑤ Combine 은 비교 화면의 두 영역 모두에 걸린다", () => {
-  const i = v2.indexOf("const combineSeries = () =>");
+  const i = v2.indexOf("const combineSeries = (");   // 시그니처는 창 간 동기로 (remote) 인자를 받게 됐다
   assert.ok(i > 0);
   const body = v2.slice(i, i + 900);
   assert.match(body, /cmpActive && vis\.length > 1 \? vis : \[activePane\]/,
                "비교 중이면 보이는 페인 전부, 아니면 예전처럼 활성 페인 하나만");
-  assert.match(body, /targets\.some\(\(id\) => isCombined\(panes\[id\]\)\)[\s\S]{0,80}targets\.forEach\(uncombine\)/,
+  assert.match(body, /targets\.some\(\(id\) => isCombined\(panes\[id\]\)\)[\s\S]{0,400}targets\.forEach\(uncombine\)/,
                "한 쪽이라도 결합돼 있으면 두 쪽 모두 해제(토글이 어긋나지 않게)");
 });
 

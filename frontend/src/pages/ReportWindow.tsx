@@ -1139,7 +1139,12 @@ function WorklistDock({ curId, onOpen }: { curId: number; onOpen: (id: number) =
         <button className="primary" style={{ fontSize: 11, padding: "2px 12px" }} onClick={tick}>SEARCH</button>
         {err && <span style={{ fontSize: 11, color: "var(--stat-emergency)" }}>{err}</span>}
       </div>
-      <div ref={boxRef} style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+      {/* ⚠ 여기서 overflow:auto 를 주면 **중첩 스크롤**이 된다 — 안쪽 StudyGrid 가 자기 상자를
+          가지고 있는데 바깥이 스크롤을 맡으면, 안쪽 상자는 스크롤되지 않고 통째로 밀려 올라가
+          thead 의 sticky 가 아무 일도 하지 않는다(제목 줄이 목록과 같이 사라진다 — 실제 사고).
+          display:flex + minHeight:0 으로 **안쪽이 스크롤 주체**가 되게 한다.
+          선택 줄 scrollIntoView 는 스크롤 조상을 스스로 찾으므로 그대로 동작한다. */}
+      <div ref={boxRef} style={{ flex: 1, minHeight: 0, display: "flex" }}>
         <StudyGrid items={rows} columns={cols} selectedId={curId}
                    onSelect={(row) => { if (row.id !== curId) onOpen(row.id); }}
                    onOpen={(row) => onOpen(row.id)}
