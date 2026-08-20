@@ -118,6 +118,45 @@ def git_short_hash() -> str:
         return "nogit"
 
 
+def smoke_shell_ok() -> bool:
+    """앱 셸 스모크 — 빌드 산출물이 **실제로 초기화되는가**(2026-08-20 신설).
+
+    2026-08-20 에 앱 전체가 검은 화면으로 배포됐다. 모듈 최상위 초기화 순서(TDZ) 문제였는데
+    tsc·vite build·node 테스트·pytest 가 **전부 초록**이었다 — 넷 다 "코드가 말이 되는가"만
+    보고 "앱이 실제로 그려지는가"는 아무도 안 봤기 때문이다.
+
+    그래서 포장 **직전에** dist 번들을 node:vm 에서 모듈 초기화까지 실제로 평가한다.
+    새 의존성 없이(브라우저·헤드리스 불필요) 같은 종류의 사고를 막는다.
+    자세한 판정 기준은 frontend/tools/smoke_shell.mjs 주석 참조.
+    """
+    script = ROOT / "frontend/tools/smoke_shell.mjs"
+    if not script.exists():
+        print("WARN: 스모크 스크립트가 없습니다 — 건너뜁니다", file=sys.stderr)
+        return True
+    try:
+        r = subprocess.run(
+            ["node", "--experimental-vm-modules", str(script), "dist/assets"],
+            cwd=ROOT / "frontend", capture_output=True, text=True, timeout=180,
+        )
+    except FileNotFoundError:
+        print("WARN: node 를 찾지 못해 스모크를 건너뜁니다", file=sys.stderr)
+        return True
+    except subprocess.TimeoutExpired:
+        print("ERROR: 스모크가 시간 안에 끝나지 않았습니다", file=sys.stderr)
+        return False
+    for line in (r.stdout + r.stderr).splitlines():
+        if line.startswith("[smoke]"):
+            print(line)
+    if r.returncode == 0:
+        return True
+    if r.returncode == 2:
+        print("WARN: 스모크가 번들을 찾지 못했습니다 — 건너뜁니다", file=sys.stderr)
+        return True
+    print("ERROR: 앱 셸 스모크 실패 — 포장을 중단합니다(이 상태로 배포하면 화면이 뜨지 않습니다)",
+          file=sys.stderr)
+    return False
+
+
 def main() -> int:
     stamp = datetime.now().strftime("%Y%m%d")
     name = f"SaintviewViewerSuite-dist-{stamp}-{git_short_hash()}"
@@ -128,6 +167,9 @@ def main() -> int:
 
     if not (ROOT / "frontend/dist/index.html").exists():
         print("ERROR: frontend/dist 가 없습니다 — 먼저 `cd frontend && npm run build`", file=sys.stderr)
+        return 1
+
+    if not smoke_shell_ok():
         return 1
 
     for src, dst in INCLUDE_DIRS:

@@ -70,3 +70,7 @@
 - 새 UI 한국어 문자열은 `tr()` 래핑 + `lib/i18n/msgids.ts` + **9개 언어 사전 전부** 등재
   (tests/i18n_rule.test.mjs 가 강제). 비교값·저장 키·API 값·제품명은 절대 래핑하지 않는다.
 - 배포 패키지는 `py -3.11 deploy/make_dist.py` 만 사용(손 조립 금지), 커밋 **후** 재빌드로 SHA 를 맞춘다.
+- **앱 셸 스모크**(2026-08-20 신설) — `make_dist` 가 포장 직전에 `frontend/tools/smoke_shell.mjs` 로
+  dist 번들을 node:vm 에서 **모듈 초기화까지 실제로 평가**한다. 실패하면 포장이 멈춘다.
+  이유: 검은 화면 사고 때 tsc·vite build·node·pytest 가 **전부 초록**이었다 — 넷 다 "코드가 말이
+  되는가"만 보고 "앱이 실제로 그려지는가"는 안 봤다. 이 게이트를 끄거나 건너뛰지 마라.
