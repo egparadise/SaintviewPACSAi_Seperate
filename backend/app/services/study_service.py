@@ -46,6 +46,11 @@ _QUERY_FIELD_COLS = {
     "body_part": lambda: Study.body_part,
     "ref_phys": lambda: Study.referring_physician,
     "memo": lambda: Study.memo,
+    # 2026-08-20 사용자 확정 — 조건 나열 검색은 "어느 항목인지 지정하지 않는다". 토큰 하나가
+    # 이 컬럼들 사이 OR 로 묶이고 토큰끼리는 AND 이므로(_apply_worklist_filters),
+    # '대자인병원#CT#CHEST' 가 순서·필드 지정 없이 통하려면 장비·부서도 범위에 있어야 한다.
+    "modality": lambda: Study.modality,
+    "dept": lambda: Study.department,
 }
 
 

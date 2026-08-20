@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import {
   applyFavFilter, clientCondsFor, matchesCond, parseFavQuery, readFavs, removeFav, upsertFav,
 } from "../src/lib/searchFav.ts";
-import { buildWorklistQuery } from "../src/lib/worklistQuery.ts";
+import { buildWorklistQuery, toLiveParams } from "../src/lib/worklistQuery.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = (p) => readFileSync(join(ROOT, p), "utf8");
@@ -95,7 +95,8 @@ test("판정은 모드가 한다 — `#` 유무를 보는 코드가 남아 있�
   assert.ok(!/looksLikeFavQuery/.test(f + w + q),
     "`#` 유무로 Fav 를 판정하던 함수는 폐지됐다(조건이 하나면 `#` 이 없다)");
   assert.match(w, /searchModeRef\.current === "fav"/, "검색창 모드가 판정한다");
-  assert.match(q, /c\.favMode \? "" :/, "FAV 모드면 원문을 서버 검색어로 보내지 않는다");
+  assert.match(q, /if \(c\.favMode\) \{/, "FAV 모드면 서버 파라미터를 조건 나열용으로 바꾼다");
+  assert.match(q, /p\.qop = "and"/, "토큰끼리는 AND");
 });
 
 test("`항목=값` 문법을 사용자에게 안내하지 않는다", () => {
@@ -137,19 +138,52 @@ test("배선 — 워크리스트가 파서를 쓰고, 검색 UI 토글 7종이 �
  * (study_service 기본값) 환자 ID/이름에서 "CT#Brain" 을 찾다가 무조건 0건이 됐다.
  * 'CT' 단독은 modality 승격 덕에 되는 것처럼 보여 원인이 더 가려졌다. */
 
-test("FAV 모드면 원문을 서버 검색어로 보내지 않는다 — 0건 사고 방어", () => {
-  const q = buildWorklistQuery({ filters: { modality: "CT" }, searchText: "CT#Brain", favMode: true });
-  assert.equal(q.q, "", "원문이 q 로 새면 pid·pname 에서 찾다가 언제나 0건이다");
-  assert.equal(q.modality, "CT", "서버가 아는 축(장비)은 필터로 좁힌다");
-  // `#` 없는 한 조건도 마찬가지 — 이게 'CT 가 0건'이던 원인이다
-  assert.equal(buildWorklistQuery({ filters: { modality: "CT" }, searchText: "CT", favMode: true }).q, "");
+test("FAV — 토큰이 전 항목을 OR 로 훑고 토큰끼리 AND (서버가 처리)", () => {
+  const q = buildWorklistQuery({ filters: { modality: "CT" }, searchText: "대자인병원#CT#CHEST", favMode: true });
+  // 원문이 통째로 나가면 '#' 이 섞인 덩어리를 찾다가 언제나 0건이 된다(실제 사고)
+  assert.ok(!q.q.includes("#"), "원문을 그대로 보내지 않는다");
+  assert.equal(q.q, "대자인병원 CHEST", "장비는 전용 필터로 빠지고 나머지는 공백 구분 토큰");
+  assert.equal(q.qop, "and", "토큰끼리 AND — 셋 다 어딘가에 있어야 한다");
+  assert.ok(q.qf.split(",").includes("body_part"), "부위도 훑는 범위에");
+  assert.ok(q.qf.split(",").includes("institution"), "기관(센터명)도");
+  assert.ok(q.qf.split(",").includes("modality"), "장비도 — 순서·필드 지정 없이 통하려면 필요");
+  assert.equal(q.modality, "CT", "장비는 정확 일치 필터로 좁힌다");
+
+  // `#` 없는 한 조건도 같은 경로 — 이게 'CT 가 0건'이던 원인이다
+  const one = buildWorklistQuery({ filters: { modality: "CT" }, searchText: "CT", favMode: true });
+  assert.equal(one.q, "", "장비로 승격되면 남는 토큰이 없다");
+  assert.equal(one.modality, "CT");
+});
+
+test("FAV — 상태만 예외로 별도 필터(텍스트로는 잡히지 않는 코드값)", () => {
+  const q = buildWorklistQuery({ filters: { status: "received" }, searchText: "대자인병원#미판독", favMode: true });
+  assert.equal(q.q, "대자인병원", "상태 낱말은 토큰에서 빠진다");
+  assert.equal(q.status, "received", "status 필터로 따로 건다");
 });
 
 test("일반(비 FAV) 검색어는 종전대로 서버 q 로 나간다", () => {
   const q = buildWorklistQuery({ filters: {}, searchText: "김지숙" });
   assert.equal(q.q, "김지숙", "FAV 모드가 아니면 기존 통합 검색 그대로");
+  assert.equal(q.qf, undefined, "범위·결합도 건드리지 않는다(사용자 설정 검색 범위가 그대로 쓰인다)");
   assert.equal(buildWorklistQuery({ filters: {}, searchText: "CT#Brain" }).q, "CT#Brain",
     "모드가 아니면 `#` 이 있어도 손대지 않는다 — 판정 축은 오직 모드다");
+});
+
+test("일반 모드에서는 받은 목록을 다시 거르지 않는다 — 이중 필터로 0건 되는 사고 방지", () => {
+  const fav = parseFavQuery("대자인병원#CHEST");
+  assert.deepEqual(clientCondsFor(fav, { liveMode: false }), [],
+    "서버가 q·qf·qop 로 전부 걸렀다");
+  assert.equal(clientCondsFor(fav, { liveMode: true }).length, 2,
+    "Live 는 q 를 보내지 않으므로 여기서 전부 건다");
+});
+
+test("Live 는 조건 나열에서 q 를 A 로 보내지 않는다 — 누락 방지", () => {
+  const p = buildWorklistQuery({ filters: { modality: "CT" }, searchText: "대자인병원#CT", favMode: true });
+  const live = toLiveParams(p, { favMode: true });
+  assert.equal(live.q, undefined,
+    "A 의 study_search 범위를 우리가 정할 수 없다 — 보냈다가 못 찾으면 그 행은 아예 오지 않는다");
+  assert.equal(live.modality, "CT", "장비·기간은 A 가 정확히 거를 수 있다");
+  assert.equal(toLiveParams(p).q, "대자인병원", "FAV 가 아니면 종전대로 q 를 보낸다");
 });
 
 test("CT#Brain — 장비는 서버, 부위는 받은 목록에서 거른다", () => {

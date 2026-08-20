@@ -34,6 +34,21 @@ export const FAV_STATUS_WORDS: Record<string, string> = {
   "보류": "suspended", "초안": "draft", "ai초안": "draft_ready", "검토중": "in_review",
 };
 
+/** 조건 나열 검색이 훑는 범위 — **전 항목**(2026-08-20 사용자 확정).
+ *  사용자가 어느 항목인지 지정하지 않으므로 토큰 하나가 이 전부를 OR 로 훑고, 토큰끼리 AND 다.
+ *  백엔드 study_service._QUERY_FIELD_COLS 와 1:1 — 한쪽만 늘리면 조용히 갈린다.
+ *  ⚠ 통합 검색창의 사용자 설정 범위(SB_FIELDS)와는 다른 것이다. 그건 '일반 검색'의 범위다. */
+export const FAV_SCOPE = [
+  "pid", "pname", "accession", "desc", "institution", "body_part", "ref_phys", "memo",
+  "modality", "dept",
+];
+
+/** 서버 q 로 넘길 토큰들 — 상태·장비처럼 **전용 필터로 승격된 것은 빠진다**.
+ *  (상태는 텍스트로 절대 안 잡히는 코드값이고, 장비는 정확 일치가 더 옳다.) */
+export function favTokens(q: FavQuery): string[] {
+  return q.client.map((c) => c.value).filter(Boolean);
+}
+
 /** 모달리티 코드 — 대문자 2~3자만으로는 오탐이 나므로 알려진 목록으로 제한한다. */
 export const FAV_MODALITIES = [
   "CT", "MR", "MRI", "DX", "CR", "US", "MG", "NM", "PT", "PET", "XA", "RF", "OT", "SC", "ES",
@@ -122,10 +137,14 @@ export function matchesCond(row: Record<string, unknown>, c: FavCond): boolean {
  * received / reading / finalized 로 이 파일의 상태 낱말 매핑과 같은 코드다(webpacs_live._map_status).
  */
 export function clientCondsFor(q: FavQuery, opts: { liveMode?: boolean } = {}): FavCond[] {
+  // 일반(로컬 DB) 모드 — 토큰을 q·qf·qop 로 넘겨 **서버가 전부 걸렀다**. 여기서 또 거르면
+  // 서버가 어떤 컬럼에서 맞혔는지에 따라 멀쩡한 행이 사라진다(이중 필터로 0건이 되는 사고).
+  if (!opts.liveMode) return [];
+  // Live(원격 A 직결) — A 의 검색 범위를 우리가 정할 수 없어 q 를 보내지 않는다.
+  // 그래서 조건 전부를 여기서 건다. 상태도 A 파라미터가 없어(LIVE_QUERY_KEYS) 여기서 걸어야
+  // '센터#MR#병원명#미판독' 의 마지막 조건이 증발하지 않는다.
   const out = [...q.client];
-  if (opts.liveMode && q.server.status) {
-    out.push({ field: "status", value: q.server.status, exact: true });
-  }
+  if (q.server.status) out.push({ field: "status", value: q.server.status, exact: true });
   return out;
 }
 

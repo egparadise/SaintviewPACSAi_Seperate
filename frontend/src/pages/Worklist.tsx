@@ -610,6 +610,7 @@ export const FIND_ONLY_FIELDS = Object.keys(FIND_FIELDS)
 export const SEARCH_SCOPE_FIELDS: Record<string, string> = {
   pid: "환자 ID", pname: "환자 이름", accession: "Accession 번호", desc: "검사명",
   institution: "기관(센터명)", body_part: "부위", ref_phys: "의뢰의", memo: "메모",
+  modality: "장비 (Modality)", dept: "부서 (Department)",
 };
 // Search Favorite 가 기본 방식(2026-08-19 사용자 확정) — '#' 로 조건을 나열한다.
 export const DEFAULT_SEARCH_BOX = { mode: "fav" as SearchMode, fields: ["pid", "pname"], op: "and" as "and" | "or" };
@@ -3444,7 +3445,7 @@ export function Worklist() {
       // LIVE 모드 — 원격 A(webpacs_api) 워크리스트 실시간 조회(vid, 복사 없음).
       // 지원 필터만 매핑(q/pid/pname/modality/기간) — 나머지 필터는 라이브에선 무시.
       // 기획: "Live 도 같은 규칙을 따른다" → 여기도 committed 로만 조회한다.
-      api.liveWorklist(toLiveParams(queryParams))
+      api.liveWorklist(toLiveParams(queryParams, { favMode: committed.favMode }))
         .then((r) => {
           setItems(r.items);
           setTotal(r.total);

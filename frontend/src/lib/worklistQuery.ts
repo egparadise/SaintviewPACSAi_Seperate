@@ -14,6 +14,8 @@
  */
 
 
+import { FAV_SCOPE, favTokens, parseFavQuery } from "./searchFav.ts";
+
 export type WlFilters = Record<string, string>;
 
 /** 확정된(=SEARCH 로 커밋된) 검색 조건. 조회는 오직 이 값으로만 나간다. */
@@ -42,12 +44,20 @@ export const LIVE_QUERY_KEYS = [
  */
 export function buildWorklistQuery(c: CommittedQuery): Record<string, string> {
   const f = c.filters ?? {};
-  // FAV 모드면 입력은 '조건 나열'이므로 **원문을 서버 검색어로 보내지 않는다**.
-  // 서버 q 의 기본 범위는 pid·pname 뿐이라(study_service 의 query_fields 기본값) 조건식을
-  // 그대로 넘기면 환자 ID/이름에서 그 문자열을 찾다가 **언제나 0건**이 된다(실제 사고).
-  // 서버는 승격된 status·modality 로만 좁히고, 나머지 조건은 받은 목록에서 AND 로 거른다
-  // (applyFavFilter). 이 분업이 lib/searchFav 의 설계 ②다.
-  const p: Record<string, string> = { q: c.favMode ? "" : (c.searchText ?? "") };
+  const p: Record<string, string> = { q: c.searchText ?? "" };
+  // ── FAV(조건 나열) — 토큰 하나가 **전 항목을 OR 로** 훑고, 토큰끼리는 AND (2026-08-20 사용자 확정)
+  //   "대자인병원#CT#CHEST = 대자인병원이 어딘가에 있고, CT 가 어딘가에 있고, CHEST 가 어딘가에
+  //    있는 검사" — 순서도 필드 지정도 필요 없다.
+  //   서버 쿼리 빌더가 이미 그 구조다(study_service._apply_worklist_filters:
+  //   토큰 = 범위 필드 OR / 토큰 사이 = qop). 그래서 범위(qf)를 전 항목으로, 결합(qop)을 and 로
+  //   넘기기만 하면 된다 — 서버 변경은 검색 범위에 장비·부서를 더한 것뿐이다.
+  //   ⚠ 원문을 그대로 q 로 넘기면 안 된다. '#' 이 섞인 한 덩어리를 찾다가 언제나 0건이 된다(실제 사고).
+  //   ⚠ 상태(미판독 등)만 예외 — 텍스트로는 절대 안 잡히는 코드값이라 status 필터로 따로 건다.
+  if (c.favMode) {
+    p.q = favTokens(parseFavQuery(c.searchText ?? "")).join(" ");   // 공백 = 서버의 토큰 구분자
+    p.qf = FAV_SCOPE.join(",");
+    p.qop = "and";
+  }
   for (const k of WL_PASSTHROUGH_KEYS) {
     if (f[k]) p[k] = f[k];
   }
@@ -57,10 +67,15 @@ export function buildWorklistQuery(c: CommittedQuery): Record<string, string> {
   return p;
 }
 
-/** Live 워크리스트 파라미터 — 지원 키만 추린다(빈 값 제외). */
-export function toLiveParams(q: Record<string, string>): Record<string, string | number> {
+/** Live 워크리스트 파라미터 — 지원 키만 추린다(빈 값 제외).
+ *  ⚠ FAV(조건 나열)에서는 **q 를 보내지 않는다**. A 의 study_search 가 어떤 컬럼을 훑는지
+ *    우리가 정할 수 없어서, 보냈다가 A 가 못 찾으면 그 행은 아예 오지 않는다(되돌릴 수 없는 누락).
+ *    Live 는 장비·기간으로만 좁히고 나머지 조건은 받은 목록에서 건다(clientCondsFor). */
+export function toLiveParams(q: Record<string, string>,
+                             opts: { favMode?: boolean } = {}): Record<string, string | number> {
   const lp: Record<string, string | number> = {};
   for (const k of LIVE_QUERY_KEYS) {
+    if (k === "q" && opts.favMode) continue;
     const v = q[k];
     if (v) lp[k] = v;
   }
