@@ -1,15 +1,23 @@
-/* Search Favorite — 워크리스트 통합 검색의 **조건 나열 문법**(2026-08-19 사용자 확정).
+/* Search Favorite — 워크리스트 검색의 **조건 나열**(2026-08-19 사용자 확정).
  *
  * 사용자 요구: "'센터#MR#병원명#미판독' 처럼 입력하면 조건 값들을 인식해 검색하고,
  *              저장 버튼으로 그 식을 즐겨찾기에 남긴다. 판독 상태(요청·확정·판독중)와
  *              워크리스트 항목 구성의 **모든 값**을 검색 조건으로 쓸 수 있어야 한다."
  *
+ * ⚠ **`#` 은 문법이 아니다**(2026-08-20 사용자 확정). 조건을 여러 개 쓸 때 사이를 끊는
+ *   **구분자**일 뿐이다. 그러니 `#` 이 있는지로 "이건 Fav 검색"을 판정하면 안 된다 —
+ *   조건이 하나뿐이면(`CT`) `#` 이 없고, 그래도 Fav 검색이어야 한다. 판정은 **검색창 모드**가
+ *   한다(FAV/일반/AI). 예전에 `#` 유무로 갈랐더니 `CT` 한 조건이 일반 검색어로 나가
+ *   환자ID·이름에서 "CT" 를 찾다가 0건이 됐다.
+ *
+ * 사용자는 **값만 나열**한다. `항목=값` 같은 걸 외우게 하지 않는다 — 어느 항목인지는
+ * 프로그램이 알아본다.
+ *
  * ── 설계 ────────────────────────────────────────────────────────────────
  * ① `#` 로 토큰을 나누고 각 토큰이 무엇인지 **스스로 판정**한다(순서 무관):
  *      · 상태 낱말(미판독/요청/판독중/확정…)  → 서버 status 필터
  *      · 모달리티 코드(CT·MR·DX…)             → 서버 modality 필터
- *      · `필드=값` / `필드:값` 명시형          → 그 컬럼만 대조(그림4 '워크리스트 항목 구성' 전부)
- *      · 그 밖                                  → 자유어(모든 표시 값 대상)
+ *      · 그 밖                                  → 값(워크리스트 항목 전체와 대조)
  * ② 서버가 아는 조건(status·modality)만 질의로 보내고, 나머지는 **받은 목록에서** 거른다.
  *    워크리스트는 상한 1000건이라 이 방식이 실용적이고, 백엔드를 건드리지 않아 회귀면이 없다.
  * ③ 토큰 사이는 **AND** 다 — 조건을 나열한 것이므로 전부 만족해야 한다
@@ -32,7 +40,7 @@ export const FAV_MODALITIES = [
 ];
 
 export interface FavCond {
-  /** 컬럼 키(명시형 `필드=값`). 빈 값이면 자유어(모든 표시 값 대상) */
+  /** 대조할 컬럼 키. 빈 값이면 **모든 항목** 대상(기본) — 사용자는 값만 쓰기 때문이다. */
   field: string;
   value: string;
 }
@@ -48,27 +56,12 @@ export interface FavQuery {
 
 const norm = (s: string) => s.trim().toLowerCase();
 
-/**
- * `센터#MR#병원명#미판독` → 조건.
- * labelToKey: 한글 컬럼 라벨 → 컬럼 키(호출부가 COLUMN_DEFS 로 만들어 넘긴다 — 순수성 유지).
- */
-export function parseFavQuery(text: string, labelToKey: Record<string, string> = {}): FavQuery {
+/** `센터#MR#병원명#미판독` → 조건. `CT` 한 개짜리도 그대로 통한다(`#` 은 구분자일 뿐). */
+export function parseFavQuery(text: string): FavQuery {
   const out: FavQuery = { server: {}, client: [], notes: [] };
   for (const raw of (text ?? "").split("#")) {
     const tok = raw.trim();
     if (!tok) continue;
-
-    // ① 명시형 — `필드=값` / `필드:값`
-    const m = tok.match(/^([^=:]+)\s*[=:]\s*(.+)$/);
-    if (m) {
-      const key = labelToKey[m[1].trim()] ?? labelToKey[norm(m[1])] ?? m[1].trim();
-      const val = m[2].trim();
-      if (val) {
-        out.client.push({ field: key, value: val });
-        out.notes.push(`${m[1].trim()}=${val}`);
-      }
-      continue;
-    }
 
     // ② 상태 낱말
     const st = FAV_STATUS_WORDS[tok] ?? FAV_STATUS_WORDS[norm(tok)];
@@ -86,7 +79,7 @@ export function parseFavQuery(text: string, labelToKey: Record<string, string> =
       continue;
     }
 
-    // ④ 자유어 — 모든 표시 값 대상
+    // ④ 그 밖 — 워크리스트 항목 전체와 대조(사용자는 값만 쓴다)
     out.client.push({ field: "", value: tok });
     out.notes.push(tok);
   }
@@ -103,7 +96,7 @@ export function rowHaystack(row: Record<string, unknown>): string {
   return parts.join(" ").toLowerCase();
 }
 
-/** 한 조건이 행에 맞는가. 명시형은 그 컬럼만, 자유어는 표시 값 전체. */
+/** 한 조건이 행에 맞는가. field 가 지정된 경우만 그 컬럼, 기본은 항목 전체. */
 export function matchesCond(row: Record<string, unknown>, c: FavCond): boolean {
   const want = norm(c.value);
   if (!want) return true;
@@ -120,11 +113,6 @@ export function matchesCond(row: Record<string, unknown>, c: FavCond): boolean {
 export function applyFavFilter<T>(rows: T[], conds: FavCond[]): T[] {
   if (!conds?.length) return rows;
   return rows.filter((r) => conds.every((c) => matchesCond(r as Record<string, unknown>, c)));
-}
-
-/** 이 입력을 Search Favorite 문법으로 볼 것인가 — `#` 가 있으면 조건 나열로 읽는다. */
-export function looksLikeFavQuery(text: string): boolean {
-  return (text ?? "").includes("#");
 }
 
 // ── 저장 목록(계정 로밍: worklist.prefs.search_favs) ─────────────────────

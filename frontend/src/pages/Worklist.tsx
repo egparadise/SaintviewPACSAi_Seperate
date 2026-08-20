@@ -76,7 +76,7 @@ import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { openReportWindow, screenFeatures, screenFeaturesList } from "../lib/screens";
 import {
-  applyFavFilter, looksLikeFavQuery, parseFavQuery, readFavs, removeFav, upsertFav,
+  applyFavFilter, parseFavQuery, readFavs, removeFav, upsertFav,
   type SearchFav,
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
@@ -528,7 +528,7 @@ function ActionToolbar({
         placeholder={searchMode === "ai"
           ? tr("AI 검색 — 예: 지난주 흉부 CT 미판독")
           : searchMode === "fav"
-          ? tr("Search Favorite — 조건을 # 로 나열 (예: 센터#MR#병원명#미판독 · 항목=값 도 가능)")
+          ? tr("Search Favorite — 조건을 # 로 나열 (예: 센터#MR#병원명#미판독). 조건이 하나면 그냥 CT")
           : tr("SEARCH — 선택한 범위에서 검색 (=정확 / 접두% / !제외 · 공백=다중어)")}
         value={searchText}
         name="wl-q" autoComplete="off" autoCorrect="off" spellCheck={false}
@@ -2977,6 +2977,10 @@ export function Worklist() {
     setSort((cur) => (key ? nextChipSort(cur, key, pin) : null)), []);
   // ── 통합 검색창(2026-08-10) — 방식·범위·결합은 설정>워크리스트>검색창 설정(계정 저장) ──
   const [searchMode, setSearchModeState] = useState<SearchMode>(DEFAULT_SEARCH_BOX.mode);
+  // 검색이 Fav(조건 나열)인지는 **모드**가 정한다 — `#` 유무가 아니다(2026-08-20 사용자 확정).
+  // setState 직후 커밋되는 경로(Favorite 클릭 등)를 위해 ref 로도 들고 있다.
+  const searchModeRef = useRef<SearchMode>(DEFAULT_SEARCH_BOX.mode);
+  useEffect(() => { searchModeRef.current = searchMode; }, [searchMode]);
   // Search Favorite 저장 목록(2026-08-19) — 계정 로밍(worklist.prefs.search_favs).
   // 좌측 레일에 뜨고, 툴바 💾 로 지금 입력식을 이름 붙여 담는다.
   const [sfavs, setSfavs] = useState<SearchFav[]>([]);
@@ -2988,6 +2992,7 @@ export function Worklist() {
   const sbRef = useRef<{ fields: string[]; op: "and" | "or" }>({ fields: DEFAULT_SEARCH_BOX.fields, op: DEFAULT_SEARCH_BOX.op });
   const setSearchMode = useCallback((m: SearchMode) => {
     setSearchModeState(m);
+    searchModeRef.current = m;      // 같은 틱에 커밋되는 경로가 옛 모드로 조회하지 않도록
     // 모드 전환은 계정에 기억(다음 접속 기본값) — 병합 저장으로 다른 키 보존
     api.getSetting("worklist.prefs").then((r) => {
       const sb = ((r.value as { search_box?: object }).search_box ?? {}) as Record<string, unknown>;
@@ -3275,7 +3280,7 @@ export function Worklist() {
         const nf = { ...filtersRef.current, status: ds.next };
         filtersRef.current = nf;
         setFilters(nf);
-        setCommitted({ filters: nf, searchText: searchRef.current });
+        setCommitted({ filters: nf, searchText: searchRef.current, favMode: searchModeRef.current === "fav" });
       }
       // 공통 컬럼(read_state 도입 전 저장분엔 판독 컬럼을 맨 앞에 가산 보정) + 뷰어별 오버라이드
       if (v.columns?.length) {
@@ -3326,22 +3331,28 @@ export function Worklist() {
   const applyAndSearch = useCallback((patch?: {
     filters?: Record<string, string> | ((f: Record<string, string>) => Record<string, string>);
     searchText?: string;
+    /** 모드 state 가 아직 반영되기 전(같은 틱)에 커밋하는 경로가 명시로 넘긴다. */
+    favMode?: boolean;
   }) => {
     const pf = patch?.filters;
     let nextF = typeof pf === "function" ? pf(filtersRef.current) : (pf ?? filtersRef.current);
     const nextQ = patch?.searchText ?? searchRef.current;
-    // Search Favorite 문법('#' 로 조건 나열) — 서버가 아는 상태·장비만 필터로 승격한다.
-    // 지정하지 않은 축은 **빈 값으로 지운다**: 앞선 검색의 상태/장비가 남아 있으면 사용자가 쓴
-    // 식과 실제 조회 조건이 달라진다(=화면에 안 보이는 조건이 결과를 바꾸는 사고).
-    if (looksLikeFavQuery(nextQ)) {
-      const fav = parseFavQuery(nextQ, columnLabelToKey());
+    // Search Favorite(조건 나열) 여부 = **검색창 모드**. `#` 은 조건 사이를 끊는 구분자일 뿐이라
+    // 조건이 하나면(`CT`) `#` 이 없다 — 그걸로 판정하면 한 조건짜리가 일반 검색어로 새어 나가
+    // 환자ID·이름에서 "CT" 를 찾다가 0건이 된다(실제 사고).
+    const favMode = patch?.favMode ?? (searchModeRef.current === "fav");
+    if (favMode && nextQ.trim()) {
+      // 서버가 아는 상태·장비만 필터로 승격한다. 지정하지 않은 축은 **빈 값으로 지운다**:
+      // 앞선 검색의 상태/장비가 남아 있으면 사용자가 쓴 식과 실제 조회 조건이 달라진다
+      // (=화면에 안 보이는 조건이 결과를 바꾸는 사고).
+      const fav = parseFavQuery(nextQ);
       nextF = { ...nextF, status: fav.server.status ?? "", modality: fav.server.modality ?? "" };
     }
     filtersRef.current = nextF;
     searchRef.current = nextQ;
     setFilters(nextF);
     setSearchText(nextQ);
-    setCommitted({ filters: nextF, searchText: nextQ });
+    setCommitted({ filters: nextF, searchText: nextQ, favMode });
     setPendingChange(false);        // 수동 모드 '변경 있음' 알림 띠는 커밋과 함께 내린다
     setRefreshKey((k) => k + 1);
   }, []);
@@ -3741,16 +3752,16 @@ export function Worklist() {
   // 지금 입력돼 있는 filters/searchText 를 그대로 커밋해 조회한다(= 눌러야 적용).
   const runSearch = useCallback(() => { applyAndSearch(); }, [applyAndSearch]);
 
-  /* Search Favorite 의 나머지 조건(자유어·`항목=값`)은 서버 파라미터가 없으므로 **받은 목록에서**
-     거른다. 워크리스트 상한이 1000건이라 실용적이고, 백엔드를 건드리지 않아 회귀면이 없다.
-     식에 '#' 가 없으면 원본 그대로 — 기존 검색 동작은 조금도 바뀌지 않는다. */
+  /* Fav 검색의 나머지 조건(부위·병원명 등)은 서버 파라미터가 없으므로 **받은 목록에서** 거른다.
+     워크리스트 상한이 1000건이라 실용적이고, 백엔드를 건드리지 않아 회귀면이 없다.
+     FAV 모드가 아니면 원본 그대로 — 기존 검색 동작은 조금도 바뀌지 않는다. */
   const gridItems = useMemo(() => {
     const q = committed.searchText ?? "";
-    const filtered = looksLikeFavQuery(q)
-      ? applyFavFilter(items, parseFavQuery(q, columnLabelToKey()).client)
+    const filtered = committed.favMode && q.trim()
+      ? applyFavFilter(items, parseFavQuery(q).client)
       : items;
     return sortRows(filtered, sort);   // 헤더 클릭 정렬 — 정렬이 없으면 서버가 준 순서 그대로
-  }, [items, committed.searchText, sort]);
+  }, [items, committed.searchText, committed.favMode, sort]);
 
   /** 💾 — 지금 입력한 식을 이름 붙여 Search Favorite 에 저장(같은 이름이면 수정). */
   const saveSearchFav = useCallback(() => {
@@ -3763,7 +3774,7 @@ export function Worklist() {
 
   /** 좌측 레일의 Search Favorite 행 동작 — 적용·수정·삭제 */
   const onSearchFav = useCallback((act: { type: "apply" | "edit" | "del" }, f: SearchFav) => {
-    if (act.type === "apply") { setSearchMode("fav"); applyAndSearch({ searchText: f.query }); return; }
+    if (act.type === "apply") { setSearchMode("fav"); applyAndSearch({ searchText: f.query, favMode: true }); return; }
     if (act.type === "del") {
       if (window.confirm(`'${f.name}' ${tr("검색 즐겨찾기를 삭제할까요?")}`)) saveSfavs(removeFav(sfavs, f.name));
       return;

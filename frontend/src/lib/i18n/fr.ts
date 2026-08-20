@@ -2922,5 +2922,6 @@ const d: Record<string, string> = {
   "비교 화면의": "Dans la vue de comparaison,",
   "개 영역을 각각 결합했습니다(연속 스크롤·시네로 비교)": " zones combinées séparément (comparez par défilement ou ciné)",
   "상태로 필터 · 클릭할 때마다 이 항목 기준 정렬 ↔ 역순 ↔ 해제": "filtrer par statut · chaque clic trie selon cet élément ↔ inverse ↔ désactivé",
+  "Search Favorite — 조건을 # 로 나열 (예: 센터#MR#병원명#미판독). 조건이 하나면 그냥 CT": "Search Favorite — listez les conditions avec # (ex. centre#MR#hôpital#non lu). Une seule ? Tapez CT",
 };
 export default d;
