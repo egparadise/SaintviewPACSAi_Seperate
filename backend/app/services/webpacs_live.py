@@ -375,6 +375,10 @@ def live_worklist(db: Session, params: dict[str, Any], user: dict | None = None)
         q["study_body_part"] = str(params["body_part"])
     if params.get("desc"):
         q["study_description"] = str(params["desc"])
+    # 센터 — A 의 free-text(study_search)가 유일하게 안 훑는 축이라 **필드로** 보내야 한다.
+    # (병원명은 free-text 에 포함된다 — get_study_search 의 OR 목록에 hospital_name 이 있다.)
+    if params.get("center"):
+        q["center_name"] = str(params["center"])
     if str(params.get("emergency") or "").lower() in ("1", "true", "y"):
         q["study_emergency"] = ["ER"]           # A 는 멀티셀렉트(_row_of 의 판정과 같은 코드)
     # 상태 — **판독중·확정만** 보낸다.

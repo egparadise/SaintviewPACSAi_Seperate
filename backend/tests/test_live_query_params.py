@@ -83,6 +83,13 @@ def test_미판독은_보내지_않는다_AI_가_사라지기_때문(spy):
     assert "study_status" not in _call(spy, status="")
 
 
+def test_센터는_필드로_보낸다_free_text_가_안_훑는_유일한_축(spy):
+    """A 의 워크리스트 free-text(study_search)가 OR 로 훑는 컬럼에는 hospital_name 은 있고
+    **center_name 만 없다**(dependencies/Study.get_study_search). 그래서 센터는 필드로 보내야 한다."""
+    assert _call(spy, center="써밋영상의원")["center_name"] == "써밋영상의원"
+    assert "center_name" not in _call(spy, center="")
+
+
 def test_기간_환자_자유어는_종전대로(spy):
     q = _call(spy, pid="P1", pname="김지숙", q="Brain",
               date_from="20260101", date_to="20260131")

@@ -34,6 +34,27 @@ export const FAV_STATUS_WORDS: Record<string, string> = {
   "보류": "suspended", "초안": "draft", "ai초안": "draft_ready", "검토중": "in_review",
 };
 
+/**
+ * 사전으로 **센터 토큰을 서버 조건으로 올린다**(2026-08-21).
+ *
+ * A 의 워크리스트 free-text 검색은 병원명까지 훑지만 **center_name 만 빠져 있다**
+ * (webpacs_api dependencies/Study.get_study_search). 그 하나 때문에 자유어를 A 에 못 보내고
+ * 받은 목록(건수 상한 안)에서만 걸러야 했다. 센터를 알아보면 A 가 필드 파라미터로 걸러 주므로
+ * 상한을 벗어난다.
+ *
+ * isCenter 판정은 호출부가 넘긴다 — 이 모듈은 사전을 모른다(순수 유지).
+ * 확정할 수 없는 토큰은 **건드리지 않는다**: 애매하면 클라이언트가 거르는 쪽이 언제나 안전하다.
+ */
+export function promoteCenter(q: FavQuery, isCenter: (t: string) => boolean): FavQuery {
+  const hit = q.client.find((c) => !c.field && isCenter(c.value));
+  if (!hit) return q;
+  return {
+    server: { ...q.server, center: hit.value },
+    client: q.client.filter((c) => c !== hit),
+    notes: q.notes,
+  };
+}
+
 /** 조건 나열 검색이 훑는 범위 — **전 항목**(2026-08-20 사용자 확정).
  *  사용자가 어느 항목인지 지정하지 않으므로 토큰 하나가 이 전부를 OR 로 훑고, 토큰끼리 AND 다.
  *  백엔드 study_service._QUERY_FIELD_COLS 와 1:1 — 한쪽만 늘리면 조용히 갈린다.
@@ -64,7 +85,7 @@ export interface FavCond {
 }
 
 export interface FavQuery {
-  /** 서버로 보낼 필터 — 기존 WlFilters 키만 쓴다(status·modality) */
+  /** 서버로 보낼 필터 — 기존 WlFilters 키만 쓴다(status·modality·center) */
   server: Record<string, string>;
   /** 받은 목록에서 거를 조건들(AND) */
   client: FavCond[];

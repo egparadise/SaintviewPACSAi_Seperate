@@ -30,6 +30,9 @@ export interface CommittedQuery {
 /** filters 키 그대로 서버 파라미터가 되는 항목들 (날짜만 별도 변환) */
 export const WL_PASSTHROUGH_KEYS = [
   "pid", "pname", "sex", "desc", "modality", "status", "body_part", "finding", "emergency", "key",
+  // center — Live 에서만 채워진다(A 의 free-text 가 유일하게 안 훑는 축). 로컬 DB 에는 센터 원천이
+  // 없어 값이 생기지 않고, 모르는 쿼리 파라미터는 서버가 무시하므로 일반 모드에 해가 없다.
+  "center",
 ] as const;
 
 /** Live(원격 A 직결)에서 지원하는 파라미터 — 나머지 필터는 라이브에선 무시된다.
@@ -37,6 +40,9 @@ export const WL_PASSTHROUGH_KEYS = [
  *  여태 안 보내서, 필터바에 부위를 넣어도 Live 에서는 조용히 무시됐다. */
 export const LIVE_QUERY_KEYS = [
   "q", "pid", "pname", "modality", "body_part", "desc", "emergency", "status",
+  // center — A 의 free-text 는 병원명은 훑지만 **센터명만 빠져 있다**. 그래서 센터는 필드로
+  // 보내야 서버가 걸러 준다(2026-08-21). 어느 토큰이 센터인지는 lib/centerDict 가 판정한다.
+  "center",
   "date_from", "date_to", "limit", "offset",
 ] as const;
 

@@ -76,11 +76,12 @@ import { GridPicker } from "../lib/GridPicker";
 import { IN_EXAM_STATUSES, IN_STATUS_MAP } from "../lib/infiConfig";
 import { openReportWindow, screenFeatures, screenFeaturesList } from "../lib/screens";
 import {
-  applyFavFilter, clientCondsFor, parseFavQuery, readFavs, removeFav, upsertFav,
+  applyFavFilter, clientCondsFor, parseFavQuery, promoteCenter, readFavs, removeFav, upsertFav,
   type SearchFav,
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
 import { liveFetchLimit, liveMaybeTruncated, liveStatusOnServer } from "../lib/worklistQuery";
+import { collectDict, dictEmpty, isCenterName, loadDict, saveDict } from "../lib/centerDict";
 import { showToast } from "../lib/toast";
 import { installApp } from "../lib/pwa";
 import { onStudySync, onViewerCloseAll, onViewerOpened, postStudySync, postViewerAddTab } from "../lib/sync";
@@ -2977,9 +2978,26 @@ export function Worklist() {
   // 헤더 클릭 정렬(2026-08-19 사용자 확정) — 컬럼마다 순 ↔ 역이 번갈아 바뀐다.
   // 규칙(첫 방향·비교·빈 값)은 lib/gridSort 한 곳. null = 서버가 준 기본 순서.
   const [sort, setSort] = useState<SortState | null>(null);
+  /** 판독센터 이름 사전(2026-08-21) — 조건 나열 검색에서 '이 토큰은 센터다' 를 알아보는 근거.
+   *  A 의 /center/list 는 관리자 전용이라 못 받는다. 그래서 **이미 온 행에서** 모은다 —
+   *  행에서 왔다는 것은 A 에 실재하는 값이라는 뜻이라, 승격해도 0건이 되지 않는다. */
+  const centerDictRef = useRef(loadDict());
   const onSortCol = useCallback((key: string) => setSort((cur) => nextSort(cur, key)), []);
   /** 상단 카운트 칩 클릭 — 그 항목 기준 정렬(다시 누르면 역순, 한 번 더 누르면 해제).
    *  key 가 빈 문자열이면('전체' 칩) 정렬을 걷어낸다 = 서버가 준 기본 순서로. */
+  /** 조건 나열 파싱 + 센터 승격 — **조회와 표시 필터가 반드시 같은 결과**를 써야 한다.
+   *  갈리면 서버가 이미 거른 조건을 클라이언트가 또 걸러 0건이 된다. */
+  const favOf = useCallback((text: string) => {
+    const q = parseFavQuery(text);
+    const d = centerDictRef.current;
+    // 승격은 **Live 에서만** 한다. 로컬 DB 에는 센터 원천이 없어(study_service 가 공란을 넣는다)
+    // 승격해 봐야 서버가 거를 수 없고, 클라이언트 조건에서는 빠지므로 **조건이 증발**한다.
+    if (!liveModeRef.current || dictEmpty(d)) return q;
+    return promoteCenter(q, (t) => isCenterName(d, t));
+  }, []);
+
+  useEffect(() => { favOfRef.current = favOf; }, [favOf]);
+
   const onChipSort = useCallback((key: string, pin?: string) =>
     setSort((cur) => (key ? nextChipSort(cur, key, pin) : null)), []);
   // ── 통합 검색창(2026-08-10) — 방식·범위·결합은 설정>워크리스트>검색창 설정(계정 저장) ──
@@ -3025,6 +3043,9 @@ export function Worklist() {
   // WebPACS Live(A 직결) — 워크리스트 데이터 소스를 원격 PACS 실시간 조회로 전환(복사 없음).
   // 검사 id 는 vid(≥90M) — api.* 가 자동으로 /api/webpacs/live 로 라우팅해 뷰어·판독이 그대로 동작
   const liveMode = serverMode === "live";
+  // 의존성 없는 콜백(applyAndSearch·favOf)이 최신 모드를 읽기 위한 거울
+  const liveModeRef = useRef(liveMode);
+  useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
   // EXAM CONTROL (레인 F) — 관리자 역할일 때만 탭 노출, 선택 시 본문을 검사 QC 화면으로 전환.
   // 탭 바는 TY·In 양 모드 공유이므로 두 모드 모두 자동 지원. 워크리스트 탭 클릭 시 원복.
   const isAdminRole = (localStorage.getItem("sv_role") ?? sessionStorage.getItem("sv_role") ?? "") === "admin";
@@ -3325,6 +3346,9 @@ export function Worklist() {
   const lastDefaultStatusRef = useRef<string | null>(null);
 
   const filtersRef = useRef(filters);
+  /** favOf 거울 — applyAndSearch 는 useCallback([]) 이라 최신 함수를 직접 못 잡는다.
+   *  파싱·승격을 **한 곳(favOf)** 으로 모아 두어야 조회와 표시 필터가 갈리지 않는다. */
+  const favOfRef = useRef<(t: string) => ReturnType<typeof parseFavQuery>>((t) => parseFavQuery(t));
   const searchRef = useRef(searchText);
   useEffect(() => { filtersRef.current = filters; searchRef.current = searchText; }, [filters, searchText]);
 
@@ -3352,8 +3376,9 @@ export function Worklist() {
       // 서버가 아는 상태·장비만 필터로 승격한다. 지정하지 않은 축은 **빈 값으로 지운다**:
       // 앞선 검색의 상태/장비가 남아 있으면 사용자가 쓴 식과 실제 조회 조건이 달라진다
       // (=화면에 안 보이는 조건이 결과를 바꾸는 사고).
-      const fav = parseFavQuery(nextQ);
-      nextF = { ...nextF, status: fav.server.status ?? "", modality: fav.server.modality ?? "" };
+      const fav = favOfRef.current(nextQ);
+      nextF = { ...nextF, status: fav.server.status ?? "", modality: fav.server.modality ?? "",
+                center: fav.server.center ?? "" };
     }
     filtersRef.current = nextF;
     searchRef.current = nextQ;
@@ -3455,7 +3480,7 @@ export function Worklist() {
       // 받지 않는다). 그래서 **거를 조건이 있을 때만** 넉넉히 받는다 — 규칙은 lib/worklistQuery.
       // 조건이 없으면 예전 그대로 1000건이라 평소 조회는 무거워지지 않는다.
       const liveConds = committed.favMode && (committed.searchText ?? "").trim()
-        ? clientCondsFor(parseFavQuery(committed.searchText),
+        ? clientCondsFor(favOf(committed.searchText),
                          { liveMode: true, statusOnServer: liveStatusOnServer }).length
         : 0;
       const liveLimit = liveFetchLimit(liveConds);
@@ -3463,6 +3488,10 @@ export function Worklist() {
         .then((r) => {
           setItems(r.items);
           setTotal(r.total);
+          // 센터 사전 갱신 — 본 목록에서 자란다(다음 검색부터 그 센터를 서버로 넘길 수 있다)
+          const nd = collectDict(centerDictRef.current, r.items);
+          centerDictRef.current = nd;
+          saveDict(nd);
           // 상한에 닿았으면 그 너머는 보지 못했다 — 조용히 자르지 않고 알린다.
           setLiveErr(liveConds > 0 && liveMaybeTruncated(r.items.length, liveLimit)
             ? tr("받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다")
@@ -3776,7 +3805,7 @@ export function Worklist() {
   const gridItems = useMemo(() => {
     const q = committed.searchText ?? "";
     const filtered = committed.favMode && q.trim()
-      ? applyFavFilter(items, clientCondsFor(parseFavQuery(q),
+      ? applyFavFilter(items, clientCondsFor(favOf(q),
                                              { liveMode, statusOnServer: liveStatusOnServer }))
       : items;
     return sortRows(filtered, sort);   // 헤더 클릭 정렬 — 정렬이 없으면 서버가 준 순서 그대로
