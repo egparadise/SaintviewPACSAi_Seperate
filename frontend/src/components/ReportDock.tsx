@@ -12,6 +12,7 @@ import {
   PRIOR_FILTER_LABEL, filterPriors, isAll, loadPriorFilter, nextPriorFilter, savePriorFilter,
   type PriorFilter,
 } from "../lib/priorFilter";
+import { groupByModality, initialOpenKeys } from "../lib/phraseGroups";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   detail: StudyDetail;
@@ -40,6 +41,10 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   const dictGateRef = useRef(false);
   const [histView, setHistView] = useState<Report | null>(null);
   const [dockPhrases, setDockPhrases] = useState<PhraseRow[]>([]);
+  /** 단축키·템플릿을 **모달리티별로** 접었다 편다(2026-08-21 사용자 확정).
+   *  처음에는 **지금 판독할 검사의 모달리티**(+공통)만 펼친다 — 상관없는 단축키가 펼쳐져 있으면
+   *  그걸 이 검사용이라고 오해한다. 규칙은 lib/phraseGroups 한 곳. */
+  const [openGrp, setOpenGrp] = useState<Set<string> | null>(null);
   // Setting>판독(Reading) 옵션 — report.prefs
   const [rdOpts, setRdOpts] = useState<{
     cvr_notice?: boolean; save_alert?: boolean; panel_tab?: string; sidebar_tab?: string;
@@ -535,27 +540,54 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
         </div>
       )}
 
-      {(dockTab === "std" || dockTab === "tpl") && (
+      {(dockTab === "std" || dockTab === "tpl") && (() => {
+        const kind = dockTab === "std" ? "phrase" : "template";
+        const rows = dockPhrases.filter((p) => p.kind === kind);
+        const groups = groupByModality(rows);
+        // 처음 한 번만 '현재 모달리티(+공통)' 를 펼친다. 그 뒤로는 사용자가 접고 편 상태를 존중한다.
+        const open = openGrp ?? initialOpenKeys(groups, detail.modality);
+        const toggle = (k: string) => setOpenGrp(() => {
+          const n = new Set(open);
+          if (n.has(k)) n.delete(k); else n.add(k);
+          return n;
+        });
+        return (
         <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-          {dockPhrases.filter((p) => p.kind === (dockTab === "std" ? "phrase" : "template")).map((p) => (
-            <div key={p.id}
-                 onClick={() => dockTab === "std" ? dockInsert(p) : dockApplyTemplate(p)}
-                 title={`${p.reading_text ? `${tr("[판독]")} ${p.reading_text}\n` : ""}${p.text ? `${tr("[결론]")} ${p.text}` : ""}`}
-                 style={{ padding: "5px 8px", fontSize: 11.5, cursor: "pointer", borderBottom: "1px solid #24282d" }}
-                 onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--bg-hover)")}
-                 onMouseLeave={(ev) => (ev.currentTarget.style.background = "")}>
-              {p.category && <span style={{ color: "var(--text-secondary)" }}>[{tr(p.category)}] </span>}
-              {p.name}
-              {p.shortcut && <span style={{ color: "var(--accent)", float: "right" }}>Alt+{p.shortcut}</span>}
+          {groups.map((g) => (
+            <div key={g.key || "__common"}>
+              {/* 그룹 머리 — 클릭하면 접었다 편다. 개수를 함께 보여 준다(그림2). */}
+              <div onClick={() => toggle(g.key)}
+                   style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px",
+                            fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                            background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)",
+                            color: open.has(g.key) ? "var(--accent)" : "var(--text-secondary)" }}>
+                <span style={{ width: 9 }}>{open.has(g.key) ? "−" : "+"}</span>
+                {g.label}
+                <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>({g.items.length})</span>
+              </div>
+              {open.has(g.key) && g.items.map((p) => (
+                <div key={p.id}
+                     onClick={() => dockTab === "std" ? dockInsert(p) : dockApplyTemplate(p)}
+                     title={`${p.reading_text ? `${tr("[판독]")} ${p.reading_text}\n` : ""}${p.text ? `${tr("[결론]")} ${p.text}` : ""}`}
+                     style={{ padding: "5px 8px 5px 18px", fontSize: 11.5, cursor: "pointer",
+                              borderBottom: "1px solid #24282d" }}
+                     onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--bg-hover)")}
+                     onMouseLeave={(ev) => (ev.currentTarget.style.background = "")}>
+                  {p.category && <span style={{ color: "var(--text-secondary)" }}>[{tr(p.category)}] </span>}
+                  {p.name}
+                  {p.shortcut && <span style={{ color: "var(--accent)", float: "right" }}>Alt+{p.shortcut}</span>}
+                </div>
+              ))}
             </div>
           ))}
-          {dockPhrases.filter((p) => p.kind === (dockTab === "std" ? "phrase" : "template")).length === 0 && (
+          {rows.length === 0 && (
             <div style={{ padding: 10, fontSize: 11, color: "var(--text-secondary)" }}>
               No {dockTab === "std" ? "shortcuts" : "templates"} — register in Settings &gt; Reading
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

@@ -18,6 +18,7 @@ import { LANGS, coverage, setLang, t as tr, useLang } from "../lib/i18n";
 import { COMBINE_RULE_DEFAULT, readCombineRule, type CombineRule } from "../lib/combineRule";
 import { AUTO_AFTER_SAVE_DEFAULT, AUTO_AFTER_SAVE_ITEMS, readAutoAfterSave,
          type AutoAfterSave } from "../lib/readingAuto";
+import { groupByModality } from "../lib/phraseGroups";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
 import { setSttEnabled } from "../lib/sttLang";
 import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
@@ -3557,6 +3558,10 @@ function ReadingItemEditor({ kind, items, reload, liveItems }: {
   const liveList = (liveItems ?? []).filter((p) => p.kind === kind);
   const label = kind === "phrase" ? "단축키" : "템플릿";
   const [sel, setSel] = useState<PhraseRow | null>(null);
+  /** 모달리티별 접기(2026-08-21 사용자 확정 — 그림1). 설정 화면은 **전부 펼친 채** 시작한다:
+   *  여기서는 '무엇이 등록돼 있나' 를 한눈에 보는 것이 목적이라, 접혀 있으면 오히려 못 찾는다.
+   *  (판독창은 반대로 지금 검사의 모달리티만 펼친다 — 그쪽은 '지금 쓸 것' 을 고르는 자리다.) */
+  const [closedGrp, setClosedGrp] = useState<Set<string>>(new Set());
   const empty = { name: "", modality: "", shortcut: "", reading_text: "", text: "" };
   const [f, setF] = useState(empty);
   const [cap, setCap] = useState(false);
@@ -3587,23 +3592,43 @@ function ReadingItemEditor({ kind, items, reload, liveItems }: {
                   onClick={() => { setSel(null); setF(empty); }}>＋ {tr(label)} {tr("추가")}</button>
         </div>
         <div style={{ flex: 1, overflow: "auto", border: "1px solid var(--border)", borderRadius: 4 }}>
-          {list.map((p) => (
-            <div key={p.id} onClick={() => setSel(p)}
-                 style={{ padding: "6px 10px", fontSize: 12, cursor: "pointer", borderBottom: "1px solid #24282d",
-                          display: "flex", gap: 6, alignItems: "center",
-                          background: sel?.id === p.id ? "var(--accent-subtle)" : undefined }}>
-              <span style={{ color: "var(--text-secondary)" }}>[{p.modality || tr("공통")}]</span>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
-              {p.shortcut && <span style={{ color: "var(--accent)" }}>Alt+{p.shortcut}</span>}
-              <button style={{ padding: "0 6px", fontSize: 11 }} onClick={async (e) => {
-                e.stopPropagation();
-                if (!window.confirm(`'${p.name}'${tr("을 삭제할까요?")}`)) return;
-                await api.deletePhrase(p.id);
-                if (sel?.id === p.id) setSel(null);
-                reload();
-              }}>✕</button>
+          {/* 모달리티별 분류(그림1) — 머리를 누르면 접었다 편다. 규칙은 lib/phraseGroups 한 곳. */}
+          {groupByModality(list).map((g) => {
+            const open = !closedGrp.has(g.key);
+            return (
+            <div key={g.key || "__common"}>
+              <div onClick={() => setClosedGrp((prev) => {
+                     const n = new Set(prev);
+                     if (n.has(g.key)) n.delete(g.key); else n.add(g.key);
+                     return n;
+                   })}
+                   style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px",
+                            fontSize: 12, fontWeight: 700, cursor: "pointer",
+                            background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)" }}>
+                <span style={{ width: 9 }}>{open ? "−" : "+"}</span>
+                {g.label}
+                <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>({g.items.length})</span>
+              </div>
+              {open && g.items.map((p) => (
+                <div key={p.id} onClick={() => setSel(p)}
+                     style={{ padding: "6px 10px 6px 20px", fontSize: 12, cursor: "pointer",
+                              borderBottom: "1px solid #24282d",
+                              display: "flex", gap: 6, alignItems: "center",
+                              background: sel?.id === p.id ? "var(--accent-subtle)" : undefined }}>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
+                  {p.shortcut && <span style={{ color: "var(--accent)" }}>Alt+{p.shortcut}</span>}
+                  <button style={{ padding: "0 6px", fontSize: 11 }} onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!window.confirm(`'${p.name}'${tr("을 삭제할까요?")}`)) return;
+                    await api.deletePhrase(p.id);
+                    if (sel?.id === p.id) setSel(null);
+                    reload();
+                  }}>✕</button>
+                </div>
+              ))}
             </div>
-          ))}
+            );
+          })}
           {list.length === 0 && (
             <div style={{ padding: 16, fontSize: 12, color: "var(--text-secondary)", textAlign: "center" }}>
               {tr("등록된")} {tr(label)}{tr("가 없습니다.")}
