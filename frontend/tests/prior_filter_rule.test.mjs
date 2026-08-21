@@ -85,6 +85,30 @@ test("기억값이 깨져 있어도 화면이 죽지 않는다", () => {
     "값이 이상해도 불리언으로 정리한다");
 });
 
+test("★ 과거검사가 나오는 **모든 화면**에 분류가 있어야 한다", () => {
+  // 2026-08-21 사용자 지적: 뷰어 안 도크(ReportDock)에만 넣고 **판독창(ReportWindow)은 빠뜨렸다**.
+  // 둘은 별도 컴포넌트인데 사용자에게는 같은 'History' 다 — 한쪽만 되면 고장으로 보인다.
+  for (const f of ["src/components/ReportDock.tsx", "src/pages/ReportWindow.tsx"]) {
+    const t = src(f);
+    assert.match(t, /filterPriors\(/, `${f}: 목록에 분류를 적용해야 한다`);
+    assert.match(t, /PRIOR_FILTER_LABEL\[k\]/, `${f}: 체크박스 3개`);
+    assert.match(t, /savePriorFilter\(nx\)/, `${f}: 고른 분류를 기억한다`);
+    // 규칙 복제 금지 — 두 화면이 각자 판정을 들고 있으면 반드시 갈린다
+    assert.ok(!/normPart\s*=|PRIOR_FILTER_OFF\s*=/.test(t), `${f}: 판정 규칙을 복제하면 갈린다`);
+  }
+});
+
+test("판독창은 Same Compare 와 함께 걸린다 — 둘 다 만족하는 것만", () => {
+  const t = src("src/pages/ReportWindow.tsx");
+  const i = t.indexOf("const histList =");
+  assert.ok(i > 0, "History 목록 구성부를 찾지 못했다");
+  const body = t.slice(i, i + 400);
+  assert.ok(body.includes("filterPriors(detail, [...detail.related_exams], pf)"),
+    "분류를 먼저 적용한다");
+  assert.ok(body.includes(".filter((e) => !sameCompare"),
+    "그 뒤 Same Compare 를 이어 건다 — 둘은 서로를 대체하지 않는다");
+});
+
 test("배선 — 도크가 필터를 쓰고, 썸네일은 전체 기준으로 미리 받는다", () => {
   const d = src("src/components/ReportDock.tsx");
   assert.match(d, /filterPriors\(detail, relAll, pf\)/, "화면에는 필터된 목록만");

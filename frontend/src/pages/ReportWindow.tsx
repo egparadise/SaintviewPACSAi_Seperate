@@ -14,6 +14,10 @@ import { setSttEnabled } from "../lib/sttLang";
 import { buildVocab, currentPrefix, mergeVocab, suggestWords } from "../lib/wordComplete";
 import { t as tr, useLang } from "../lib/i18n";
 import { navAfterSave, readAutoAfterSave } from "../lib/readingAuto";
+import {
+  PRIOR_FILTER_LABEL, filterPriors, isAll, loadPriorFilter, nextPriorFilter, savePriorFilter,
+  type PriorFilter,
+} from "../lib/priorFilter";
 
 // 설정 모달은 무겁다 — 톱니를 누를 때만 불러온다(판독창 첫 로딩을 늦추지 않는다).
 const SettingsModalLazy = lazy(() => import("./SettingsModal").then((m) => ({ default: m.SettingsModal })));
@@ -72,6 +76,12 @@ export function ReportWindow() {
   const [relatedView, setRelatedView] = useState<{ label: string; text: string } | null>(null);
   const [selPast, setSelPast] = useState<number | null>(null);   // History 에서 단일 클릭한 과거 검사(기준·하이라이트)
   const [sameCompare, setSameCompare] = useState(false);          // Same Compare — 선택 기준과 같은 장비·검사명만
+  /** 과거검사 분류(2026-08-20 사용자 확정) — SameModality · SameBodyPart · All.
+   *  ⚠ 뷰어 안 도크(components/ReportDock)에는 넣었는데 **판독창은 별도 컴포넌트**라 빠져 있었다
+   *  (2026-08-21 사용자 지적). 규칙은 lib/priorFilter 한 곳이므로 여기서는 화면만 붙인다. */
+  const [pf, setPf] = useState<PriorFilter>(() => loadPriorFilter());
+  const applyPf = (k: "modality" | "bodyPart" | "all") =>
+    setPf((cur) => { const nx = nextPriorFilter(cur, k); savePriorFilter(nx); return nx; });
   const grabRef = useRef(false);   // 판독 텍스트를 좌클릭 잡은 상태(누른 채 V=붙여넣기)
   const [fontPx, setFontPx] = useState(12);
   const [reading, setReading] = useState("");
@@ -678,7 +688,7 @@ export function ReportWindow() {
     ) : null;
   // History 목록 — Same Compare 시 선택 기준(refExam)과 같은 장비·검사명(부위)만, 검사일 최신순
   const refExam = detail.related_exams.find((e) => e.id === selPast) ?? null;
-  const histList = [...detail.related_exams]
+  const histList = filterPriors(detail, [...detail.related_exams], pf)
     .filter((e) => !sameCompare || !refExam || (e.modality === refExam.modality && e.study_desc === refExam.study_desc))
     .sort((a, b) => (a.study_date < b.study_date ? 1 : a.study_date > b.study_date ? -1 : 0));
 
@@ -805,6 +815,26 @@ export function ReportWindow() {
                     {sameCompare && refExam && (
                       <span style={{ fontSize: 10.5, color: "var(--text-secondary)" }}>{refExam.modality}/{refExam.study_desc} {tr("기준")}</span>
                     )}
+                  </div>
+                  {/* 과거검사 분류 — 같은 장비 / 같은 부위 / 전부. 둘을 함께 켜면 둘 다 만족하는 것만.
+                      라벨은 사용자가 정한 제품 용어라 번역하지 않는다(비교값·제품명 tr 금지 규정). */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 10px",
+                                fontSize: 10.5, borderBottom: "1px solid var(--border)" }}>
+                    {(["modality", "bodyPart", "all"] as const).map((k) => (
+                      <label key={k} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}
+                             title={k === "all" ? tr("모든 과거검사를 보여 준다")
+                                    : k === "modality" ? tr("같은 장비로 촬영한 과거검사만")
+                                    : tr("같은 부위(Chest·Abdomen·Brain 등)를 촬영한 과거검사만")}>
+                        <input type="checkbox"
+                               checked={k === "all" ? isAll(pf) : pf[k]}
+                               onChange={() => applyPf(k)} />
+                        {PRIOR_FILTER_LABEL[k]}
+                      </label>
+                    ))}
+                    <span style={{ marginLeft: "auto", color: "var(--text-secondary)" }}
+                          title={tr("보이는 과거검사 / 전체")}>
+                      {histList.length}/{detail.related_exams.length}
+                    </span>
                   </div>
                   {/* 과거검사 이미지 — 단일클릭=판독 표시, 더블클릭=1:2 Compare 열기 */}
                   {histList.map((e) => (
