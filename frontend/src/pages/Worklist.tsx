@@ -83,6 +83,9 @@ import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../l
 import { sameFamily } from "../lib/phraseGroups";
 import { comboLabel, matchesCombo } from "../lib/hotkey";
 import {
+  AUTO_AFTER_SAVE_DEFAULT, navAfterSave, readAutoAfterSave, type AutoAfterSave,
+} from "../lib/readingAuto";
+import {
   COMPARE_SET_LABEL, DEFAULT_TV_COMPARE, candidateQuery, pickFresh, readTvCompare,
   type TvCompareCfg,
 } from "../lib/compareSet";
@@ -1758,10 +1761,14 @@ export function PhraseEditModal({ init, defaults, onSave, onClose }: {
 }
 
 /* ── [E] 상용구 패널 (DB 테이블 + Alt+단축키, 화면분석 §5.6) ─────── */
+/** 상용구 한 건이 리포트로 들어갈 때의 모양 — 판독과 결론이 **각자의 칸**으로 간다.
+ *  (2026-08-22 사용자 확정: "삽입을 누르면 Reading 과 Conclusion 부분에 항목별로 들어가야 한다") */
+export interface PhraseParts { reading_text?: string; text?: string; name?: string }
+
 function PhrasePanel({ onInsert, current, shortcutRef }: {
-  onInsert: (text: string) => void;
+  onInsert: (p: PhraseParts) => void;
   current: StudyDetail | null;
-  shortcutRef: React.MutableRefObject<Record<string, string>>;
+  shortcutRef: React.MutableRefObject<Record<string, PhraseParts>>;
 }) {
   const [items, setItems] = useState<PhraseRow[]>([]);
   const [sel, setSel] = useState<PhraseRow | null>(null);
@@ -1787,9 +1794,10 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
       setItems(all);
       // Alt+단축키 매핑을 루트 키보드 핸들러에 공급
       // 조합 문자열을 그대로 키로 쓴다(Alt 고정이 아니다 — 2026-08-22 사용자 확정).
+      // 값은 **항목 전체**다 — 단축키로 넣든 '삽입' 으로 넣든 결과가 같아야 한다.
       shortcutRef.current = Object.fromEntries(
         all.filter((p) => p.shortcut && p.kind !== "template")
-           .map((p) => [comboLabel(p.shortcut), p.text]));
+           .map((p) => [comboLabel(p.shortcut), p]));
     }).catch(() => {});
   }, [shortcutRef]);
   useEffect(load, [load]);
@@ -1814,7 +1822,7 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
         <label style={{ fontSize: 10, display: "flex", gap: 2, alignItems: "center", textTransform: "none" }}>
           <input type="checkbox" checked={fitOnly} onChange={(e) => setFitOnly(e.target.checked)} />{tr("맞춤")}
         </label>
-        <MiniBtn onClick={() => sel && onInsert(sel.text)} disabled={!sel}>{tr("삽입")}</MiniBtn>
+        <MiniBtn onClick={() => sel && onInsert(sel)} disabled={!sel}>{tr("삽입")}</MiniBtn>
         <MiniBtn onClick={() => setModal("new")}>New</MiniBtn>
         <MiniBtn onClick={() => setModal("edit")} disabled={!sel}>Edit</MiniBtn>
         <MiniBtn onClick={del} disabled={!sel}>Del</MiniBtn>
@@ -1827,7 +1835,7 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
             <tbody>
               {visible.map((p) => (
                 <tr key={p.id} className={sel?.id === p.id ? "selected" : ""}
-                    onClick={() => setSel(p)} onDoubleClick={() => onInsert(p.text)}>
+                    onClick={() => setSel(p)} onDoubleClick={() => onInsert(p)}>
                   <td>{p.category}</td><td title={p.text}>{p.name}</td>
                   <td style={{ color: "var(--accent)" }}>{p.shortcut && comboLabel(p.shortcut)}</td>
                 </tr>
@@ -1940,7 +1948,7 @@ const escHtml = (s: string) =>
 function ReportPanel({ detail, onChanged, insertRef, onNav }: {
   detail: StudyDetail | null;
   onChanged: () => void;
-  insertRef: React.MutableRefObject<((t: string) => void) | null>;
+  insertRef: React.MutableRefObject<((p: PhraseParts) => void) | null>;
   onNav?: (dir: 1 | -1) => void;
 }) {
   const [reports, setReports] = useState<Report[]>([]);
@@ -1957,24 +1965,42 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
   // 리포트 구성(Setting>리포트 — Report Composition) + STT 엔진(Setting>AI 정책)
   const [aiPanelOn, setAiPanelOn] = useState(true);
   const [autoApply, setAutoApply] = useState(true);
-  const [openNext, setOpenNext] = useState(false);  // 저장(확정) 후 다음 레포트 열기
+  const [openNext, setOpenNext] = useState(false);  // 확정(Approve) 후 다음 레포트 열기
+  // 저장(Save) 뒤 동작 — 다음/이전/없음. 규칙은 lib/readingAuto 한 곳(판독창과 같은 설정을 본다).
+  const [autoSave, setAutoSave] = useState<AutoAfterSave>(AUTO_AFTER_SAVE_DEFAULT);
   const [sttEngine, setSttEngine] = useState("browser");
   useEffect(() => {
     api.getSetting("report.prefs").then((r) => {
-      const v = r.value as { ai_panel?: boolean; auto_apply?: boolean; open_next_after_save?: boolean };
+      const v = r.value as { ai_panel?: boolean; auto_apply?: boolean; open_next_after_save?: boolean;
+                             auto_after_save?: unknown };
       if (v.ai_panel !== undefined) setAiPanelOn(v.ai_panel);
       if (v.auto_apply !== undefined) setAutoApply(v.auto_apply);
       if (v.open_next_after_save !== undefined) setOpenNext(v.open_next_after_save);
+      setAutoSave(readAutoAfterSave(v.auto_after_save));
     }).catch(() => {});
     api.getSetting("ai.policy").then((r) => {
       setSttEngine(((r.value as { stt_engine?: string }).stt_engine) ?? "browser");
     }).catch(() => {});
   }, []);
 
-  const insertText = (text: string) => setDraft((d) => {
+  /** 상용구를 리포트에 넣는다 — **판독은 READING(findings), 결론은 CONCLUSION(impression)**.
+   *  예전에는 결론 칸에만 한 덩어리로 붙여서, 판독 소견으로 등록한 문장이 결론에 섞였다.
+   *  둘 다 비어 있으면 아무것도 하지 않는다(빈 줄만 늘리지 않는다). */
+  const insertText = (p: PhraseParts) => setDraft((d) => {
     if (!d) return d;
+    const reading = String(p?.reading_text ?? "").trim();
+    const concl = String(p?.text ?? "").trim();
+    if (!reading && !concl) return d;
     const n = structuredClone(d);
-    if (n.impression[0]) n.impression[0].statement += (n.impression[0].statement ? " " : "") + text;
+    if (reading) {
+      // 판독 소견은 줄 단위로 쌓인다 — 문장을 이어 붙이면 어느 소견인지 구분되지 않는다.
+      n.findings = [...(n.findings ?? []),
+                    { organ: p?.name || tr("판독"), observation: reading, severity: "normal", measurements: [] }];
+    }
+    if (concl) {
+      if (!n.impression?.length) n.impression = [{ rank: 1, statement: "", confidence: "low", codes: [] }];
+      n.impression[0].statement += (n.impression[0].statement ? " " : "") + concl;
+    }
     return n;
   });
 
@@ -1992,7 +2018,7 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
           stream.getTracks().forEach((t) => t.stop());
           try {
             const r = await sttTranscribe(new Blob(chunks, { type: "audio/webm" }));
-            if (r.text) insertText(r.text);
+            if (r.text) insertText({ text: r.text });   // 음성 전사는 결론 칸으로(기존 동작)
           } catch (e) { alert(e instanceof Error ? e.message : tr("STT 실패")); }
         };
         recRef.current = rec;
@@ -2017,7 +2043,7 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
       const texts: string[] = [];
       for (let i = ev.resultIndex; i < ev.results.length; i++) texts.push(ev.results[i][0].transcript);
       const text = texts.join(" ").trim();
-      if (text) insertText(text);
+      if (text) insertText({ text });                   // 음성 전사는 결론 칸으로(기존 동작)
     };
     rec.onend = () => setStt(false);
     rec.onerror = () => setStt(false);
@@ -2043,17 +2069,9 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
     });
   }, [detail, autoApply]);
 
-  // 상용구 삽입 훅 (E-좌 → E-중)
-  useEffect(() => {
-    insertRef.current = (text: string) => {
-      setDraft((d) => {
-        if (!d) return d;
-        const next = structuredClone(d);
-        if (next.impression[0]) next.impression[0].statement += (next.impression[0].statement ? "\n" : "") + text;
-        return next;
-      });
-    };
-  }, [insertRef]);
+  // 상용구 삽입 훅 (E-좌 → E-중) — 위 insertText 와 **같은 함수**를 쓴다.
+  // 예전에는 여기 따로 구현이 있어 결론 칸에만 붙였다. 두 벌이면 '삽입' 버튼과 단축키가 갈린다.
+  useEffect(() => { insertRef.current = insertText; });
 
   if (!detail) {
     return <PanelBox title="REPORT"><Empty>{tr("검사를 선택하세요")}</Empty></PanelBox>;
@@ -2070,7 +2088,14 @@ function ReportPanel({ detail, onChanged, insertRef, onNav }: {
   const save = async () => {
     if (!current || !draft) return;
     setBusy(true);
-    try { await api.updateReport(current.id, draft); onChanged(); } finally { setBusy(false); }
+    try {
+      await api.updateReport(current.id, draft);
+      onChanged();
+      // 저장 규칙(Setting>판독>기본 설정>자동화 규칙) — **저장에 성공했을 때만** 넘어간다.
+      // 여기 도달했다는 것이 곧 성공이다(실패는 예외로 빠진다). 목록 끝이면 onNav 가 조용히 멈춘다.
+      const dir = navAfterSave(readAutoAfterSave(autoSave), true);
+      if (dir && onNav) onNav(dir);
+    } finally { setBusy(false); }
   };
   const finalize = async () => {
     if (!current || !draft) return;
@@ -3200,8 +3225,9 @@ export function Worklist() {
   activeTabIdRef.current = activeTabId;
   const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
   const [selNodeId, setSelNodeId] = useState<string | null>(null);
-  const insertRef = useRef<((t: string) => void) | null>(null);
-  const phraseShortcutRef = useRef<Record<string, string>>({});  // Alt+키 → 상용구 본문
+  const insertRef = useRef<((p: PhraseParts) => void) | null>(null);
+  // 단축키 조합 → 상용구 **항목 전체**(판독·결론을 각자의 칸에 넣어야 하므로 본문만으로는 부족하다)
+  const phraseShortcutRef = useRef<Record<string, PhraseParts>>({});
   // 레이아웃 크기 — 스플리터 드래그로 조절, 로그인 계정에 뷰어별 저장(로밍)
   const [sizes, setSizes] = useState<LayoutSizes>(DEFAULT_SIZES);
   const sizesRef = useRef(sizes);
@@ -5058,7 +5084,7 @@ export function Worklist() {
                                      : k === "comment" ? { width: sizes.commentW, flexShrink: 0 }
                                      : { flex: 1.6 }}>
                   {k === "thumb" ? <ThumbnailPanel detail={selected} onOpen={() => void doAction("viewdraft")} />
-                    : k === "std" ? <PhrasePanel onInsert={(t) => insertRef.current?.(t)} current={selected}
+                    : k === "std" ? <PhrasePanel onInsert={(p) => insertRef.current?.(p)} current={selected}
                                                  shortcutRef={phraseShortcutRef} />
                     : k === "comment" ? <CommentMemoPanel detail={selected} onChanged={onChanged} />
                     : <ReportPanel detail={selected} onChanged={onChanged} insertRef={insertRef} onNav={navPatient} />}
