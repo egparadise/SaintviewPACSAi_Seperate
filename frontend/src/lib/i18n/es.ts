@@ -2955,5 +2955,13 @@ const d: Record<string, string> = {
   "단축키 — 조합 그대로 눌러 등록 (Alt·Ctrl·Shift 조합, 숫자·알파벳 단독도 가능)": "Atajo: pulse la combinación para registrarla (combinaciones Alt/Ctrl/Shift; también un dígito o letra sueltos)",
   "같은 조합이 이미 있습니다": "Esa combinación ya está en uso",
   "단축키 조합 (예: Alt+A · Ctrl+1 · Ctrl+Shift+D). 한 글자만 쓰면 Alt+ 가 붙습니다 — 비우면 없음": "Combinación de teclas (p. ej. Alt+A, Ctrl+1, Ctrl+Shift+D). Un solo carácter recibe el prefijo Alt+; vacío = ninguna",
+  "내가 판독한 과거 검사 전부": "Todos los estudios previos que he informado",
+  "같은 장비로 촬영한 것만": "Solo los de la misma modalidad",
+  "같은 부위를 촬영한 것만": "Solo los de la misma región",
+  "찾는 중…": "Buscando…",
+  "내 판독": "Mis informes",
+  "Compare — 비교할 과거 검사를 어디서 고를까 (T-View 전용)": "Compare: de dónde elegir los estudios previos (solo T-View)",
+  "비교세트 시작 상태": "Conjunto de comparación: estado inicial",
+  "비교세트 후보는 Compare 기준과 **무관하게 언제나 '내가 판독한 과거 검사'** 에서 고릅니다(사용자 확정). 위 '비교세트 시작 상태' 는 T-View 워크리스트를 열 때의 체크 상태이고, 패널에서 그 자리에서 바꿀 수 있습니다(그 변경은 저장되지 않습니다).": "Los candidatos del conjunto de comparación proceden siempre de estudios **que usted ha informado**, con independencia del criterio Compare anterior. El estado inicial se aplica al abrir la lista de T-View; puede cambiarlo en el panel (ese cambio no se guarda).",
 };
 export default d;

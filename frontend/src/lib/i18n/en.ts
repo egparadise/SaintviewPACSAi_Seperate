@@ -2955,5 +2955,13 @@ const d: Record<string, string> = {
   "단축키 — 조합 그대로 눌러 등록 (Alt·Ctrl·Shift 조합, 숫자·알파벳 단독도 가능)": "Shortcut — press the combination to register (Alt/Ctrl/Shift combos; a bare digit or letter also works)",
   "같은 조합이 이미 있습니다": "That combination is already used",
   "단축키 조합 (예: Alt+A · Ctrl+1 · Ctrl+Shift+D). 한 글자만 쓰면 Alt+ 가 붙습니다 — 비우면 없음": "Shortcut combination (e.g. Alt+A, Ctrl+1, Ctrl+Shift+D). A single character gets Alt+ prefixed — leave empty for none",
+  "내가 판독한 과거 검사 전부": "All prior studies I have read",
+  "같은 장비로 촬영한 것만": "Only those acquired on the same modality",
+  "같은 부위를 촬영한 것만": "Only those of the same body part",
+  "찾는 중…": "Searching…",
+  "내 판독": "My reads",
+  "Compare — 비교할 과거 검사를 어디서 고를까 (T-View 전용)": "Compare — where to pick prior studies from (T-View only)",
+  "비교세트 시작 상태": "Comparison set — initial state",
+  "비교세트 후보는 Compare 기준과 **무관하게 언제나 '내가 판독한 과거 검사'** 에서 고릅니다(사용자 확정). 위 '비교세트 시작 상태' 는 T-View 워크리스트를 열 때의 체크 상태이고, 패널에서 그 자리에서 바꿀 수 있습니다(그 변경은 저장되지 않습니다).": "Comparison-set candidates always come from studies **you have read**, regardless of the Compare basis above. The initial state applies when the T-View worklist opens; you can change it on the spot in the panel (that change is not saved).",
 };
 export default d;

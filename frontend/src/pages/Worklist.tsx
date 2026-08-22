@@ -82,6 +82,11 @@ import {
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
 import { sameFamily } from "../lib/phraseGroups";
 import { comboLabel, matchesCombo } from "../lib/hotkey";
+import {
+  COMPARE_SET_LABEL, DEFAULT_TV_COMPARE, candidateQuery, pickFresh, readTvCompare,
+  type TvCompareCfg,
+} from "../lib/compareSet";
+import { isAll as isAllPrior, nextPriorFilter, type PriorFilter } from "../lib/priorFilter";
 import { liveFetchLimit, liveMaybeTruncated, liveStatusOnServer } from "../lib/worklistQuery";
 import { collectDict, dictEmpty, isCenterName, loadDict, saveDict } from "../lib/centerDict";
 import { showToast } from "../lib/toast";
@@ -1592,13 +1597,34 @@ function PriorStudiesGrid({ detail, onAddCompare, onOpen }: {
 
 /* ── [D-우] 비교세트 (Complementary set) ─────────── */
 interface CompareItem { id: number; study_uid: string; study_date: string; modality: string; study_desc: string }
-function ComparisonSetGrid({ items, current, onRemove, onOpenCompare, onMerge }: {
+function ComparisonSetGrid({ items, current, onRemove, onOpenCompare, onMerge, tvCfg, onAdd }: {
   items: CompareItem[];
   current: StudyDetail | null;
   onRemove: (uid: string) => void;
   onOpenCompare: () => void;
   onMerge: () => void;
+  /** T-View 전용 설정(설정>워크리스트>T-View). 후보의 기간·시작 체크 상태를 정한다. */
+  tvCfg: TvCompareCfg;
+  onAdd: (e: CompareItem) => void;
 }) {
+  /* 후보 — **언제나 판독의사 기준**이다(2026-08-22 사용자 확정).
+     설정>판독의 Compare 기준이 '환자 기준' 이어도 이 패널은 reader 로 묻는다.
+     그 규칙은 lib/compareSet.candidateQuery 한 곳에 있다. */
+  const [filter, setFilter] = useState<PriorFilter>(tvCfg.set);
+  const [cands, setCands] = useState<CompareItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => { setFilter(tvCfg.set); }, [tvCfg.set]);
+  useEffect(() => {
+    if (!current) { setCands([]); return; }
+    let alive = true;
+    setLoading(true);
+    api.compareCandidates(current.id, candidateQuery(tvCfg, filter))
+      .then((r) => { if (alive) setCands(r.items as unknown as CompareItem[]); })
+      .catch(() => { if (alive) setCands([]); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [current, filter, tvCfg]);
+  const fresh = pickFresh(cands, items);
   return (
     <PanelBox title={tr("비교세트 (Complementary set)")} right={
       <span style={{ display: "flex", gap: 4 }}>
@@ -1613,6 +1639,25 @@ function ComparisonSetGrid({ items, current, onRemove, onOpenCompare, onMerge }:
         </button>
       </span>
     }>
+      {/* 후보를 좁히는 축 — 라벨은 사용자가 쓴 그대로(Modality·Bodypart·All).
+          둘 다 끄면 All 이다(내가 판독한 과거 검사 전부). 규칙은 lib/priorFilter 재사용. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 8px",
+                    fontSize: 10.5, borderBottom: "1px solid var(--border)" }}>
+        {(["modality", "bodyPart", "all"] as const).map((k) => (
+          <label key={k} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}
+                 title={k === "all" ? tr("내가 판독한 과거 검사 전부")
+                        : k === "modality" ? tr("같은 장비로 촬영한 것만")
+                        : tr("같은 부위를 촬영한 것만")}>
+            <input type="checkbox"
+                   checked={k === "all" ? isAllPrior(filter) : filter[k]}
+                   onChange={() => setFilter((c) => nextPriorFilter(c, k))} />
+            {COMPARE_SET_LABEL[k]}
+          </label>
+        ))}
+        <span style={{ marginLeft: "auto", color: "var(--text-secondary)" }}>
+          {loading ? tr("찾는 중…") : `${tr("내 판독")} ${fresh.length}`}
+        </span>
+      </div>
       <table className="grid-table">
         <thead><tr><th>{tr("검사일")}</th><th>MOD</th><th>{tr("검사명")}</th><th></th></tr></thead>
         <tbody>
@@ -1623,7 +1668,17 @@ function ComparisonSetGrid({ items, current, onRemove, onOpenCompare, onMerge }:
               <td><button style={{ padding: "0 7px", fontSize: 11 }} onClick={() => onRemove(e.study_uid)}>✕</button></td>
             </tr>
           ))}
-          {items.length === 0 && (
+          {/* 내가 판독한 과거 검사 — 아직 담기지 않은 것만. ＋ 로 세트에 넣는다.
+              담긴 줄과 섞이지 않게 흐리게 그린다(무엇이 이미 담긴 것인지 한눈에 구분되어야 한다). */}
+          {fresh.map((e) => (
+            <tr key={`c:${e.study_uid}`} style={{ opacity: 0.72 }}>
+              <td>{e.study_date}</td><td>{e.modality}</td>
+              <td title={e.study_desc}>{e.study_desc}</td>
+              <td><button title={tr("비교세트에 추가")} style={{ padding: "0 7px", fontSize: 11 }}
+                          onClick={() => onAdd(e)}>＋</button></td>
+            </tr>
+          ))}
+          {items.length === 0 && fresh.length === 0 && !loading && (
             <tr><td colSpan={4} style={{ color: "var(--text-secondary)" }}>
               {tr("과거검사를 더블클릭해 추가 → 현재 검사와 함께 뷰어에서 비교")}
             </td></tr>
@@ -2999,6 +3054,9 @@ export function Worklist() {
   //   하이라이트는 네트워크를 기다릴 이유가 없다 — 화면 상태는 화면 상태로만 정한다.
   const [focusId, setFocusId] = useState<number | null>(null);
   const [compareSet, setCompareSet] = useState<CompareItem[]>([]);
+  /** T-View 워크리스트 전용 Compare 설정(2026-08-22 사용자 확정) — 워크리스트 공통과 **별도** 그릇
+   *  (worklist.prefs.compare_by_viewer.ty). 다른 뷰어를 건드리지 않는 것이 요구의 핵심이다. */
+  const [tvCompare, setTvCompare] = useState<TvCompareCfg>(DEFAULT_TV_COMPARE);
   const [refreshKey, setRefreshKey] = useState(0);
   // 목록 갱신 정책 — 기본은 **수동**(SEARCH 를 눌러야 갱신). 설정 > 환경에서 자동/초 지정.
   // 예전에는 값이 없으면 10초 자동이었고, Live 는 사용자 설정과 무관하게 5초로 강제됐다.
@@ -3321,6 +3379,8 @@ export function Worklist() {
         by_viewer?: { sv?: string[] | null; ty?: string[] | null; infi?: string[] | null };
         panel_order?: { d?: string[]; e?: string[] };
       };
+      // T-View 전용 Compare 설정(2026-08-22) — 공통 설정과 별도 그릇이라 여기서 따로 읽는다
+      setTvCompare(readTvCompare(r.value));
       // 원본 prefs 보관 — 뷰어별 해석/병합 저장의 기준값(panels_by_viewer/sizes_by_viewer 포함)
       wlPrefsRef.current = (r.value ?? {}) as Record<string, unknown>;
       // 구 설정 이관: refresh_mode 가 없으면 auto_refresh_sec 으로 유추한다.
@@ -4969,8 +5029,10 @@ export function Worklist() {
                                     onAddCompare={(e) => setCompareSet((prev) =>
                                       prev.some((c) => c.study_uid === e.study_uid) ? prev : [...prev, e])} />
                 ) : (
-                  <ComparisonSetGrid items={compareSet} current={selected}
+                  <ComparisonSetGrid items={compareSet} current={selected} tvCfg={tvCompare}
                                      onRemove={(uid) => setCompareSet((p) => p.filter((c) => c.study_uid !== uid))}
+                                     onAdd={(e) => setCompareSet((p) =>
+                                       p.some((c) => c.study_uid === e.study_uid) ? p : [...p, e])}
                                      onOpenCompare={openCompare} onMerge={doMerge} />
                 )}
             </DraggablePanel>

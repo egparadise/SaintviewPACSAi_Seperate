@@ -19,6 +19,10 @@ import { COMBINE_RULE_DEFAULT, readCombineRule, type CombineRule } from "../lib/
 import { AUTO_AFTER_SAVE_DEFAULT, AUTO_AFTER_SAVE_ITEMS, readAutoAfterSave,
          type AutoAfterSave } from "../lib/readingAuto";
 import { groupByModality } from "../lib/phraseGroups";
+import {
+  COMPARE_SET_LABEL, DEFAULT_TV_COMPARE, readTvCompare, writeTvCompare, type TvCompareCfg,
+} from "../lib/compareSet";
+import { isAll as isAllPrior, nextPriorFilter } from "../lib/priorFilter";
 import { comboLabel, comboOf, findConflict, isModifierKey, isValidCombo, storeCombo } from "../lib/hotkey";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
 import { setSttEnabled } from "../lib/sttLang";
@@ -370,6 +374,9 @@ export function SettingsModal({ role, onClose, scope = "viewer", initialPage, in
   // Compare 기준 — report.prefs.compare. 뷰어 3종이 이 값을 기본값으로 쓴다.
   // (이름이 cmpCfg 가 아닌 이유: 그 이름은 이미 Compare **표시 방식**(다중모니터·라벨) 설정이 쓴다)
   const [cmpBasis, setCmpBasis] = useState<CompareCfg>(DEFAULT_COMPARE);
+  /** T-View 워크리스트 전용 Compare(2026-08-22 사용자 확정) — **공통 설정과 별도 그릇**
+   *  (worklist.prefs.compare_by_viewer.ty). 여기서 바꾼 값이 다른 뷰어에 번지면 안 된다. */
+  const [tvCmp, setTvCmp] = useState<TvCompareCfg>(DEFAULT_TV_COMPARE);
   const [rdOpts, setRdOpts] = useState<Record<string, unknown>>({
     always_report_window: false, phrase_backup_min: 10,
     open_next_after_save: false, save_alert: false, auto_insert_prior: false,
@@ -483,6 +490,8 @@ export function SettingsModal({ role, onClose, scope = "viewer", initialPage, in
       if (bv) setWlBy(bv);
       const pbv = (r.value as { panels_by_viewer?: { sv?: Record<string, boolean> | null; infi?: Record<string, boolean> | null } }).panels_by_viewer;
       if (pbv) setWlPanelsBy(pbv);
+      // T-View 전용 Compare — 공통 설정과 별도 그릇이라 따로 읽는다(2026-08-22)
+      setTvCmp(readTvCompare(r.value));
       const v = r.value as {
         auto_refresh_sec?: number; refresh_mode?: string; default_status?: string; columns?: string[];
         find_fields?: string[]; dbl_action?: "viewer2d" | "ohif";
@@ -760,7 +769,9 @@ export function SettingsModal({ role, onClose, scope = "viewer", initialPage, in
     if (h2d.moved) setH2dMigrated((n) => n + h2d.moved);
     setH2dPending(h2d.pending);
     // 병합 저장 — 드래그 panel_order 등 다른 키를 덮어쓰지 않도록 현재 서버 값과 합친다
-    const cur = (await api.getSetting("worklist.prefs").catch(() => ({ value: {} }))).value;
+    const cur0 = (await api.getSetting("worklist.prefs").catch(() => ({ value: {} }))).value;
+    // T-View 전용 칸만 갈아 끼운다 — 공통 설정·다른 뷰어 값은 그대로 둔다(요구의 핵심)
+    const cur = writeTvCompare(cur0, tvCmp);
     await api.putSetting("worklist.prefs",
       { ...cur, refresh_mode: refreshMode, auto_refresh_sec: refreshSec, default_status: defaultStatus, columns,
         by_viewer: wlBy, panels_by_viewer: wlPanelsBy,
@@ -2137,6 +2148,65 @@ export function SettingsModal({ role, onClose, scope = "viewer", initialPage, in
               const colDefault = vk === "ty" ? columns : DEFAULT_COLUMNS;
               return (
                 <>
+                  {/* T-View 전용 Compare(2026-08-22 사용자 확정) — 워크리스트 공통과 **별도**로
+                      T-View 워크리스트에서만 동작한다. 저장 그릇도 따로다
+                      (worklist.prefs.compare_by_viewer.ty). */}
+                  {vk === "ty" && (
+                    <Group title={tr("Compare — 비교할 과거 검사를 어디서 고를까 (T-View 전용)")}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {(["patient", "reader"] as CompareBasisKind[]).map((k) => (
+                          <label key={k} style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                            <input type="radio" name="tvcmpbasis" checked={tvCmp.basis.basis === k}
+                                   onChange={() => setTvCmp((c) => ({ ...c, basis: { ...c.basis, basis: k } }))}
+                                   style={{ marginTop: 3 }} />
+                            <span>
+                              <b style={{ fontSize: 12.5 }}>{tr(BASIS_LABEL[k])}</b>
+                              <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                                {k === "patient"
+                                  ? tr("같은 환자(차트번호)의 과거 검사에서 고릅니다. 판독 비교의 기본입니다.")
+                                  : tr("내가 판독했던 검사 전체에서 고릅니다 — 환자가 달라도 됩니다. 내가 이미 판독하며 본 검사만 모집단이라 새로 열리는 자료는 없습니다.")}
+                              </div>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                      <Row label={tr("좁히기")}>
+                        <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                            <input type="checkbox" checked={tvCmp.basis.by_modality}
+                                   onChange={(e) => setTvCmp((c) => ({ ...c, basis: { ...c.basis, by_modality: e.target.checked } }))} />
+                            Modality
+                          </label>
+                          <label style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                            <input type="checkbox" checked={tvCmp.basis.by_body_part}
+                                   onChange={(e) => setTvCmp((c) => ({ ...c, basis: { ...c.basis, by_body_part: e.target.checked } }))} />
+                            Bodypart
+                          </label>
+                        </span>
+                      </Row>
+                      <Row label={tr("기간")}>
+                        <select value={tvCmp.basis.period}
+                                onChange={(e) => setTvCmp((c) => ({ ...c, basis: { ...c.basis, period: e.target.value as ComparePeriod } }))}>
+                          {PERIODS.map((p) => <option key={p} value={p}>{tr(PERIOD_LABEL[p])}</option>)}
+                        </select>
+                      </Row>
+                      <Row label={tr("비교세트 시작 상태")}>
+                        <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                          {(["modality", "bodyPart", "all"] as const).map((k) => (
+                            <label key={k} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+                              <input type="checkbox"
+                                     checked={k === "all" ? isAllPrior(tvCmp.set) : tvCmp.set[k]}
+                                     onChange={() => setTvCmp((c) => ({ ...c, set: nextPriorFilter(c.set, k) }))} />
+                              {COMPARE_SET_LABEL[k]}
+                            </label>
+                          ))}
+                        </span>
+                      </Row>
+                      <div style={{ fontSize: 11, color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                        {tr("비교세트 후보는 Compare 기준과 **무관하게 언제나 '내가 판독한 과거 검사'** 에서 고릅니다(사용자 확정). 위 '비교세트 시작 상태' 는 T-View 워크리스트를 열 때의 체크 상태이고, 패널에서 그 자리에서 바꿀 수 있습니다(그 변경은 저장되지 않습니다).")}
+                      </div>
+                    </Group>
+                  )}
                   <Group title={vLabel + " " + tr("워크리스트 — 뷰어별 그리드 컬럼 (계정별 저장)")}>
                     <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, marginBottom: 8 }}>
                       <input type="checkbox" checked={!ov}

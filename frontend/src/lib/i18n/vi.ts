@@ -2955,5 +2955,13 @@ const d: Record<string, string> = {
   "단축키 — 조합 그대로 눌러 등록 (Alt·Ctrl·Shift 조합, 숫자·알파벳 단독도 가능)": "Phím tắt — nhấn tổ hợp để đăng ký (Alt/Ctrl/Shift; một chữ số hoặc chữ cái đơn cũng được)",
   "같은 조합이 이미 있습니다": "Tổ hợp này đã được dùng",
   "단축키 조합 (예: Alt+A · Ctrl+1 · Ctrl+Shift+D). 한 글자만 쓰면 Alt+ 가 붙습니다 — 비우면 없음": "Tổ hợp phím (vd: Alt+A · Ctrl+1 · Ctrl+Shift+D). Một ký tự đơn sẽ được thêm Alt+ — để trống là không đặt",
+  "내가 판독한 과거 검사 전부": "Tất cả ca chụp trước tôi đã đọc",
+  "같은 장비로 촬영한 것만": "Chỉ những ca cùng thiết bị",
+  "같은 부위를 촬영한 것만": "Chỉ những ca cùng vùng cơ thể",
+  "찾는 중…": "Đang tìm…",
+  "내 판독": "Bài đọc của tôi",
+  "Compare — 비교할 과거 검사를 어디서 고를까 (T-View 전용)": "Compare — chọn ca chụp trước từ đâu (chỉ T-View)",
+  "비교세트 시작 상태": "Bộ so sánh — trạng thái ban đầu",
+  "비교세트 후보는 Compare 기준과 **무관하게 언제나 '내가 판독한 과거 검사'** 에서 고릅니다(사용자 확정). 위 '비교세트 시작 상태' 는 T-View 워크리스트를 열 때의 체크 상태이고, 패널에서 그 자리에서 바꿀 수 있습니다(그 변경은 저장되지 않습니다).": "Ứng viên của bộ so sánh luôn lấy từ các ca **bạn đã đọc**, không phụ thuộc tiêu chí Compare ở trên. Trạng thái ban đầu áp dụng khi mở danh sách T-View; bạn có thể đổi ngay trong bảng (thay đổi đó không được lưu).",
 };
 export default d;
