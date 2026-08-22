@@ -2963,5 +2963,8 @@ const d: Record<string, string> = {
   "Compare — 비교할 과거 검사를 어디서 고를까 (T-View 전용)": "Compare — where to pick prior studies from (T-View only)",
   "비교세트 시작 상태": "Comparison set — initial state",
   "비교세트 후보는 Compare 기준과 **무관하게 언제나 '내가 판독한 과거 검사'** 에서 고릅니다(사용자 확정). 위 '비교세트 시작 상태' 는 T-View 워크리스트를 열 때의 체크 상태이고, 패널에서 그 자리에서 바꿀 수 있습니다(그 변경은 저장되지 않습니다).": "Comparison-set candidates always come from studies **you have read**, regardless of the Compare basis above. The initial state applies when the T-View worklist opens; you can change it on the spot in the panel (that change is not saved).",
+  "이 과거 판독의 Reading·Conclusion 을 현재 판독에 복사": "Copy this prior report's Reading and Conclusion into the current report",
+  "과거 판독을 Reading·Conclusion 에 복사했습니다": "Copied the prior report into Reading and Conclusion",
+  "복사할 판독 내용이 없습니다": "There is no report text to copy",
 };
 export default d;

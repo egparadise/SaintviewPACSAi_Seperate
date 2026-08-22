@@ -15,6 +15,7 @@ import { buildVocab, currentPrefix, mergeVocab, suggestWords } from "../lib/word
 import { t as tr, useLang } from "../lib/i18n";
 import { navAfterSave, readAutoAfterSave } from "../lib/readingAuto";
 import { comboLabel, matchesCombo, storeCombo } from "../lib/hotkey";
+import { appendLine, hasAnyText, splitReport, type ReportParts } from "../lib/reportText";
 import {
   PRIOR_FILTER_LABEL, filterPriors, isAll, loadPriorFilter, nextPriorFilter, savePriorFilter,
   type PriorFilter,
@@ -76,6 +77,8 @@ export function ReportWindow() {
   const [hosp, setHosp] = useState("");                                  // Hospital Comment (= study.memo)
   const [relatedView, setRelatedView] = useState<{ label: string; text: string } | null>(null);
   const [selPast, setSelPast] = useState<number | null>(null);   // History 에서 단일 클릭한 과거 검사(기준·하이라이트)
+  /** 과거 판독을 두 칸으로 가른 것 — ⇆ 복사가 쓴다(미리보기 문자열과 별개). */
+  const [pastParts, setPastParts] = useState<Record<number, ReportParts>>({});
   const [sameCompare, setSameCompare] = useState(false);          // Same Compare — 선택 기준과 같은 장비·검사명만
   /** 과거검사 분류(2026-08-20 사용자 확정) — SameModality · SameBodyPart · All.
    *  ⚠ 뷰어 안 도크(components/ReportDock)에는 넣었는데 **판독창은 별도 컴포넌트**라 빠져 있었다
@@ -183,7 +186,10 @@ export function ReportWindow() {
       try {
         const rr = await api.reports(e.id);
         const fin = rr.items.find((x) => x.status === "finalized") ?? rr.items[0];
-        if (alive) setPastTexts((m) => ({ ...m, [e.id]: fin?.narrative_text ?? "" }));
+        if (!alive) return;
+        setPastTexts((m) => ({ ...m, [e.id]: fin?.narrative_text ?? "" }));
+        // 두 칸으로 가르려면 **원본 SR** 이 필요하다 — 미리보기용 합친 문자열만으로는 가를 수 없다.
+        setPastParts((m) => ({ ...m, [e.id]: splitReport(fin ?? null) }));
       } catch {
         if (alive) setPastTexts((m) => ({ ...m, [e.id]: "" }));
       }
@@ -198,6 +204,18 @@ export function ReportWindow() {
     if (dictField.current === "conclusion") setConclusion(add); else setReading(add);
     setTouched(true);
     setMsg(tr("과거 판독을 현재 판독영역에 복사했습니다"));
+  };
+  /** 과거 판독을 **Reading·Conclusion 각 칸에** 복사한다(2026-08-22 사용자 확정).
+   *  예전 '복사' 는 합쳐진 한 덩어리를 **마지막으로 포커스했던 칸 하나**에만 붙였다 —
+   *  그래서 판독 소견이 결론 칸에 들어가기도 했다(어디로 갈지 예측할 수 없었다).
+   *  가르는 규칙은 lib/reportText 한 곳(화면이 판독문을 펼칠 때와 같은 규칙). */
+  const pasteBoth = (p: ReportParts | undefined) => {
+    if (!p || lockedRef.current || finalizedRef.current) return;
+    if (!hasAnyText(p)) { setMsg(tr("복사할 판독 내용이 없습니다")); return; }
+    if (p.reading.trim()) setReading((prev) => appendLine(prev, p.reading));
+    if (p.conclusion.trim()) setConclusion((prev) => appendLine(prev, p.conclusion));
+    setTouched(true);
+    setMsg(tr("과거 판독을 Reading·Conclusion 에 복사했습니다"));
   };
   const pickPast = (e: RelatedExam) => {
     setSelPast(e.id);
@@ -852,8 +870,9 @@ export function ReportWindow() {
                       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
                         <span style={{ fontSize: 11.5, color: "var(--text-secondary)", flex: 1 }}>{e.study_date}</span>
                         {pastTexts[e.id] ? (
-                          <button onClick={(ev) => { ev.stopPropagation(); pasteReading(pastTexts[e.id]); }}
-                                  title={tr("이 과거 판독을 현재 판독영역에 복사")}
+                          <button onClick={(ev) => { ev.stopPropagation(); pasteBoth(pastParts[e.id]); }}
+                                  disabled={finalized || locked || !hasAnyText(pastParts[e.id])}
+                                  title={tr("이 과거 판독의 Reading·Conclusion 을 현재 판독에 복사")}
                                   className="primary" style={{ fontSize: 10.5, padding: "1px 10px" }}>{tr("복사")}</button>
                         ) : null}
                       </div>
@@ -869,7 +888,14 @@ export function ReportWindow() {
                           {pastTexts[e.id] === undefined ? tr("판독 불러오는 중…")
                             : pastTexts[e.id] ? pastTexts[e.id] : tr("(판독 기록 없음)")}
                         </div>
-                        <span style={{ flexShrink: 0, fontSize: 13, color: "var(--text-secondary)" }}>⇆</span>
+                        {/* ⇆ — 과거 판독을 **Reading·Conclusion 각 칸에** 복사(2026-08-22 사용자 확정).
+                            예전에는 클릭 핸들러가 없는 장식이었다(눌러도 아무 일도 없었다). */}
+                        <button onClick={(ev) => { ev.stopPropagation(); pasteBoth(pastParts[e.id]); }}
+                                disabled={finalized || locked || !hasAnyText(pastParts[e.id])}
+                                title={tr("이 과거 판독의 Reading·Conclusion 을 현재 판독에 복사")}
+                                style={{ flexShrink: 0, fontSize: 13, padding: "0 6px", lineHeight: 1.4,
+                                         background: "transparent", border: "1px solid var(--border)",
+                                         borderRadius: 4, color: "var(--accent)", cursor: "pointer" }}>⇆</button>
                       </div>
                     </div>
                   ))}
