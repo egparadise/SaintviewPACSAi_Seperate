@@ -15,11 +15,17 @@ import {
 import { groupByModality, initialOpenKeys } from "../lib/phraseGroups";
 import { comboLabel, matchesCombo } from "../lib/hotkey";
 import { appendLine, hasAnyText, splitReport, type ReportParts } from "../lib/reportText";
+import {
+  AUTO_AFTER_SAVE_DEFAULT, navAfterSave, readAutoAfterSave, type AutoAfterSave,
+} from "../lib/readingAuto";
 
-export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
+export function ReportDock({ detail, width, onLoadPrior, onStatus, onNav }: {
   detail: StudyDetail;
   width: number;                            // 도크 폭 (viewer.prefs.dockW)
   onLoadPrior: (examId: number) => void;    // 과거검사 비교 로드 — 활성 페인에 표시
+  /** 다음/이전 **검사**로 이동(저장 후 자동화 규칙이 쓴다). 도크의 ◀▶ 는 과거검사 로드라
+   *  다른 기능이다 — 검사 전환은 뷰어만 할 수 있어 상위에서 받는다. */
+  onNav?: (dir: 1 | -1) => void;
   onStatus: (msg: string) => void;          // 상단 상태 표시줄 메시지
 }) {
   useLang();   // 언어 변경 시 리렌더
@@ -30,6 +36,8 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   const [reading, setReading] = useState("");
   const [conclusion, setConclusion] = useState("");
   const [readingTouched, setReadingTouched] = useState(false);
+  /** 저장(Save) 뒤 동작 — 판독창·워크리스트와 **같은 설정**(report.prefs.auto_after_save). */
+  const [autoSave, setAutoSave] = useState<AutoAfterSave>(AUTO_AFTER_SAVE_DEFAULT);
   // 음성 판독(STT) — 마지막 포커스 필드(기본 Reading)에 전사 삽입
   const dictField = useRef<"reading" | "conclusion">("reading");
   const appendDictation = (text: string) => {
@@ -144,6 +152,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     api.getSetting("report.prefs").then((r) => {
       const v = r.value as typeof rdOpts;
       setRdOpts(v);
+      setAutoSave(readAutoAfterSave((v as unknown as { auto_after_save?: unknown }).auto_after_save));
       if (v.panel_tab === "template") setDockTab("read");  // 기본은 판독 — panel_tab은 사이드탭 기본
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -180,6 +189,11 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
       setReadingTouched(false);
       if (rdOpts.save_alert) alert(tr("리포트가 저장되었습니다"));
       else onStatus(tr("리포트 저장됨"));
+      // 자동화 규칙(Setting>판독>기본 설정) — **저장에 성공했을 때만** 다음/이전 검사로.
+      // 판독창·워크리스트와 같은 설정·같은 판정(lib/readingAuto)이다. 셋의 Save 가 달리 굴면
+      // 사용자는 어느 화면에서 저장했는지에 따라 다른 결과를 겪는다.
+      const dir = navAfterSave(autoSave, true);
+      if (dir && onNav) onNav(dir);
     } catch (e) {
       alert(e instanceof Error ? e.message : tr("저장 실패"));
       void syncLock();   // 다른 창에서 잠금 변경(409) 등 — 서버 기준 잠금 상태 재동기화

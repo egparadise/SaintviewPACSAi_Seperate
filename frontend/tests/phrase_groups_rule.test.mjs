@@ -95,3 +95,22 @@ test("배선 — 판독창은 현재 모달리티를 펼치고, 설정은 전부
     assert.ok(!/MODALITY_ORDER\s*=|FAMILIES\s*=/.test(s), `${n}: 분류 규칙을 복제하면 갈린다`);
   }
 });
+
+test("★ 단축키 목록을 그리는 **모든 화면**이 모달리티로 분류한다", () => {
+  const SCREENS = {
+    "설정(Setting>판독>단축키)": "src/pages/SettingsModal.tsx",
+    "판독창(ReportWindow)": "src/pages/ReportWindow.tsx",
+    "뷰어 도크(ReportDock)": "src/components/ReportDock.tsx",
+  };
+  for (const [label, f] of Object.entries(SCREENS)) {
+    const t = src(f);
+    assert.match(t, /groupByModality\(/, `${label}: 분류가 걸려 있어야 한다`);
+    assert.match(t, /from "\.\.\/lib\/phraseGroups"/, `${label}: 규칙은 lib 한 곳`);
+  }
+  // 판독 화면(설정 아님) 둘은 현재 검사 모달리티를 펼친다 — 그림2
+  for (const f of ["src/pages/ReportWindow.tsx", "src/components/ReportDock.tsx"]) {
+    assert.match(src(f), /initialOpenKeys\(\s*\w+,\s*detail\.modality\s*\)/,
+      `${f}: 현재 검사의 모달리티가 펼쳐져 있어야 한다`);
+  }
+});
+

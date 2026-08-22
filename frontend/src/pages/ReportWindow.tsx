@@ -15,6 +15,7 @@ import { buildVocab, currentPrefix, mergeVocab, suggestWords } from "../lib/word
 import { t as tr, useLang } from "../lib/i18n";
 import { navAfterSave, readAutoAfterSave } from "../lib/readingAuto";
 import { comboLabel, matchesCombo, storeCombo } from "../lib/hotkey";
+import { groupByModality, initialOpenKeys } from "../lib/phraseGroups";
 import { appendLine, hasAnyText, splitReport, type ReportParts } from "../lib/reportText";
 import {
   PRIOR_FILTER_LABEL, filterPriors, isAll, loadPriorFilter, nextPriorFilter, savePriorFilter,
@@ -124,6 +125,8 @@ export function ReportWindow() {
   const dictation = useDictation(insertDictation);
   const [histView, setHistView] = useState<Report | null>(null);
   const [phrases, setPhrases] = useState<PhraseRow[]>([]);
+  /** 단축키/템플릿 목록에서 펼쳐 둔 모달리티 그룹. null = 아직 손대지 않음(현재 검사 모달리티가 열린다). */
+  const [openGrp, setOpenGrp] = useState<Set<string> | null>(null);
   // SV70(원 서버) 계정별 단축 상용구·템플릿 — Live 병합(2026-08-10 사용자 확정: 하나처럼).
   // A DB 에 추가되면 다음 갱신(60초)에 그대로 나타난다 — 가져오기(복사)가 아니다.
   const [svPhrases, setSvPhrases] = useState<PhraseRow[]>([]);
@@ -662,6 +665,16 @@ export function ReportWindow() {
   });
   const phraseList = [...phrases, ...localPhrases, ...svPhrases]
     .filter((p) => p.kind === (rightTab === "std" ? "phrase" : "template"));
+  /* 모달리티별 분류(2026-08-21 사용자 확정 — 그림2). 도크·설정과 **같은 lib** 를 쓴다.
+     화면마다 따로 묶으면 같은 단축키가 화면에 따라 다른 그룹에 들어간다. */
+  const phraseGroups = groupByModality(phraseList);
+  // 처음 한 번만 '현재 검사 모달리티(+공통)' 를 펼친다. 그 뒤로는 접고 편 상태를 존중한다.
+  const openKeys = openGrp ?? initialOpenKeys(phraseGroups, detail.modality);
+  const toggleGrp = (k: string) => setOpenGrp(() => {
+    const n = new Set(openKeys);
+    if (n.has(k)) n.delete(k); else n.add(k);
+    return n;
+  });
 
   /** 입력 변화 → 캐럿 앞 조각으로 예측 갱신 — 입력을 이어가면 후보가 좁혀진다 */
   const wcUpdate = (field: "reading" | "conclusion", el: HTMLTextAreaElement) => {
@@ -1063,14 +1076,26 @@ export function ReportWindow() {
                              color: "var(--accent)", fontSize: 15, cursor: "pointer" }}>＋</button>
           </div>
           <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
-            {phraseList.map((p) => (
+            {phraseGroups.map((g) => (
+              <div key={g.key || "__common"}>
+              {/* 그룹 머리 — 클릭하면 접었다 편다. 개수를 함께 보여 준다(그림2). */}
+              <div onClick={() => toggleGrp(g.key)}
+                   style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px",
+                            fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                            background: "var(--bg-elevated)", borderBottom: "1px solid var(--border)",
+                            color: openKeys.has(g.key) ? "var(--accent)" : "var(--text-secondary)" }}>
+                <span style={{ width: 9 }}>{openKeys.has(g.key) ? "−" : "+"}</span>
+                {g.label}
+                <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>({g.items.length})</span>
+              </div>
+              {openKeys.has(g.key) && g.items.map((p) => (
               <div key={p.id}
                    onClick={() => rightTab === "std" ? insertPhrase(p)
                      : setTplPreview((cur) => (cur?.id === p.id ? null : p))}   /* 1회 클릭 = 미리보기 토글 */
                    title={rightTab === "std"
                      ? `${p.reading_text ? `${tr("[판독]")} ${p.reading_text}\n` : ""}${p.text ? `${tr("[결론]")} ${p.text}` : ""}`
                      : tr("클릭=아래 미리보기 · 우측 ◯=적용/해제")}
-                   style={{ padding: "8px 12px", fontSize: 12.5, cursor: "pointer", borderBottom: "1px solid #24282d",
+                   style={{ padding: "8px 12px 8px 20px", fontSize: 12.5, cursor: "pointer", borderBottom: "1px solid #24282d",
                             display: "flex", alignItems: "center", gap: 6,
                             background: rightTab === "tpl" && tplPreview?.id === p.id ? "var(--accent-subtle)" : undefined }}
                    onMouseEnter={(ev) => (ev.currentTarget.style.background = "var(--bg-hover)")}
@@ -1101,6 +1126,8 @@ export function ReportWindow() {
                           color: "#fff",
                         }}>{appliedTpl === p.id ? "✓" : ""}</span>
                 )}
+              </div>
+              ))}
               </div>
             ))}
             {/* 템플릿 미리보기 — 선택한 항목의 판독/결론 내용 */}

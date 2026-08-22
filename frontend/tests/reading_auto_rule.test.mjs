@@ -107,3 +107,32 @@ test("기존 '확정 후 다음' 과 충돌하지 않는다 — 다른 버튼이
   assert.match(s, /확정\(Approve\) 후 다음 레포트 열기/,
     "라벨도 '저장(확정)'이 아니라 확정 전용임을 밝힌다(같은 버튼으로 오해하지 않게)");
 });
+
+/* ── 2026-08-22 전수 점검 — Save 버튼이 있는 화면이 셋이다 ────────────────────
+ * 판독창 / 워크리스트 REPORT 패널 / 뷰어 도크. 셋의 Save 가 달리 굴면 사용자는 **어느 화면에서
+ * 저장했는지에 따라 다른 결과**를 겪는다. 실제로 도크만 규칙이 빠져 있었다(이 점검에서 발견). */
+
+test("★ Save 가 있는 모든 화면이 같은 저장 규칙을 쓴다", () => {
+  const SCREENS = {
+    "판독창(ReportWindow)": "src/pages/ReportWindow.tsx",
+    "워크리스트 REPORT 패널": "src/pages/Worklist.tsx",
+    "뷰어 도크(ReportDock)": "src/components/ReportDock.tsx",
+  };
+  for (const [label, f] of Object.entries(SCREENS)) {
+    const t = src(f);
+    assert.match(t, /navAfterSave\(/, `${label}: 저장 뒤 동작이 걸려 있어야 한다`);
+    assert.match(t, /readAutoAfterSave\(/, `${label}: 같은 설정 키(report.prefs.auto_after_save)`);
+    assert.match(t, /from "\.\.\/lib\/readingAuto"/, `${label}: 판정은 lib 한 곳`);
+  }
+});
+
+test("도크는 검사 전환을 뷰어에서 받는다 — ◀▶ 는 과거검사 로드라 다른 기능이다", () => {
+  const d = src("src/components/ReportDock.tsx");
+  assert.match(d, /onNav\?: \(dir: 1 \| -1\) => void;/, "상위에서 받는 prop");
+  assert.match(d, /if \(dir && onNav\) onNav\(dir\)/);
+  // 뷰어가 실제로 연결했는가 — prop 만 만들고 안 넘기면 조용히 아무 일도 안 한다
+  const v = src("src/pages/Viewer2D.tsx");
+  assert.match(v, /onNav=\{\(d\) => void navPatient\(d\)\}/,
+    "prop 을 만들어 두고 넘기지 않으면 도크 저장만 조용히 멈춘다");
+});
+

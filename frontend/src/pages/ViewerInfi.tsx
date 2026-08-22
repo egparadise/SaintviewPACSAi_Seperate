@@ -8,6 +8,9 @@
 //         Spine Curve(척추 외곡 — 3점+ 더블클릭 종료, 기준선 대비 최대 편위)·Pelvic Tilt(골반 틀어짐 — 2점 수평 대비 각·Δ높이)
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Splitter } from "../lib/Splitter";
+import { COMBINE_RULE_DEFAULT, dropScoutSeries, readCombineRule, type CombineRule } from "../lib/combineRule";
+import { onCmpSync, postCmpCombine, postCmpHello, postCmpScroll, postCmpXlink,
+         type CmpMsg } from "../lib/cmpSync";
 import { t as tr, useLang } from "../lib/i18n";
 
 // Setting(p.12 'Open the setting window of Viewer') — 워크리스트 헤더의 설정과 동일한 설정 창
@@ -374,12 +377,23 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [maximized, setMaximized] = useState<number | null>(null);
   // 시네 기본 간격(초) — 설정>뷰어(viewer.prefs.infi_cine_sec)에서 초기값 변경
   const [cineDefault, setCineDefault] = useState(0.5);
+  /* Combine 규칙(설정>뷰어 **공통**) — SaintViewer 와 같은 키·같은 판정(lib/combineRule).
+     뷰어마다 달리 굴면 "왜 이 뷰어에서는 Scout 이 붙지" 가 된다. */
+  const [combineRule, setCombineRule] = useState<CombineRule>(COMBINE_RULE_DEFAULT);
+  const combineRuleRef = useRef<CombineRule>(COMBINE_RULE_DEFAULT);
+  combineRuleRef.current = combineRule;
   const mediaInputRef = useRef<HTMLInputElement>(null);   // 📂 이미지/동영상 파일 열기
   const [closeMenu, setCloseMenu] = useState(false);
   const [wlPanel, setWlPanel] = useState(false);
   // §3.3 Crosslink 5기능 — 전부 동작: crosslink=마스터, auto_sync=같은 검사, sync_other=다른 검사(과거),
   // scout=활성 페인 현재 이미지 절단선, all_lines=활성 시리즈 전체 절단선
   const [xlink, setXlink] = useState<Record<string, boolean>>({ crosslink: true, auto_sync: true, scout: true });
+  /* 다중 모니터 Compare 동기(2026-08-20 사용자 확정) — SaintViewer 와 **같은 채널·같은 규칙**.
+     한 뷰어만 따라 움직이면 사용자는 '어느 뷰어로 열었는지'에 따라 다른 화면을 본다. */
+  const xlinkRef = useRef(xlink);
+  xlinkRef.current = xlink;
+  /** 원격에서 온 이동인가 — 되받아 다시 쏘면 두 창이 서로 밀며 끝없이 넘어간다(에코 금지). */
+  const cmpRemoteRef = useRef(false);
   // 2D-MG — 유방촬영 좌우 사이 공기 여백 제거(체크 시). 설정: 뷰어 공통 > 2D 행잉 > MG
   const [mgCfg, setMgCfg] = useState<MgCfg>(DEFAULT_MG_CFG);
   const [mgOn, setMgOn] = useState(DEFAULT_MG_CFG.on);
@@ -410,6 +424,8 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   const [cmpRole, setCmpRole] = useState<string>(() => new URLSearchParams(window.location.search).get("cmprole") || "");
   // 비교 활성 여부 — ⇄ Compare 명시 진입 시에만 M/S 라벨(Add/Stack/드래그 제외). slave 창(URL cmprole)은 활성.
   const [cmpActive, setCmpActive] = useState<boolean>(() => !!new URLSearchParams(window.location.search).get("cmprole"));
+  const cmpActiveRef = useRef(cmpActive);
+  cmpActiveRef.current = cmpActive;
   // 비교 기준 검사 uid — 비교를 '시작한 시점의 활성 검사'(탭 전환 후 비교해도 M 이 정확). 미설정=창 배정 검사(detail)
   const [cmpMaster, setCmpMaster] = useState("");
   // 비교 설정 (viewer.prefs.compare) + 다중 모니터 슬롯 사전 캐시(모달 열 때 감지 → 클릭 시 동기 사용, 팝업 허용)
@@ -596,6 +612,7 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
         const oc = (prefsRes.value as { overlay_by_modality?: Record<string, unknown> }).overlay_by_modality;
         if (oc && typeof oc === "object") setOvlCfg(oc);
       }
+      setCombineRule(readCombineRule((prefsRes.value as { combine?: unknown }).combine));
       const mg = readMgCfg(prefsV.mg_hang);
       setMgCfg(mg);
       setMgOn(mg.on);
@@ -1107,6 +1124,12 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
       // 1장짜리(스크롤 불가) 페인에서의 스크롤은 전체 no-op — 동기 타깃만 움직이는 혼란 방지
       const mp = ps[i];
       if (mp?.series && mp.series.instances.length <= 1) return ps;
+      // ★ 다중 모니터 Compare — 옆 모니터 창에도 같은 이동을 알린다. I-View 는 좌표 정합이 없어
+      //   델타로만 맞춘다(받는 쪽이 geom 없으면 '같은 만큼' 넘긴다). 조건: 비교 중 + Crosslink +
+      //   원격에서 온 이동이 아닐 것.
+      if (!cmpRemoteRef.current && cmpActiveRef.current && xlinkRef.current.crosslink) {
+        postCmpScroll(delta, null, ps[i]?.studyUid);
+      }
       return ps.map((p, k) => {
       // §3.3: crosslink 마스터 ON 일 때 — auto_sync=같은 검사 페인, sync_other=다른 검사(과거) 페인 동기
       const sameExam = p.studyUid === ps[i]?.studyUid;
@@ -1187,6 +1210,11 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
           cineLast.current[k] = now;
           changed = true;
           const step = p.il.r * p.il.c;
+          // 시네도 옆 모니터와 함께 넘어가야 한다(사용자 요구: 삼각형 sec 플레이 버튼).
+          // 창마다 타이머를 따로 돌리면 몇 장 지나 위치가 벌어진다 — 재생 중인 창의 tick 을 따른다.
+          if (!cmpRemoteRef.current && cmpActiveRef.current && xlinkRef.current.crosslink) {
+            postCmpScroll(step, null, p.studyUid);
+          }
           return { ...p, index: (p.index + step) % p.series.instances.length };
         });
         return changed ? next : ps;
@@ -1195,6 +1223,60 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** 다른 모니터 창에서 온 스크롤 — 이 창의 **영상이 있는 페인 전부**를 같은 만큼 넘긴다.
+   *  슬레이브 창은 대개 1페인이라 사실상 그 한 장이 대상이다. */
+  const applyRemoteScroll = useCallback((delta: number) => {
+    cmpRemoteRef.current = true;
+    setPanes((ps) => {
+      let moved = false;
+      const next = ps.map((p) => {
+        if (!p.series || p.series.instances.length <= 1) return p;
+        const len = p.series.instances.length;
+        const idx = (((p.index + delta) % len) + len) % len;
+        if (idx === p.index) return p;
+        moved = true;
+        return { ...p, index: idx };
+      });
+      return moved ? next : ps;
+    });
+    cmpRemoteRef.current = false;
+  }, []);
+
+  // 비교 창끼리의 방송 구독 — 한 번만 건다(최신값은 ref 로 본다).
+  const combineAllRef = useRef<((pi: number) => void) | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    const off = onCmpSync((m: CmpMsg) => {
+      switch (m.kind) {
+        case "scroll":
+          // 비교 창이 아니거나 Crosslink 가 꺼져 있으면 따라가지 않는다(일반 창을 끌고 다니지 않기)
+          if (!cmpActiveRef.current || !xlinkRef.current.crosslink) return;
+          applyRemoteScroll(m.delta);
+          break;
+        case "combine":
+          if (!cmpActiveRef.current || !m.on) return;
+          combineAllRef.current?.(activeRef.current);
+          break;
+        case "xlink":
+          if (!cmpActiveRef.current) return;
+          setXlink((x) => ({ ...x, ...m.xlink }));
+          break;
+        case "hello":
+          // 늦게 뜬 슬레이브가 방송을 놓쳤을 수 있다 — 현재 동기 상태를 알려 준다
+          if (cmpActiveRef.current) postCmpXlink(xlinkRef.current);
+          break;
+      }
+    });
+    if (new URLSearchParams(window.location.search).get("cmprole")) postCmpHello();
+    return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Crosslink 계열 체크가 바뀌면 옆 모니터에도 같은 상태를 건다(한쪽만 켜져 있으면 안 따라온다)
+  useEffect(() => {
+    if (cmpActiveRef.current) postCmpXlink(xlink);
+  }, [xlink]);
 
   const say = (m: string) => { setToast(m); setTimeout(() => setToast(""), 2500); };
 
@@ -2509,16 +2591,26 @@ export function ViewerInfi({ detail, onClose, addDetail, stackDetail, keySops, w
   };
   // Combine all(대상 페인) — 툴바 버튼·Circle Menu 용: 현재 검사 전체 (영상)시리즈를 지정 페인에 결합.
   const combineAllInto = (pi: number) => {
-    const src = series.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
-    if (!src.length) { say(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return; }
+    const raw = series.filter((s) => !["SR", "KO", "PR", "SEG"].includes(s.modality) && s.instances.length > 0);
+    if (!raw.length) { say(tr("Combine 취소 — 결합할 영상 시리즈가 없습니다")); return; }
+    // 설정>뷰어 공통에서 켜둔 모달리티만 Scout(정위) 시리즈를 미리 뻔다. 판정은 lib 한 곳.
+    const { kept: src, dropped: skipped } =
+      dropScoutSeries(raw, curD.modality, combineRuleRef.current);
     if (src.length === 1) { say(tr("Combine 취소 — 시리즈가 1개뿐입니다(결합할 대상 없음)")); return; }
     snapCombine(pi);
     const merged = buildCombined(
       [...src].sort((a, b) => a.series_number - b.series_number).map((s) => ({ s, studyUid: curD.study_uid })));
     upd(pi, { series: merged, index: 0, studyUid: curD.study_uid });
     setActive(pi);
-    say(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}`);
+    // 비교 중이면 옆 모니터의 짝(과거검사 창)도 함께 결합한다(M/S 양쪽 — 사용자 요구).
+    if (!cmpRemoteRef.current && cmpActiveRef.current) postCmpCombine(true);
+    const skip = skipped.length
+      ? ` · ${tr("Scout 제외")} ${skipped.map((d) => `S${d.series_number}`).join(",")}`
+      : "";
+    say(`Combine all — ${src.length}${tr("개 시리즈")} ${merged.instances.length}${tr("장을 한 시리즈처럼 결합(연속 스크롤 · 다시 누르면 해제)")}${skip}`);
   };
+
+  combineAllRef.current = combineAllInto;
 
   // Prev/Next(§3.1) — 이 모니터 배정 탭(navFilter) 목록에서 현재 검사의 위/아래로,
   // 이미 열린 검사(이 창 exams + 공유 sv_infi_exams)는 건너뛰고 다음 미열림으로 (요청 2번).

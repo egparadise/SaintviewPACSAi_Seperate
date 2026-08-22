@@ -117,3 +117,39 @@ test("전용 채널 — 환자 동기(sv_sync)와 섞지 않는다", () => {
     "비교 동기는 초당 여러 번 오간다(시네) — 환자 전환 채널과 섞으면 서로를 방해한다");
   assert.match(mod, /typeof BroadcastChannel !== "undefined"/, "미지원 환경에서도 죽지 않는다");
 });
+
+/* ── 2026-08-22 전수 점검 ──────────────────────────────────────────────────
+ * 두 뷰어 모두 옆 모니터에 비교 창을 띄운다(placeCompareSlaves). 그런데 창끼리의 동기는
+ * SaintViewer 에만 있어, I-View 로 열면 M/S 가 따로 놀았다 — 사용자에겐 같은 'Compare' 다.
+ * I-View 에는 좌표 정합(spatialSync)이 없어 델타로만 맞춘다. 그건 lib 가 이미 허용한다
+ * (geom=null → '같은 만큼' 넘김). */
+
+test("★ Compare 를 가진 **모든 뷰어**가 창끼리 동기한다", () => {
+  const VIEWERS = {
+    "SaintViewer/T-View(Viewer2D)": "src/pages/Viewer2D.tsx",
+    "I-View(ViewerInfi)": "src/pages/ViewerInfi.tsx",
+  };
+  for (const [label, f] of Object.entries(VIEWERS)) {
+    const t = src(f);
+    assert.match(t, /from "\.\.\/lib\/cmpSync"/, `${label}: 같은 채널`);
+    assert.match(t, /postCmpScroll\(/, `${label}: 스크롤을 알린다`);
+    assert.match(t, /postCmpXlink\(/, `${label}: Crosslink 상태를 알린다`);
+    assert.match(t, /postCmpCombine\(/, `${label}: Combine 을 알린다`);
+    assert.match(t, /postCmpHello\(\)/, `${label}: 늦게 뜬 슬레이브 구제`);
+    assert.match(t, /onCmpSync\(/, `${label}: 받는다`);
+    // 에코 금지 — 없으면 두 창이 서로 밀며 끝없이 넘어간다
+    assert.match(t, /cmpRemoteRef\.current/, `${label}: 원격 이동을 되쏘지 않는다`);
+    // 수신 게이트 — 비교 창이 아니면 따라가지 않는다
+    assert.match(t, /!cmpActiveRef\.current \|\| !xlinkRef\.current\.crosslink/,
+      `${label}: 일반 창을 끌고 다니면 안 된다`);
+  }
+});
+
+test("I-View 시네도 옆 모니터와 함께 넘어간다 — 창마다 타이머를 돌리지 않는다", () => {
+  const inf = src("src/pages/ViewerInfi.tsx");
+  const i = inf.indexOf("cineLast.current[k] = now");
+  assert.ok(i > 0, "시네 틱을 찾지 못했다");
+  assert.match(inf.slice(i, i + 700), /postCmpScroll\(step, null/,
+    "시네가 스크롤과 같은 방송을 타야 마우스 휠·플레이가 한 규칙으로 움직인다");
+});
+

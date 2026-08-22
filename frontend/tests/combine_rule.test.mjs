@@ -159,3 +159,24 @@ test("백엔드가 ImageType 을 시리즈에 싣는다 — 로컬·Live 양쪽"
   assert.match(live, /"00080008"/, "Live 는 v2 메타에서 뽑는다");
   assert.match(live, /"image_type":/);
 });
+
+/* ── 2026-08-22 전수 점검 ──────────────────────────────────────────────────
+ * 설정 이름이 '뷰어 **공통**' 인데 SaintViewer 만 규칙을 따랐다. I-Viewer 는 Combine all 이
+ * 따로 구현돼 있어(buildCombined 를 각자 부른다) Scout 이 그대로 맨 앞에 붙었다.
+ * 사용자는 같은 체크박스를 켜 두고 뷰어에 따라 다른 결과를 봤다. */
+
+test("★ Combine 을 가진 **모든 뷰어**가 같은 규칙을 지난다", () => {
+  const VIEWERS = {
+    "SaintViewer(Viewer2D)": "src/pages/Viewer2D.tsx",
+    "I-Viewer(ViewerInfi)": "src/pages/ViewerInfi.tsx",
+  };
+  for (const [label, f] of Object.entries(VIEWERS)) {
+    const t = src(f);
+    assert.match(t, /dropScoutSeries\(/, `${label}: Combine all 이 규칙을 지나야 한다`);
+    assert.match(t, /from "\.\.\/lib\/combineRule"/, `${label}: 판정은 lib 한 곳`);
+    assert.match(t, /readCombineRule\(/, `${label}: 같은 설정 키(viewer.prefs.combine)`);
+    assert.match(t, /tr\("Scout 제외"\)/, `${label}: 뺀 시리즈를 알린다`);
+    assert.ok(!/SCOUT_DESC_RE|looksScoutByName\s*=/.test(t), `${label}: 판정 복제 금지`);
+  }
+});
+

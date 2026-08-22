@@ -81,6 +81,7 @@ import {
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
 import { sameFamily } from "../lib/phraseGroups";
+import { appendLine, hasAnyText, splitReport } from "../lib/reportText";
 import { comboLabel, matchesCombo } from "../lib/hotkey";
 import {
   AUTO_AFTER_SAVE_DEFAULT, navAfterSave, readAutoAfterSave, type AutoAfterSave,
@@ -4322,7 +4323,10 @@ export function Worklist() {
         }
         break;
       case "copyreport": {
-        // ③ report_copy(UBPACS-Z): 동일 환자 최근 확정 판독을 현재 초안 Conclusion에 복사
+        // ③ report_copy(UBPACS-Z): 동일 환자의 최근 확정 판독을 현재 초안으로 복사.
+        // 2026-08-22 사용자 확정: **Reading 과 Conclusion 모두** 가 각자의 칸으로 간다.
+        // 예전에는 impression 만 가져와 과거 소견(findings)이 통째로 사라졌다 —
+        // 판독창 ⇆ 버튼과 같은 기능인데 결과가 달랐다(규칙은 lib/reportText 한 곳).
         if (!target) break;
         const d = await api.study(target.id);
         for (const rel of d.related_exams) {
@@ -4330,14 +4334,21 @@ export function Worklist() {
           const prior = (await api.reports(rel.id)).items.find((r) => r.status === "finalized");
           const cur = (await api.reports(target.id)).items[0];
           if (prior && cur && cur.status !== "finalized") {
+            const p = splitReport(prior);
+            if (!hasAnyText(p)) { alert(tr("과거 판독에 넣을 내용이 없습니다.")); break; }
             const sr = structuredClone(cur.sr_json);
-            const copied = prior.sr_json.impression.map((i) => i.statement).join("\n");
-            sr.impression[0].statement =
-              (sr.impression[0].statement ? sr.impression[0].statement + "\n" : "") +
-              `[과거판독 복사 ${rel.study_date}]\n${copied}`;
+            const tag = `[${tr("과거판독")} ${rel.study_date}]`;
+            if (p.reading) {
+              sr.findings = [...(sr.findings ?? []),
+                             { organ: tag, observation: p.reading, severity: "normal", measurements: [] }];
+            }
+            if (p.conclusion) {
+              sr.impression[0].statement =
+                appendLine(sr.impression[0].statement, `${tag}\n${p.conclusion}`);
+            }
             await api.updateReport(cur.id, sr);
             onChanged();
-            alert(`${tr("과거 확정 판독")}(${rel.study_date})${tr("을 Conclusion에 복사했습니다.")}`);
+            alert(`${tr("과거 확정 판독")}(${rel.study_date})${tr("을 Reading·Conclusion 에 복사했습니다.")}`);
           }
           break;
         }

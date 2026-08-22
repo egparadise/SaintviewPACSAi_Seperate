@@ -5779,6 +5779,7 @@ export function Viewer2D({ detail, onClose, addDetail, stackDetail, keySops, wit
             머물러 있으면 다른 검사의 판독을 그 환자 것으로 오인한다(안전 문제). */}
         {prefs.reportDock && !reportCollapsed && (
           <ReportDock detail={examDetails[activeExamId] ?? detail} width={prefs.dockW}
+                      onNav={(d) => void navPatient(d)}
                       onLoadPrior={(id) => {
                         // Setting>판독 '과거검사 비교 표시' — monitor: 인접 모니터(다음, 끝번이면 이전) 창.
                         // 실패/단일/미감지 시 Layout(1:2 분할 loadPrior)로 폴백. 라벨: 이 창=M, 인접 창=S1.
