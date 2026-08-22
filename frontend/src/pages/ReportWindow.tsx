@@ -379,15 +379,11 @@ export function ReportWindow() {
   const initText = (r: Report | null) => {
     setHistView(null);
     setTouched(false);
-    if (!r) { setReading(""); setConclusion(""); return; }
-    const sr = r.sr_json;
-    const lines: string[] = [];
-    if (sr.comparison?.summary) lines.push(`[비교] ${sr.comparison.summary}`);
-    for (const f of sr.findings ?? []) {
-      lines.push(`${f.organ ? f.organ + ": " : ""}${f.observation}${f.severity === "critical" ? " [CRITICAL]" : ""}`);
-    }
-    setReading(lines.join("\n"));
-    setConclusion((sr.impression ?? []).map((i) => i.statement).join("\n"));
+    // 가르는 규칙은 lib/reportText 한 곳 — 여기 자체 구현이 있으면 "펼쳐 본 것"과
+    // "복사한 것"이 달라 보인다(같은 판독문인데 화면마다 다르면 어느 쪽이 맞는지 알 수 없다).
+    const p = splitReport(r);
+    setReading(p.reading);
+    setConclusion(p.conclusion);
   };
 
   const [navLeft, setNavLeft] = useState<"past" | "recent">("past");  // Setting>정책

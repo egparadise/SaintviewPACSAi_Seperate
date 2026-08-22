@@ -20,7 +20,14 @@ import { fileURLToPath } from "node:url";
 import { appendLine, hasAnyText, splitReport } from "../src/lib/reportText.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const r = readFileSync(join(ROOT, "src/pages/ReportWindow.tsx"), "utf8");
+const src = (f) => readFileSync(join(ROOT, f), "utf8");
+const r = src("src/pages/ReportWindow.tsx");
+/** 과거 판독을 보여 주는 화면들 — 같은 기능이 두 곳에 있으므로 **함께** 확인한다.
+ *  (2026-08-21 에 한쪽만 고쳐 빠뜨린 전례가 있다 — 리포트 30 참조.) */
+const SCREENS = {
+  "판독창(ReportWindow)": "src/pages/ReportWindow.tsx",
+  "뷰어 도크(ReportDock)": "src/components/ReportDock.tsx",
+};
 
 test("★ SR 을 두 칸으로 가른다 — findings→Reading, impression→Conclusion", () => {
   const rep = {
@@ -92,4 +99,25 @@ test("가르는 규칙은 lib 한 곳 — 화면 펼침과 복사가 갈리지 �
   assert.match(r, /import \{ appendLine, hasAnyText, splitReport, type ReportParts \} from "\.\.\/lib\/reportText"/);
   assert.match(r, /setPastParts\(\(m\) => \(\{ \.\.\.m, \[e\.id\]: splitReport\(fin \?\? null\) \}\)\)/,
     "미리보기용 합친 문자열과 별개로 **원본 SR** 을 갈라 둔다");
+});
+
+test("★ 과거 판독을 보여 주는 **모든 화면**에 복사가 있고, 같은 규칙을 쓴다", () => {
+  for (const [label, f] of Object.entries(SCREENS)) {
+    const t = src(f);
+    assert.match(t, /const pasteBoth = /, `${label}: 두 칸 복사 함수`);
+    assert.match(t, /setReading\(\(prev\) => appendLine\(prev, p\.reading\)\)/, `${label}: Reading`);
+    assert.match(t, /setConclusion\(\(prev\) => appendLine\(prev, p\.conclusion\)\)/, `${label}: Conclusion`);
+    assert.match(t, /from "\.\.\/lib\/reportText"/, `${label}: 규칙은 lib 한 곳`);
+    // 자체 분리 구현이 남아 있으면 화면마다 같은 판독문이 달라 보인다
+    assert.ok(!/\[비교\] \$\{sr\.comparison\.summary\}/.test(t),
+      `${label}: 판독문을 가르는 코드를 복제하면 갈린다`);
+  }
+});
+
+test("도크도 확정 상태에서는 복사하지 않는다", () => {
+  const d = src("src/components/ReportDock.tsx");
+  const i = d.indexOf("const pasteBoth = ");
+  const body = d.slice(i, i + 600);
+  assert.match(body, /finalizedDock/, "확정된 판독을 덮어쓰면 안 된다");
+  assert.match(body, /hasAnyText\(p\)/, "넣을 것이 없으면 아무 일도 하지 않는다");
 });

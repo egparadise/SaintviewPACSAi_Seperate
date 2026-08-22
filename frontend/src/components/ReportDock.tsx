@@ -14,6 +14,7 @@ import {
 } from "../lib/priorFilter";
 import { groupByModality, initialOpenKeys } from "../lib/phraseGroups";
 import { comboLabel, matchesCombo } from "../lib/hotkey";
+import { appendLine, hasAnyText, splitReport, type ReportParts } from "../lib/reportText";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   detail: StudyDetail;
@@ -38,6 +39,14 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     lastTypedRef.current = Date.now();
   };
   const dictation = useDictation(appendDictation);
+  /** 과거 판독을 **Reading·Conclusion 각 칸에** 복사한다(2026-08-22 사용자 확정).
+   *  판독창(ReportWindow)과 같은 규칙·같은 동작이다 — 같은 일을 하는 버튼이 화면마다 다르면
+   *  어느 쪽이 맞는지 알 수 없다. */
+  const pasteBoth = (p: ReportParts | undefined) => {
+    if (!p || !hasAnyText(p) || finalizedDock) return;
+    if (p.reading.trim()) { setReading((prev) => appendLine(prev, p.reading)); setReadingTouched(true); }
+    if (p.conclusion.trim()) setConclusion((prev) => appendLine(prev, p.conclusion));
+  };
   // 뷰어 팔레트 Rec(딕테이션) → STT 전사 텍스트 삽입 가드는 ref로 최신값 참조(선언 순서 무관)
   const dictGateRef = useRef(false);
   const [histView, setHistView] = useState<Report | null>(null);
@@ -119,15 +128,10 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   const initDockText = (r: Report | null) => {
     setHistView(null);
     setReadingTouched(false);
-    if (!r) { setReading(""); setConclusion(""); return; }
-    const sr = r.sr_json;
-    const lines: string[] = [];
-    if (sr.comparison?.summary) lines.push(`[비교] ${sr.comparison.summary}`);
-    for (const f of sr.findings ?? []) {
-      lines.push(`${f.organ ? f.organ + ": " : ""}${f.observation}${f.severity === "critical" ? " [CRITICAL]" : ""}`);
-    }
-    setReading(lines.join("\n"));
-    setConclusion((sr.impression ?? []).map((i) => i.statement).join("\n"));
+    // 가르는 규칙은 lib/reportText 한 곳 — 판독창·도크·복사가 같은 결과를 내야 한다.
+    const p = splitReport(r);
+    setReading(p.reading);
+    setConclusion(p.conclusion);
   };
 
   /* 리포트/상용구/판독 설정 로드 — 검사 전환 시 재로드 */
@@ -293,14 +297,9 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
     api.reports(examId).then((r) => {
       const rp = r.items[0];
       if (!rp) { setPriorRpt((m) => ({ ...m, [examId]: "none" })); return; }
-      const sr = rp.sr_json;
-      const lines: string[] = [];
-      if (sr.comparison?.summary) lines.push(`[비교] ${sr.comparison.summary}`);
-      for (const f of sr.findings ?? []) lines.push(`${f.organ ? f.organ + ": " : ""}${f.observation}`);
-      setPriorRpt((m) => ({ ...m, [examId]: {
-        reading: lines.join("\n"),
-        conclusion: (sr.impression ?? []).map((i) => i.statement).join("\n"),
-      } }));
+      // 가르는 규칙은 lib/reportText 한 곳 — 여기 자체 구현이 있어 판독창과 갈려 있었다
+      // (CRITICAL 표시가 여기만 빠져 있었다). 두 벌이면 같은 판독문이 화면마다 달라 보인다.
+      setPriorRpt((m) => ({ ...m, [examId]: splitReport(rp) }));
     }).catch(() => setPriorRpt((m) => ({ ...m, [examId]: "none" })));
   };
   useEffect(() => {
@@ -522,6 +521,13 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
                   {priorRpt[e.id] === "none" && <span style={{ color: "var(--text-secondary)" }}>{tr("이 검사의 판독이 없습니다")}</span>}
                   {typeof priorRpt[e.id] === "object" && (
                     <>
+                      {/* 과거 판독을 현재 판독에 복사 — 판독창의 ⇆ 와 같은 동작 */}
+                      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 3 }}>
+                        <button onClick={(ev) => { ev.stopPropagation(); pasteBoth(priorRpt[e.id] as ReportParts); }}
+                                disabled={finalizedDock || !hasAnyText(priorRpt[e.id] as ReportParts)}
+                                title={tr("이 과거 판독의 Reading·Conclusion 을 현재 판독에 복사")}
+                                style={{ fontSize: 10.5, padding: "1px 8px" }}>⇆ {tr("복사")}</button>
+                      </div>
                       <div style={{ color: "var(--text-secondary)", fontWeight: 700, marginBottom: 2 }}>Reading</div>
                       <div>{(priorRpt[e.id] as { reading: string }).reading || "-"}</div>
                       <div style={{ color: "var(--text-secondary)", fontWeight: 700, margin: "6px 0 2px" }}>Conclusion</div>
