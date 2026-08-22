@@ -2952,5 +2952,8 @@ const d: Record<string, string> = {
   "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Cette combinaison dépasse la limite de volets (10×10) — réduisez la division des séries",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Cette combinaison dépasse la limite de volets (10×10) — réduisez la division des examens",
   "받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다": "Limite de récupération atteinte — affinez les conditions (période, modalité…) pour ne rien manquer",
+  "단축키 — 조합 그대로 눌러 등록 (Alt·Ctrl·Shift 조합, 숫자·알파벳 단독도 가능)": "Raccourci — appuyez sur la combinaison pour l'enregistrer (Alt/Ctrl/Maj ; un chiffre ou une lettre seuls conviennent aussi)",
+  "같은 조합이 이미 있습니다": "Cette combinaison est déjà utilisée",
+  "단축키 조합 (예: Alt+A · Ctrl+1 · Ctrl+Shift+D). 한 글자만 쓰면 Alt+ 가 붙습니다 — 비우면 없음": "Combinaison de touches (ex. Alt+A, Ctrl+1, Ctrl+Maj+D). Un seul caractère reçoit le préfixe Alt+ — vide = aucune",
 };
 export default d;

@@ -19,6 +19,7 @@ import { COMBINE_RULE_DEFAULT, readCombineRule, type CombineRule } from "../lib/
 import { AUTO_AFTER_SAVE_DEFAULT, AUTO_AFTER_SAVE_ITEMS, readAutoAfterSave,
          type AutoAfterSave } from "../lib/readingAuto";
 import { groupByModality } from "../lib/phraseGroups";
+import { comboLabel, comboOf, findConflict, isModifierKey, isValidCombo, storeCombo } from "../lib/hotkey";
 import { DL_DEFAULTS, readDlPrefs, type DlPrefs } from "../lib/dlPrefs";
 import { setSttEnabled } from "../lib/sttLang";
 import { dlSupportReason, opfsLimitBytes, opfsUsage, opfsWipe, type DlUsage } from "../lib/opfsStore";
@@ -3616,7 +3617,7 @@ function ReadingItemEditor({ kind, items, reload, liveItems }: {
                               display: "flex", gap: 6, alignItems: "center",
                               background: sel?.id === p.id ? "var(--accent-subtle)" : undefined }}>
                   <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</span>
-                  {p.shortcut && <span style={{ color: "var(--accent)" }}>Alt+{p.shortcut}</span>}
+                  {p.shortcut && <span style={{ color: "var(--accent)" }}>{comboLabel(p.shortcut)}</span>}
                   <button style={{ padding: "0 6px", fontSize: 11 }} onClick={async (e) => {
                     e.stopPropagation();
                     if (!window.confirm(`'${p.name}'${tr("을 삭제할까요?")}`)) return;
@@ -3668,20 +3669,43 @@ function ReadingItemEditor({ kind, items, reload, liveItems }: {
         </select>
         {kind === "phrase" && (
           <>
-            <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("단축키 코드 (Alt+키)")}</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{tr("단축키 — 조합 그대로 눌러 등록 (Alt·Ctrl·Shift 조합, 숫자·알파벳 단독도 가능)")}</div>
             <div style={{ display: "flex", gap: 4 }}>
-              <input value={f.shortcut} readOnly placeholder={tr("단축키를 입력하세요")}
+              {/* '입력' 을 누른 뒤 원하는 조합을 그대로 누른다. 수식어 키 자체(Alt·Ctrl…)는 무시하고
+                  실제 키가 눌린 순간 조합이 확정된다. 표기는 Ctrl+Shift+Alt+KEY 순서로 고정한다
+                  (순서를 자유롭게 두면 같은 조합이 두 문자열이 되어 중복 검사가 새어 나간다). */}
+              <input value={comboLabel(f.shortcut)} readOnly placeholder={tr("단축키를 입력하세요")}
                      style={{ flex: 1, background: cap ? "var(--accent-subtle)" : undefined }}
                      onKeyDown={(e) => {
                        if (!cap) return;
                        e.preventDefault();
-                       if (/^[a-zA-Z0-9]$/.test(e.key)) { setF((p) => ({ ...p, shortcut: e.key.toUpperCase() })); setCap(false); }
+                       if (isModifierKey(e.key)) return;          // 수식어만 눌린 상태 — 아직 확정 아님
+                       if (e.key === "Escape") { setCap(false); return; }
+                       if (e.key === "Backspace" || e.key === "Delete") {
+                         setF((p) => ({ ...p, shortcut: "" })); setCap(false); return;
+                       }
+                       const combo = comboOf(e);
+                       // 저장 형식으로 바꿔 담는다 — 수식어 없는 단독 키는 구값(글자 하나=Alt+X)과
+                       // 구분되어야 해서 'Key+' 를 붙인다(화면에는 보이지 않는다).
+                       if (isValidCombo(combo)) { setF((p) => ({ ...p, shortcut: storeCombo(combo) })); setCap(false); }
                      }} />
               <button className={cap ? "primary" : ""} style={{ padding: "2px 10px", fontSize: 11.5 }}
                       onClick={(e) => { setCap((c) => !c); (e.currentTarget.previousElementSibling as HTMLInputElement)?.focus(); }}>
                 {tr("입력")}
               </button>
+              <button style={{ padding: "2px 10px", fontSize: 11.5 }}
+                      onClick={() => { setF((p) => ({ ...p, shortcut: "" })); setCap(false); }}>
+                {tr("지우기")}
+              </button>
             </div>
+            {(() => {
+              const c = findConflict(list, f.shortcut, sel?.id);
+              return c ? (
+                <div style={{ fontSize: 11, color: "var(--stat-emergency)" }}>
+                  {tr("같은 조합이 이미 있습니다")} — [{c.modality || tr("공통")}] {c.name}
+                </div>
+              ) : null;
+            })()}
           </>
         )}
         <div style={{ fontSize: 11.5, color: "var(--text-secondary)" }}>{tr(label)} {tr("이름")}</div>

@@ -13,6 +13,7 @@ import {
   type PriorFilter,
 } from "../lib/priorFilter";
 import { groupByModality, initialOpenKeys } from "../lib/phraseGroups";
+import { comboLabel, matchesCombo } from "../lib/hotkey";
 
 export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
   detail: StudyDetail;
@@ -248,8 +249,9 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
       if (combo === (o.key_save ?? "Ctrl+S")) { e.preventDefault(); void dockSaveRef.current(); return; }
       if (combo === (o.key_approve ?? "Ctrl+Shift+A")) { e.preventDefault(); void dockApproveRef.current(); return; }
       if (combo === (o.key_mic ?? "Ctrl+M")) { e.preventDefault(); dictToggleRef.current(); return; }
-      if (e.altKey && !e.ctrlKey && e.key.length === 1) {
-        const hit = ph.find((p) => p.kind === "phrase" && p.shortcut === e.key.toUpperCase());
+      // 상용구 — 모든 조합(2026-08-22 사용자 확정). 판정은 lib/hotkey 한 곳.
+      {
+        const hit = ph.find((p) => p.kind === "phrase" && matchesCombo(e, p.shortcut, e.target));
         if (hit) { e.preventDefault(); dockInsertRef.current(hit); }
       }
     };
@@ -575,7 +577,7 @@ export function ReportDock({ detail, width, onLoadPrior, onStatus }: {
                      onMouseLeave={(ev) => (ev.currentTarget.style.background = "")}>
                   {p.category && <span style={{ color: "var(--text-secondary)" }}>[{tr(p.category)}] </span>}
                   {p.name}
-                  {p.shortcut && <span style={{ color: "var(--accent)", float: "right" }}>Alt+{p.shortcut}</span>}
+                  {p.shortcut && <span style={{ color: "var(--accent)", float: "right" }}>{comboLabel(p.shortcut)}</span>}
                 </div>
               ))}
             </div>

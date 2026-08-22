@@ -80,6 +80,8 @@ import {
   type SearchFav,
 } from "../lib/searchFav";
 import { nextChipSort, nextSort, sortMark, sortRows, type SortState } from "../lib/gridSort";
+import { sameFamily } from "../lib/phraseGroups";
+import { comboLabel, matchesCombo } from "../lib/hotkey";
 import { liveFetchLimit, liveMaybeTruncated, liveStatusOnServer } from "../lib/worklistQuery";
 import { collectDict, dictEmpty, isCenterName, loadDict, saveDict } from "../lib/centerDict";
 import { showToast } from "../lib/toast";
@@ -1711,17 +1713,38 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
   const [fitOnly, setFitOnly] = useState(true); // 현재 검사 맞춤(모달리티 일치 or 공통)
   const [modal, setModal] = useState<"new" | "edit" | null>(null);
   const visible = items.filter((p) =>
-    !fitOnly || !current || !p.modality || p.modality === current.modality);
+    // 상용구만 — 템플릿은 리포트 전체를 갈아 끼우는 것이라 여기 섞이면 안 된다
+    p.kind !== "template"
+    // '맞춤' — 공통이거나 현재 검사와 **같은 계열**. 정확 일치만 보면 DR 검사에서 DX/CR 로
+    // 등록한 상용구가 통째로 사라진다(장비·병원마다 표기가 다르다 — lib/phraseGroups).
+    && (!fitOnly || !current || !p.modality || sameFamily(p.modality, current.modality)));
 
   const load = useCallback(() => {
-    api.phrases().then((r) => {
-      setItems(r.items);
+    // 내 계정 상용구 + SV70(원 서버) 항목을 함께 보여 준다 — 설정>판독>단축키 목록과 같은 구성이다.
+    // 한쪽만 보여 주면 "설정에는 있는데 여기엔 없다"가 된다(2026-08-22 사용자 지적).
+    Promise.allSettled([api.phrases(), api.livePhraseRows()]).then(([mine, live]) => {
+      const a = mine.status === "fulfilled" ? mine.value.items : [];
+      const b = live.status === "fulfilled" ? live.value : [];
+      // 같은 이름·단축키는 내 계정 것이 이긴다(내가 고친 사본이 원본을 가린다)
+      const key = (p: PhraseRow) => `${p.kind}|${p.modality}|${p.name}`;
+      const seen = new Set(a.map(key));
+      const all = [...a, ...b.filter((p) => !seen.has(key(p)))];
+      setItems(all);
       // Alt+단축키 매핑을 루트 키보드 핸들러에 공급
+      // 조합 문자열을 그대로 키로 쓴다(Alt 고정이 아니다 — 2026-08-22 사용자 확정).
       shortcutRef.current = Object.fromEntries(
-        r.items.filter((p) => p.shortcut).map((p) => [p.shortcut, p.text]));
+        all.filter((p) => p.shortcut && p.kind !== "template")
+           .map((p) => [comboLabel(p.shortcut), p.text]));
     }).catch(() => {});
   }, [shortcutRef]);
   useEffect(load, [load]);
+  // ★ 설정에서 단축키를 등록·수정하면 **이 패널도 곧바로 따라간다**.
+  //   예전에는 마운트 때 한 번만 읽어서, 설정에 방금 넣은 항목이 워크리스트를 새로 열기 전까지
+  //   안 보였다 — 사용자에게는 "설정에는 있는데 여기엔 없다" 로 보인다.
+  useEffect(() => {
+    window.addEventListener("sv-settings-saved", load);
+    return () => window.removeEventListener("sv-settings-saved", load);
+  }, [load]);
 
   const del = async () => {
     if (!sel || !window.confirm(`${tr("상용구")} '${sel.name}'${tr("을 삭제할까요?")}`)) return;
@@ -1751,7 +1774,7 @@ function PhrasePanel({ onInsert, current, shortcutRef }: {
                 <tr key={p.id} className={sel?.id === p.id ? "selected" : ""}
                     onClick={() => setSel(p)} onDoubleClick={() => onInsert(p.text)}>
                   <td>{p.category}</td><td title={p.text}>{p.name}</td>
-                  <td style={{ color: "var(--accent)" }}>{p.shortcut && `Alt+${p.shortcut}`}</td>
+                  <td style={{ color: "var(--accent)" }}>{p.shortcut && comboLabel(p.shortcut)}</td>
                 </tr>
               ))}
               {visible.length === 0 && (
@@ -3453,10 +3476,14 @@ export function Worklist() {
   // 판독 단축키(UBPACS-Z §5): Enter=View&Draft, B=일괄검토, E=Emergency, F5=새로고침
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // 상용구 단축키(Alt+키) — 입력 필드 포커스 중에도 동작 (Conclusion에 삽입)
-      if (e.altKey && !e.ctrlKey && !e.metaKey && selected) {
-        const text = phraseShortcutRef.current[e.key.toUpperCase()];
-        if (text) { e.preventDefault(); insertRef.current?.(text); return; }
+      // 상용구 단축키 — **모든 조합**(Alt·Ctrl·Shift, 숫자·알파벳 단독까지. 2026-08-22 사용자 확정).
+      // 수식어가 있는 조합은 입력 필드 포커스 중에도 동작한다(Conclusion 에 삽입하는 것이 본래 쓰임).
+      // 수식어 없는 단독 키는 **글자를 치는 중에는 발동하지 않는다** — 판독문에 끼어들면 안 된다.
+      // 그 판정은 lib/hotkey.matchesCombo 한 곳에 있다.
+      if (selected) {
+        const hit = Object.entries(phraseShortcutRef.current)
+          .find(([combo]) => matchesCombo(e, combo, e.target));
+        if (hit) { e.preventDefault(); insertRef.current?.(hit[1]); return; }
       }
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;

@@ -14,6 +14,7 @@ import { setSttEnabled } from "../lib/sttLang";
 import { buildVocab, currentPrefix, mergeVocab, suggestWords } from "../lib/wordComplete";
 import { t as tr, useLang } from "../lib/i18n";
 import { navAfterSave, readAutoAfterSave } from "../lib/readingAuto";
+import { comboLabel, matchesCombo, storeCombo } from "../lib/hotkey";
 import {
   PRIOR_FILTER_LABEL, filterPriors, isAll, loadPriorFilter, nextPriorFilter, savePriorFilter,
   type PriorFilter,
@@ -274,10 +275,14 @@ export function ReportWindow() {
     if (!name) return;
     const reading = prompt(tr("판독(Reading) 내용 — 비우면 생략")) ?? "";
     const concl = prompt(tr("결론(Conclusion) 내용 — 비우면 생략")) ?? "";
-    const shortcut = rightTab === "std" ? (prompt(tr("Alt+? 단축키 문자 (예: A) — 비우면 없음")) ?? "") : "";
+    // 조합을 그대로 받는다(2026-08-22 사용자 확정). prompt 는 키 캡처를 못 하므로 문자열로 적는다 —
+    // 조합을 눌러 등록하려면 Setting>판독>단축키 설정을 쓰면 된다.
+    const shortcut = rightTab === "std"
+      ? (prompt(tr("단축키 조합 (예: Alt+A · Ctrl+1 · Ctrl+Shift+D). 한 글자만 쓰면 Alt+ 가 붙습니다 — 비우면 없음")) ?? "")
+      : "";
     saveLocalPhrases([...localPhrases, {
       id: -Date.now(), name, text: concl, reading_text: reading,
-      modality: "", body_part: "", category: "내 항목", shortcut: shortcut.trim().toUpperCase().slice(0, 1),
+      modality: "", body_part: "", category: "내 항목", shortcut: storeCombo(shortcut),
       kind: rightTab === "std" ? "phrase" : "template", created_by: user,
     } as PhraseRow]);
   };
@@ -584,8 +589,9 @@ export function ReportWindow() {
                      e.key.length === 1 ? e.key.toUpperCase() : e.key].filter(Boolean).join("+");
       if (combo === (o.key_save ?? "Ctrl+S")) { e.preventDefault(); void saveRef.current(); return; }
       if (combo === (o.key_approve ?? "Ctrl+Shift+A")) { e.preventDefault(); void approveRef.current(); return; }
-      if (e.altKey && !e.ctrlKey && e.key.length === 1) {
-        const hit = ph.find((p) => p.kind === "phrase" && p.shortcut === e.key.toUpperCase());
+      // 상용구 — 모든 조합(2026-08-22 사용자 확정). 판정은 lib/hotkey 한 곳.
+      {
+        const hit = ph.find((p) => p.kind === "phrase" && matchesCombo(e, p.shortcut, e.target));
         if (hit) { e.preventDefault(); insertRef2.current(hit); }
       }
     };
@@ -1052,7 +1058,7 @@ export function ReportWindow() {
                   {p.category && <span style={{ color: "var(--text-secondary)" }}>[{tr(p.category)}] </span>}
                   {p.name}
                 </span>
-                {p.shortcut && <span style={{ color: "var(--accent)", flexShrink: 0 }}>Alt+{p.shortcut}</span>}
+                {p.shortcut && <span style={{ color: "var(--accent)", flexShrink: 0 }}>{comboLabel(p.shortcut)}</span>}
                 {p.id < 0 && (
                   <span title={tr("내 항목 삭제")} style={{ flexShrink: 0, color: "var(--stat-emergency)" }}
                         onClick={(e) => {

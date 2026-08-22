@@ -2952,5 +2952,8 @@ const d: Record<string, string> = {
   "이 조합은 페인 한도(10×10)를 넘습니다 — Series 분할을 줄이세요": "Tổ hợp này vượt giới hạn khung (10×10) — hãy giảm chia chuỗi",
   "이 조합은 페인 한도(10×10)를 넘습니다 — Study 분할을 줄이세요": "Tổ hợp này vượt giới hạn khung (10×10) — hãy giảm chia ca chụp",
   "받은 건수가 상한에 닿았습니다 — 조건(기간·장비 등)을 더 좁히면 놓치는 검사가 없습니다": "Đã chạm giới hạn số bản ghi — hãy thu hẹp điều kiện (khoảng thời gian, thiết bị…) để không bỏ sót",
+  "단축키 — 조합 그대로 눌러 등록 (Alt·Ctrl·Shift 조합, 숫자·알파벳 단독도 가능)": "Phím tắt — nhấn tổ hợp để đăng ký (Alt/Ctrl/Shift; một chữ số hoặc chữ cái đơn cũng được)",
+  "같은 조합이 이미 있습니다": "Tổ hợp này đã được dùng",
+  "단축키 조합 (예: Alt+A · Ctrl+1 · Ctrl+Shift+D). 한 글자만 쓰면 Alt+ 가 붙습니다 — 비우면 없음": "Tổ hợp phím (vd: Alt+A · Ctrl+1 · Ctrl+Shift+D). Một ký tự đơn sẽ được thêm Alt+ — để trống là không đặt",
 };
 export default d;
