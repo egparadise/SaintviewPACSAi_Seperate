@@ -1499,11 +1499,17 @@ export function StudyGrid({
                 )}
                 <td style={{ color: "var(--text-secondary)" }}>{i + 1}</td>
                 {/* tableLayout:fixed 에선 넘치는 내용이 이웃 칸을 밀지 못한다 — 말줄임으로 자른다 */}
-                {columns.map((c) => (
-                  <td key={c} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {COLUMN_DEFS[c]?.render(row)}
-                  </td>
-                ))}
+                {columns.map((c) => {
+                  const cell = COLUMN_DEFS[c]?.render(row);
+                  // 잘린 값은 툴팁으로 읽는다 — 코멘트처럼 긴 값은 한 줄에 다 담기지 않는다.
+                  // 문자열을 그리는 컬럼만(ReactNode 를 그리는 컬럼은 title 에 넣을 수 없다).
+                  return (
+                    <td key={c} title={typeof cell === "string" && cell ? cell : undefined}
+                        style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {cell}
+                    </td>
+                  );
+                })}
               </tr>
               {/* Series → Image 행들 (과거검사 패널과 같은 렌더) */}
               {!treeDisabled && expanded.has(row.id) && (
@@ -2527,7 +2533,7 @@ function CommentMemoPanel({ detail, onChanged }: { detail: StudyDetail | null; o
   const [saved, setSaved] = useState("");
   useEffect(() => { setMemo(detail?.memo ?? ""); setSaved(""); }, [detail]);
   return (
-    <PanelBox title="Comment / MEMO" right={
+    <PanelBox title="Comment" right={
       detail && (
         <MiniBtn onClick={async () => {
           await api.setMemo(detail.id, memo);
@@ -2539,6 +2545,17 @@ function CommentMemoPanel({ detail, onChanged }: { detail: StudyDetail | null; o
     }>
       {!detail ? <Empty>{tr("검사를 선택하세요")}</Empty> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 6, height: "100%" }}>
+          {/* 병원·검사 코멘트(2026-08-22 사용자 확정) — 워크리스트 컬럼과 **같은 값**을 여기서 전문으로
+              읽는다. 그리드는 한 줄로 잘리므로 긴 코멘트는 실질적으로 못 읽었다.
+              값이 없으면 그 줄 자체를 그리지 않는다 — 빈 제목만 늘어서면 오히려 읽기 나쁘다. */}
+          {[["병원 코멘트", detail.hospital_comment],
+            ["검사 코멘트", detail.exam_comment]].map(([lbl, v]) => (v ? (
+            <div key={lbl as string}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}>{tr(lbl as string)}</div>
+              <div style={{ fontSize: 12, color: "var(--text-primary)", maxHeight: 72, overflow: "auto",
+                            whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{v}</div>
+            </div>
+          ) : null))}
           <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--text-secondary)" }}>{tr("COMMENT (임상정보)")}</div>
           <div style={{ fontSize: 12, color: "var(--text-primary)", maxHeight: 56, overflow: "auto" }}>
             {detail.clinical_info || <span style={{ color: "var(--text-secondary)" }}>{tr("(없음)")}</span>}
